@@ -213,6 +213,23 @@ fn existing_configuration_launches_native_workspace_without_setup() {
 }
 
 #[test]
+fn focus_in_repaints_a_screen_the_host_blanked() {
+    let mut ui = Ui::configured(false, true);
+    ui.wait_text("LIVE TOPOLOGY");
+    assert!(
+        String::from_utf8_lossy(&ui.raw).contains("\x1b[?1004h"),
+        "The interface asks to be told when its pane regains focus"
+    );
+    // A multiplexer blanks a pane it hid; the program is never told what the
+    // screen now holds, so a diff against its own buffer repaints nothing.
+    ui.screen.process(b"\x1b[2J\x1b[H");
+    assert!(!ui.screen.screen().contents().contains("LIVE TOPOLOGY"));
+    ui.master.write_all(b"\x1b[I").unwrap();
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.quit();
+}
+
+#[test]
 fn screensaver_is_glitch_art_and_sends_no_pictures_without_the_splash() {
     let mut ui = Ui::with_graphics(true, false, true);
     // Only the screensaver's hint offers "any key".

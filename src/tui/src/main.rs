@@ -8,8 +8,9 @@ mod theme;
 mod view;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
 };
@@ -308,7 +309,12 @@ fn main() -> io::Result<()> {
             splash.started = Instant::now();
         }
     }
-    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        io::stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
     let result = (|| -> io::Result<()> {
         loop {
             loop {
@@ -368,7 +374,12 @@ fn main() -> io::Result<()> {
                             }
                             "external_done" => {
                                 terminal = ratatui::init();
-                                execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+                                execute!(
+                                    io::stdout(),
+                                    EnableMouseCapture,
+                                    EnableBracketedPaste,
+                                    EnableFocusChange
+                                )?;
                                 suspended = false;
                             }
                             "error" => {
@@ -426,8 +437,11 @@ fn main() -> io::Result<()> {
                     end_splash(&mut ui);
                     continue;
                 }
-                if let Event::Resize(..) = event {
-                    // The screen is redrawn from scratch; so is the picture.
+                if matches!(event, Event::Resize(..) | Event::FocusGained) {
+                    // The screen is redrawn from scratch; so is the picture. A
+                    // multiplexer may blank a pane that lost focus, or repaint it
+                    // at the same size, and the diff alone would never refill it.
+                    repaint(&mut terminal)?;
                     if ui.kitty_shown.take().is_some() {
                         graphics::remove(&mut io::stdout(), false)?;
                     }
@@ -523,7 +537,12 @@ fn main() -> io::Result<()> {
     if ui.kitty.is_some() {
         let _ = graphics::remove(&mut io::stdout(), true);
     }
-    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = execute!(
+        io::stdout(),
+        DisableFocusChange,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     result
 }
@@ -623,6 +642,14 @@ fn open_embed(ui: &mut Ui, plan: &Value) {
             ui.status_error = true;
         }
     }
+}
+
+/// Forget what the screen holds and draw every cell again. `Terminal::clear`
+/// asks the terminal where the cursor is, which can fail or stall; resizing to
+/// the current size clears without asking.
+fn repaint(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
+    let size = terminal.size()?;
+    terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))
 }
 
 /// Leave Focus: only the stream client stops; the terminal keeps running.
@@ -738,7 +765,12 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
     if external {
         // The native client takes the real terminal; stop the embedded view first.
         leave_focus(ui);
-        execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste)?;
+        execute!(
+            io::stdout(),
+            DisableFocusChange,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        )?;
         ratatui::restore();
     }
     host.send(json!({"op":"reply","id":dialog.id,"value":value}))?;
