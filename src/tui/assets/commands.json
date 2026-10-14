@@ -1,0 +1,2535 @@
+{
+  "schema_version": 1,
+  "sections": [
+    {
+      "title": "Overview",
+      "icon": "overview",
+      "category": "Work",
+      "summary": "Status at a glance and guided setup."
+    },
+    {
+      "title": "Workspaces",
+      "icon": "workspaces",
+      "category": "Work",
+      "summary": "Live servers, projects, tabs, panes and agent sessions."
+    },
+    {
+      "title": "Sessions",
+      "icon": "sessions",
+      "category": "Work",
+      "summary": "Save, resume, fork or hand off agent sessions."
+    },
+    {
+      "title": "Telegram",
+      "icon": "connections",
+      "category": "Connect",
+      "summary": "Telegram routing, delivery and feeder connections."
+    },
+    {
+      "title": "AI tools",
+      "icon": "tools",
+      "category": "Connect",
+      "summary": "Harnesses, providers, accounts and installation."
+    },
+    {
+      "title": "Hooks",
+      "icon": "hooks",
+      "category": "Connect",
+      "summary": "Lifecycle hooks of each AI tool and the switches they read."
+    },
+    {
+      "title": "Activity",
+      "icon": "activity",
+      "category": "System",
+      "summary": "Recent actions, deliveries, tasks and health."
+    },
+    {
+      "title": "Instances",
+      "icon": "instances",
+      "category": "System",
+      "summary": "Running and saved Daedalus configurations."
+    },
+    {
+      "title": "Armonia",
+      "icon": "armonia",
+      "category": "System",
+      "summary": "Stable agent identities and the organizer that arranges them."
+    },
+    {
+      "title": "Help",
+      "icon": "help",
+      "category": "System",
+      "summary": "Guides and the full command reference."
+    },
+    {
+      "title": "Commands",
+      "icon": "commands",
+      "category": "Find",
+      "summary": "Every control, Telegram command and command-line entry point."
+    }
+  ],
+  "actions": [
+    {
+      "id": "setup",
+      "key": "setup",
+      "page": 0,
+      "group": "Start here",
+      "title": "Guided setup",
+      "note": "Choose tools, sign in and connect optional chat services step by step.",
+      "icon": "setup",
+      "effects": [
+        "guided"
+      ],
+      "aliases": [
+        "wizard",
+        "onboarding",
+        "get started",
+        "first run"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "project.new",
+      "key": "n",
+      "page": 1,
+      "group": "Manage",
+      "title": "Create a project",
+      "note": "Open a new Herdr workspace or tmux session in an existing directory.",
+      "icon": "add",
+      "effects": [
+        "confirm"
+      ],
+      "aliases": [
+        "new workspace",
+        "new session",
+        "tmux new",
+        "herdr workspace"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "workspace.views",
+      "key": "w",
+      "page": 1,
+      "group": "Manage",
+      "title": "Viewers & focus",
+      "note": "Session hierarchy, attached clients and reported server focus.",
+      "icon": "viewers",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "workspace details",
+        "clients",
+        "hierarchy",
+        "attached"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "workspace.socket",
+      "key": "S",
+      "page": 1,
+      "group": "Manage",
+      "title": "Add a tmux server",
+      "note": "Include tmux sockets outside the standard discovery locations.",
+      "icon": "server",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "socket",
+        "tmux socket",
+        "custom server"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "layout.save",
+      "key": "layout-save",
+      "page": 1,
+      "group": "Layouts & workflows",
+      "title": "Save this layout",
+      "note": "Name the current view, pinned terminals and focus; reopen it after a restart.",
+      "icon": "save",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "layout",
+        "save layout",
+        "workspace preset",
+        "save view"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "workflow.new",
+      "key": "workflow-new",
+      "page": 1,
+      "group": "Layouts & workflows",
+      "title": "Create a quick workflow",
+      "note": "Typed steps: open a layout, select terminals, route Telegram.",
+      "icon": "workflow",
+      "effects": [
+        "settings",
+        "workflow"
+      ],
+      "aliases": [
+        "automation",
+        "recipe",
+        "macro",
+        "preset",
+        "workflow"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "terminal.attach",
+      "key": "attach",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Attach and type into a terminal",
+      "note": "Opens the terminal inside Daedalus; type normally. Ctrl+] then D returns; it keeps running.",
+      "icon": "attach",
+      "effects": [
+        "input",
+        "view",
+        "target"
+      ],
+      "aliases": [
+        "attach",
+        "interactive",
+        "embed",
+        "open terminal",
+        "type into"
+      ],
+      "context": "Attach and type",
+      "context_note": "Type into it here. Ctrl+] then D detaches; the terminal keeps running.",
+      "listed": false,
+      "quick": "a"
+    },
+    {
+      "id": "terminal.watch",
+      "key": "watch",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Watch a terminal live",
+      "note": "Follow its screen in Focus view without sending any input.",
+      "icon": "watch",
+      "effects": [
+        "read",
+        "view",
+        "target"
+      ],
+      "aliases": [
+        "observe",
+        "follow",
+        "focus view",
+        "live view",
+        "read only"
+      ],
+      "context": "Watch live (read-only)",
+      "context_note": "",
+      "listed": false,
+      "quick": "w"
+    },
+    {
+      "id": "terminal.native",
+      "key": "native",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Open in the native client",
+      "note": "Full-screen tmux or Herdr client; detach with that tool's own key to return.",
+      "icon": "external",
+      "effects": [
+        "external",
+        "view",
+        "target"
+      ],
+      "aliases": [
+        "tmux attach",
+        "herdr attach",
+        "full screen",
+        "fallback"
+      ],
+      "context": "Open in native client (full screen)",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.fork",
+      "key": "fork",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Fork a live agent",
+      "note": "Start an independent session from this agent's native history in a new pane.",
+      "icon": "fork",
+      "effects": [
+        "launch",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "fork",
+        "branch",
+        "clone agent",
+        "new session from"
+      ],
+      "context": "Fork this agent",
+      "context_note": "Independent native session in a new pane you choose; the original keeps running.",
+      "listed": false,
+      "quick": "f"
+    },
+    {
+      "id": "terminal.duplicate",
+      "key": "duplicate",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Duplicate a terminal view",
+      "note": "Show the same terminal in another session or workspace; no new process.",
+      "icon": "linked",
+      "effects": [
+        "view",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "duplicate",
+        "mirror",
+        "clone view",
+        "link window",
+        "open in another session"
+      ],
+      "context": "Duplicate view",
+      "context_note": "Show this same terminal somewhere else; it is not a new agent.",
+      "listed": false,
+      "quick": "d"
+    },
+    {
+      "id": "terminal.pin",
+      "key": "pin",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Pin a terminal to Tiles",
+      "note": "Keep it first in Tiles and in saved layouts.",
+      "icon": "pin",
+      "effects": [
+        "settings",
+        "target"
+      ],
+      "aliases": [
+        "pin",
+        "favorite",
+        "keep on top"
+      ],
+      "context": "Pin or unpin in Tiles",
+      "context_note": "",
+      "listed": false,
+      "quick": "p"
+    },
+    {
+      "id": "terminal.view",
+      "key": "\n",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "View terminal output",
+      "note": "Read recent output from this exact terminal.",
+      "icon": "output",
+      "effects": [
+        "read",
+        "target"
+      ],
+      "aliases": [
+        "capture",
+        "read",
+        "tail",
+        "preview"
+      ],
+      "context": "View terminal output",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.focus",
+      "key": "f",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Switch to a terminal",
+      "note": "Focus its window, workspace or tab in the terminal manager.",
+      "icon": "focus",
+      "effects": [
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "focus",
+        "jump",
+        "select pane"
+      ],
+      "context": "Switch to this terminal",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.views",
+      "key": "views",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Choose a linked view",
+      "note": "Open a shared terminal through one specific tmux session.",
+      "icon": "linked",
+      "effects": [
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "linked",
+        "session view",
+        "shared pane"
+      ],
+      "context": "Choose a linked view",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.send",
+      "key": "s",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Send text or a command",
+      "note": "Types text into the terminal and submits it after you confirm.",
+      "icon": "send",
+      "effects": [
+        "input",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "type",
+        "prompt",
+        "say",
+        "submit"
+      ],
+      "context": "Send text or a command",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.rename",
+      "key": "N",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Rename a terminal",
+      "note": "Give a pane a recognizable label.",
+      "icon": "rename",
+      "effects": [
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "label",
+        "title",
+        "name pane"
+      ],
+      "context": "Rename terminal",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.organize",
+      "key": "m",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Organize a project",
+      "note": "Rename a project or tab, open a tab, split a pane or close a group.",
+      "icon": "organize",
+      "effects": [
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "split",
+        "new tab",
+        "window",
+        "close tab",
+        "rename project"
+      ],
+      "context": "Organize project",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.interrupt",
+      "key": "k",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Interrupt a command",
+      "note": "Sends Ctrl+C to the terminal after you confirm.",
+      "icon": "interrupt",
+      "effects": [
+        "input",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "ctrl+c",
+        "ctrl-c",
+        "cancel",
+        "stop command"
+      ],
+      "context": "Interrupt current command",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "terminal.close",
+      "key": "x",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "Close a terminal",
+      "note": "Ends the pane after you confirm.",
+      "icon": "close",
+      "effects": [
+        "destructive",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "kill pane",
+        "exit",
+        "remove pane"
+      ],
+      "context": "Close terminal",
+      "context_note": "",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "checkpoint.save",
+      "key": "checkpoint-save",
+      "page": 2,
+      "group": "Checkpoints",
+      "title": "Save a session checkpoint",
+      "note": "Keep a terminal's native session ID, project and optional context.",
+      "icon": "save",
+      "effects": [
+        "confirm",
+        "settings",
+        "target"
+      ],
+      "aliases": [
+        "checkpoint",
+        "snapshot",
+        "bookmark",
+        "save session"
+      ],
+      "context": "Save session checkpoint",
+      "context_note": "Keep its native session ID, project and optional context.",
+      "listed": true,
+      "quick": "c"
+    },
+    {
+      "id": "telegram.details",
+      "key": "t",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Bot & owner details",
+      "note": "Your Telegram user ID, the bot's numeric ID and its username.",
+      "icon": "edit",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "telegram setup",
+        "botfather",
+        "owner id"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "telegram.token",
+      "key": "T",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Save the bot token",
+      "note": "Hidden while typing and stored privately on this computer.",
+      "icon": "secret",
+      "effects": [
+        "secret",
+        "settings"
+      ],
+      "aliases": [
+        "telegram token",
+        "api token"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "telegram.route",
+      "key": "b",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Route a chat to a terminal",
+      "note": "Pick an exact terminal, then the Telegram chat that controls it.",
+      "icon": "route",
+      "effects": [
+        "confirm",
+        "settings",
+        "target"
+      ],
+      "aliases": [
+        "bind",
+        "connect chat",
+        "telegram chat",
+        "feeder target"
+      ],
+      "context": "Connect Telegram chat",
+      "context_note": "Route a Telegram chat to this exact terminal.",
+      "listed": true,
+      "quick": "t"
+    },
+    {
+      "id": "telegram.start",
+      "key": "g",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Start the Telegram connection",
+      "note": "Starts this instance's message feeder after you confirm.",
+      "icon": "start",
+      "effects": [
+        "service",
+        "confirm"
+      ],
+      "aliases": [
+        "start feeder",
+        "poller",
+        "telegram on"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "telegram.stop",
+      "key": "G",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Stop the Telegram connection",
+      "note": "Stops the feeder this configuration started; other services are untouched.",
+      "icon": "stop",
+      "effects": [
+        "service",
+        "confirm"
+      ],
+      "aliases": [
+        "stop feeder",
+        "telegram off"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "tools.choose",
+      "key": "a",
+      "page": 4,
+      "group": "Your AI tools",
+      "title": "Choose my AI tools",
+      "note": "Select the tools or subscriptions you already use.",
+      "icon": "choose",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "subscriptions",
+        "providers",
+        "harnesses"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "tools.signin",
+      "key": "signin",
+      "page": 4,
+      "group": "Your AI tools",
+      "title": "Sign in to an AI tool",
+      "note": "Each tool's own sign-in: browser OAuth, a device code or an API key.",
+      "icon": "signin",
+      "effects": [
+        "external"
+      ],
+      "aliases": [
+        "login",
+        "sign in",
+        "authenticate",
+        "oauth",
+        "account"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "tools.open",
+      "key": "l",
+      "page": 4,
+      "group": "Your AI tools",
+      "title": "Open an AI tool",
+      "note": "Runs the tool's own interface in this terminal.",
+      "icon": "open",
+      "effects": [
+        "external"
+      ],
+      "aliases": [
+        "run tool",
+        "launch"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "system.update",
+      "key": "u",
+      "page": 4,
+      "group": "Maintenance",
+      "title": "Check for updates",
+      "note": "Compare this version with the latest GitHub release. No automatic installation.",
+      "icon": "refresh",
+      "effects": [],
+      "aliases": ["version", "release", "update"],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "tools.profile",
+      "key": "p",
+      "page": 4,
+      "group": "Accounts & installation",
+      "title": "Use an existing account profile",
+      "note": "Point a tool at its existing configuration directory.",
+      "icon": "profile",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "profile",
+        "account",
+        "config directory"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "tools.gateway",
+      "key": "K",
+      "page": 4,
+      "group": "Accounts & installation",
+      "title": "Connect an LLM proxy gateway",
+      "note": "Optional shared provider access; the administrator token stays hidden.",
+      "icon": "gateway",
+      "effects": [
+        "secret",
+        "settings"
+      ],
+      "aliases": [
+        "proxy",
+        "router",
+        "provider gateway"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "hooks.adapter",
+      "key": "hooks-adapter",
+      "page": 5,
+      "group": "Profiles",
+      "title": "Install or remove the memory adapter",
+      "note": "Choose a tool, review the exact commands, then confirm; other hooks stay.",
+      "icon": "install",
+      "effects": [
+        "hooks",
+        "confirm"
+      ],
+      "aliases": [
+        "hindsight",
+        "memory hooks",
+        "harness_memory",
+        "session start"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "hooks.profile",
+      "key": "hooks-profile",
+      "page": 5,
+      "group": "Profiles",
+      "title": "Generic Claude hook profile",
+      "note": "Every event and script of the full profile, and what it needs to run.",
+      "icon": "reference",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "settings-hooks",
+        "claude hooks",
+        "lifecycle events"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "activity.events",
+      "key": "events",
+      "page": 6,
+      "group": "History",
+      "title": "Recent actions & deliveries",
+      "note": "Local control history and delivery receipts.",
+      "icon": "history",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "log",
+        "events",
+        "receipts",
+        "deliveries"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "activity.discovery",
+      "key": "diagnostics",
+      "page": 6,
+      "group": "Diagnostics",
+      "title": "Discovery warnings",
+      "note": "Why a terminal server could not be read.",
+      "icon": "warning",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "errors",
+        "missing terminal",
+        "unavailable server"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "activity.health",
+      "key": "H",
+      "page": 6,
+      "group": "Diagnostics",
+      "title": "Component health",
+      "note": "Detailed technical state for troubleshooting.",
+      "icon": "health",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "status",
+        "doctor",
+        "advanced"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "instances.saved",
+      "key": "saved",
+      "page": 7,
+      "group": "Options",
+      "title": "Show saved configurations",
+      "note": "Reveal configuration folders that have no running process.",
+      "icon": "toggle",
+      "effects": [],
+      "aliases": [
+        "saved",
+        "old configuration",
+        "hidden instances"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "instances.sources",
+      "key": "local-details",
+      "page": 7,
+      "group": "Options",
+      "title": "Configuration sources",
+      "note": "Local paths and detected routing metadata.",
+      "icon": "sources",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "paths",
+        "environment",
+        "local details"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "armonia.plan",
+      "key": "armonia-plan",
+      "page": 8,
+      "group": "Organization",
+      "title": "Preview organization",
+      "note": "Where the registry would place each agent; nothing is moved.",
+      "icon": "layout",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "layout proposal",
+        "categories",
+        "organizer",
+        "plan"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "help.guide",
+      "key": "?",
+      "page": 9,
+      "group": "Guides",
+      "title": "How to use Daedalus",
+      "note": "Navigation, everyday tasks and safety in a few minutes.",
+      "icon": "guide",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "help",
+        "tutorial",
+        "keys",
+        "shortcuts"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "help.reference",
+      "key": "c",
+      "page": 9,
+      "group": "Guides",
+      "title": "Full command reference",
+      "note": "The complete docs/COMMANDS.md: CLI, Telegram and hooks.",
+      "icon": "reference",
+      "effects": [
+        "read"
+      ],
+      "aliases": [
+        "docs",
+        "manual",
+        "commands.md"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    }
+  ],
+  "effects": {
+    "read": [
+      "Read-only",
+      "ok"
+    ],
+    "guided": [
+      "Step by step",
+      "info"
+    ],
+    "confirm": [
+      "Asks before acting",
+      "warn"
+    ],
+    "settings": [
+      "Saves private settings",
+      "accent"
+    ],
+    "secret": [
+      "Hidden input",
+      "accent"
+    ],
+    "service": [
+      "Starts or stops a service",
+      "warn"
+    ],
+    "external": [
+      "Opens a native program",
+      "info"
+    ],
+    "input": [
+      "Types into a terminal",
+      "warn"
+    ],
+    "launch": [
+      "Launches an AI tool",
+      "warn"
+    ],
+    "destructive": [
+      "Can end processes",
+      "danger"
+    ],
+    "target": [
+      "Exact terminal required",
+      "info"
+    ],
+    "view": [
+      "Opens a view; never moves or ends the terminal",
+      "ok"
+    ],
+    "workflow": [
+      "Runs typed steps you can review",
+      "info"
+    ],
+    "hooks": [
+      "Edits a tool's hook file, with a backup",
+      "warn"
+    ]
+  },
+  "terminal_menu": [
+    "terminal.attach",
+    "terminal.watch",
+    "terminal.view",
+    "terminal.focus",
+    "terminal.native",
+    "checkpoint.save",
+    "terminal.fork",
+    "terminal.duplicate",
+    "terminal.views",
+    "terminal.pin",
+    "terminal.send",
+    "telegram.route",
+    "terminal.rename",
+    "terminal.organize",
+    "terminal.interrupt",
+    "terminal.close"
+  ],
+  "quick_labels": {
+    "terminal.attach": "Attach",
+    "terminal.watch": "Watch",
+    "checkpoint.save": "Checkpoint",
+    "terminal.fork": "Fork",
+    "terminal.duplicate": "Duplicate",
+    "terminal.pin": "Pin",
+    "telegram.route": "Telegram"
+  },
+  "references": [
+    {
+      "id": "telegram:menu",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/menu",
+      "description": "Show native Telegram commands",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [
+        "/panel",
+        "/help"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:windows",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/windows",
+      "description": "List verified terminal keys",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [
+        "/jobs"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:new",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/new",
+      "description": "Review a hooked Claude, Pi or Grok launch in a new pane",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:use",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/use",
+      "description": "pick the active session for this chat",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:sessions",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/sessions",
+      "description": "list every chat→session binding",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:status",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/status",
+      "description": "which session this chat routes to",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [
+        "/where"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:say",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/say",
+      "description": "send text to a job (/say [job] <text>) — no LLM routing",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:capture",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/capture",
+      "description": "show a job's pane (live console)",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:busy",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/busy",
+      "description": "is a job mid-turn?",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:pending",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/pending",
+      "description": "queued frames waiting for session",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:kill",
+      "category": "Telegram",
+      "group": "Sessions & jobs",
+      "title": "/kill",
+      "description": "close a job (with confirm)",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:model",
+      "category": "Telegram",
+      "group": "Model & permissions",
+      "title": "/model",
+      "description": "Submit an audited Claude model command",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:effort",
+      "category": "Telegram",
+      "group": "Model & permissions",
+      "title": "/effort",
+      "description": "Submit an audited Claude effort command",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:plan",
+      "category": "Telegram",
+      "group": "Model & permissions",
+      "title": "/plan",
+      "description": "Submit an audited Claude plan command",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:stop",
+      "category": "Telegram",
+      "group": "Keys & interrupts",
+      "title": "/stop",
+      "description": "interrupt (/stop [job]) — Esc, no LLM",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [
+        "/esc"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:enter",
+      "category": "Telegram",
+      "group": "Keys & interrupts",
+      "title": "/enter",
+      "description": "send Enter to job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:interrupt",
+      "category": "Telegram",
+      "group": "Keys & interrupts",
+      "title": "/interrupt",
+      "description": "Confirm Ctrl-C for the selected terminal",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [
+        "/ctrlc"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:keys",
+      "category": "Telegram",
+      "group": "Keys & interrupts",
+      "title": "/keys",
+      "description": "raw tmux keys (/keys [job] Escape Enter …)",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:clear",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/clear",
+      "description": "/clear in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:compact",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/compact",
+      "description": "/compact in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:resume",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/resume",
+      "description": "/resume in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:context",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/context",
+      "description": "/context in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:cost",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/cost",
+      "description": "/cost in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:agents",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/agents",
+      "description": "/agents in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:mcp",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/mcp",
+      "description": "/mcp in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:review",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/review",
+      "description": "/review in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:secreview",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/secreview",
+      "description": "/security-review in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:export",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/export",
+      "description": "/export in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:config",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/config",
+      "description": "/config in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:memory",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/memory",
+      "description": "/memory in the job",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:cc",
+      "category": "Telegram",
+      "group": "Harness slash commands",
+      "title": "/cc",
+      "description": "raw slash to a job (/cc [job] <slash>)",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Requires verified Claude Code 2.1.296 and current idle hook evidence. Native interaction may still be required; a submitted command does not confirm a changed setting.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:quiet",
+      "category": "Telegram",
+      "group": "Chat & live view",
+      "title": "/quiet",
+      "description": "group: mention-only (wake on @bot)",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:listen",
+      "category": "Telegram",
+      "group": "Chat & live view",
+      "title": "/listen",
+      "description": "group: watch all messages again",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:reason",
+      "category": "Telegram",
+      "group": "Chat & live view",
+      "title": "/reason",
+      "description": "Assistant text and completed tool names (DM): on|off|status",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Private direct chats only; Read, Send and Manage required. Future accepted Telegram turns only. Stop, changed routes, revoked permissions and newer local prompts invalidate pending updates. No raw console, hidden reasoning, tool arguments or results.",
+      "aliases": [
+        "/verbose"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:stream",
+      "category": "Telegram",
+      "group": "Chat & live view",
+      "title": "/stream",
+      "description": "Assistant text at verified hook boundaries (DM): on|off|status",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Private direct chats only; Read, Send and Manage required. Future accepted Telegram turns only. Stop, changed routes, revoked permissions and newer local prompts invalidate pending updates. No raw console, hidden reasoning, tool arguments or results.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:rename",
+      "category": "Telegram",
+      "group": "Identity",
+      "title": "/rename",
+      "description": "Rename an agent; keep its permanent numeric ID",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Optional Armonia registry required. Numeric IDs and aliases are preserved. Herdr requires an explicitly configured metadata socket. Uncertain outcomes are observed without replay.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:rename_status",
+      "category": "Telegram",
+      "group": "Identity",
+      "title": "/rename_status",
+      "description": "Verify an ambiguous agent rename",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages. Optional Armonia registry required. Numeric IDs and aliases are preserved. Herdr requires an explicitly configured metadata socket. Uncertain outcomes are observed without replay.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:session_rename",
+      "category": "Telegram",
+      "group": "Identity",
+      "title": "/session_rename",
+      "description": "Rename an actual tmux session",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "id": "telegram:session_rename_status",
+      "category": "Telegram",
+      "group": "Identity",
+      "title": "/session_rename_status",
+      "description": "Verify an ambiguous tmux session rename",
+      "interface": "Telegram command",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Routes bind exact terminal generations and conversations. Terminal mutations require a scoped one-use confirmation; queued submission does not prove completion. This reference does not send messages.",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference"
+    },
+    {
+      "category": "Telegram",
+      "interface": "Telegram command",
+      "aliases": [
+        "/checkpoints"
+      ],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference",
+      "id": "telegram:checkpoint",
+      "title": "/checkpoint",
+      "description": "Saved sessions: list|save|remove|resume|fork",
+      "group": "Goals & checkpoints",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Exact routes, sender grants and one-use confirmations govern mutations. This reference does not send messages."
+    },
+    {
+      "category": "Telegram",
+      "interface": "Telegram command",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference",
+      "id": "telegram:goal",
+      "title": "/goal",
+      "description": "Bound goal: status|arm|pause|resume|complete",
+      "group": "Goals & checkpoints",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Exact routes, sender grants and one-use confirmations govern mutations. This reference does not send messages."
+    },
+    {
+      "category": "Telegram",
+      "interface": "Telegram command",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference",
+      "id": "telegram:pin",
+      "title": "/pin",
+      "description": "Pin the selected exact route",
+      "group": "Routing",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Exact routes, sender grants and one-use confirmations govern mutations. This reference does not send messages."
+    },
+    {
+      "category": "Telegram",
+      "interface": "Telegram command",
+      "aliases": [],
+      "icon": "telegram",
+      "badges": [],
+      "execution": "telegram_reference",
+      "id": "telegram:unpin",
+      "title": "/unpin",
+      "description": "Unpin the selected exact route",
+      "group": "Routing",
+      "detail": "Run with the configured native Telegram bot in an authorized chat. Exact routes, sender grants and one-use confirmations govern mutations. This reference does not send messages."
+    },
+    {
+      "id": "native-reference:43",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus tui",
+      "description": "Open the existing terminal control panel",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:44",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus tui --demo",
+      "description": "Inspect synthetic inventory without private state",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:45",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus setup",
+      "description": "Guided environment, account and connection setup",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:46",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus setup --cli --config-dir ABS --workspace ABS",
+      "description": "Fresh setup and reviewed dependency installation",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:47",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus setup --cli --config-dir ABS --from ABS --import-instance",
+      "description": "Review importing an existing private instance",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:48",
+      "category": "Command line",
+      "group": "Interface",
+      "title": "daedalus inventory --config-dir ABS --json",
+      "description": "Observe configured tmux and Herdr terminals",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:49",
+      "category": "Command line",
+      "group": "Configuration",
+      "title": "daedalus config init --config-dir ABS --workspace ABS",
+      "description": "Preview fresh private settings",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:50",
+      "category": "Command line",
+      "group": "Configuration",
+      "title": "daedalus config import --config-dir ABS --from ABS",
+      "description": "Preview portable settings import",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:51",
+      "category": "Command line",
+      "group": "Configuration",
+      "title": "daedalus config import-instance --config-dir ABS --from ABS",
+      "description": "Stage routes, sessions and durable state without activating services",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:52",
+      "category": "Command line",
+      "group": "Configuration",
+      "title": "daedalus config validate --from ABS",
+      "description": "Validate private settings without displaying credentials",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:53",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal list --config-dir ABS",
+      "description": "Observe current exact terminal identities",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:54",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal capture --config-dir ABS --target ABS",
+      "description": "Read bounded visible terminal output",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:55",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal send --config-dir ABS --target ABS --text TEXT",
+      "description": "Review literal input to one exact terminal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:56",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal command --config-dir ABS --target ABS --text /COMMAND",
+      "description": "Review a literal provider slash command",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:57",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal keys --config-dir ABS --target ABS --keys KEYS",
+      "description": "Review bounded terminal key input",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:58",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal interrupt --config-dir ABS --target ABS",
+      "description": "Review interrupting one exact terminal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:59",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal close --config-dir ABS --target ABS",
+      "description": "Review closing one exact terminal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:60",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal focus --config-dir ABS --target ABS",
+      "description": "Review focusing the selected terminal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:61",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal attach --config-dir ABS --target ABS",
+      "description": "Review independent native terminal attachment",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:62",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal rename --config-dir ABS --target ABS --name NAME",
+      "description": "Review terminal metadata rename",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:63",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal launch --config-dir ABS --target ABS --harness ID",
+      "description": "Review a selected harness in a new terminal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:64",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal wait --config-dir ABS --target ABS --registration ABS",
+      "description": "Wait for verified matching lifecycle evidence",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:65",
+      "category": "Command line",
+      "group": "Terminals",
+      "title": "daedalus terminal control --config-dir ABS --target ABS --registration ABS --command model|effort|plan",
+      "description": "Review an audited native harness control",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:66",
+      "category": "Command line",
+      "group": "Sessions",
+      "title": "daedalus checkpoint list --config-dir ABS",
+      "description": "List saved checkpoint keys",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:67",
+      "category": "Command line",
+      "group": "Sessions",
+      "title": "daedalus checkpoint show --config-dir ABS --key KEY",
+      "description": "Inspect one exact saved checkpoint",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:68",
+      "category": "Command line",
+      "group": "Sessions",
+      "title": "daedalus checkpoint save --config-dir ABS --target ABS --name NAME",
+      "description": "Review saving a session reference",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:69",
+      "category": "Command line",
+      "group": "Sessions",
+      "title": "daedalus checkpoint remove --config-dir ABS --key KEY",
+      "description": "Review removing a saved reference",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:70",
+      "category": "Command line",
+      "group": "Sessions",
+      "title": "daedalus checkpoint spawn --config-dir ABS --key KEY --target ABS --operation resume|fork|handoff --harness ID",
+      "description": "Review verified native resume/fork or context handoff",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:71",
+      "category": "Command line",
+      "group": "Routes",
+      "title": "daedalus route list --config-dir ABS",
+      "description": "List current route references",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:72",
+      "category": "Command line",
+      "group": "Routes",
+      "title": "daedalus route active --config-dir ABS --chat ID",
+      "description": "Inspect one current chat route",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:73",
+      "category": "Command line",
+      "group": "Routes",
+      "title": "daedalus route candidates --config-dir ABS",
+      "description": "Observe exact live route candidates",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:74",
+      "category": "Command line",
+      "group": "Routes",
+      "title": "daedalus route select --config-dir ABS --chat ID --actor ID --target ABS",
+      "description": "Review a permitted exact route selection",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:75",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram config init --file ABS --instance NAME --bot-id ID --token-file ABS",
+      "description": "Preview local service configuration",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:76",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram config import --file ABS --from ABS",
+      "description": "Preview service configuration import",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:77",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram config check --file ABS",
+      "description": "Validate token identity and configured registrations locally",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:78",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram serve --config-dir ABS",
+      "description": "Explicitly run the native Telegram service",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:79",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram cutover preview --config-dir ABS",
+      "description": "Review retiring the source and activating a staged instance",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:80",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram cutover apply --config-dir ABS --approve DIGEST",
+      "description": "Apply an unchanged coordinated handoff",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:81",
+      "category": "Command line",
+      "group": "Telegram",
+      "title": "daedalus telegram cutover rollback --source ABS --approve DIGEST",
+      "description": "Roll back only before destination activation",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:82",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook inspect --registration ABS",
+      "description": "Inspect an exact local hook registration",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:83",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook install --from ABS",
+      "description": "Install a private registration; does not modify provider profiles",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:84",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook run --registration ABS",
+      "description": "Read one bounded native hook event on stdin",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:85",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-preview --help",
+      "description": "Review provider profile installation options",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:86",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-apply --help",
+      "description": "Apply only a reviewed unchanged provider profile",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:87",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-rollback --from ABS_RECEIPT",
+      "description": "Restore a managed profile when its state still matches",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:88",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-remove-preview --from ABS_RECEIPT",
+      "description": "Review removal of unchanged managed hooks",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:89",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-remove --from ABS_RECEIPT --approve DIGEST",
+      "description": "Restore the pre-install profile and disable features",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:90",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook profile-remove-rollback --from ABS_REMOVAL_RECEIPT",
+      "description": "Restore a removal only while its results remain unchanged",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:91",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook launch-preview --from ABS_SPEC",
+      "description": "Review a Claude/Pi/Grok first-launch specification",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:92",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook launch-apply --from ABS_SPEC --expect-sha DIGEST",
+      "description": "Publish a one-use expiring launch plan",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:93",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook launch --from ABS_PLAN",
+      "description": "Register the verified foreground process before provider execution",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:94",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook launch-cleanup-preview --from ABS_PLAN",
+      "description": "Review removing a generated Grok hook file after its process exits",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:95",
+      "category": "Command line",
+      "group": "Hooks",
+      "title": "daedalus hook launch-cleanup --from ABS_PLAN --expect-sha DIGEST",
+      "description": "Remove only the exact reviewed generated hook file",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:96",
+      "category": "Command line",
+      "group": "Goals",
+      "title": "daedalus goal arm --registration ABS",
+      "description": "Read a directive on stdin; wait for the registered hook",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:97",
+      "category": "Command line",
+      "group": "Goals",
+      "title": "daedalus goal status --registration ABS",
+      "description": "Observe waiting, pending or running state",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:98",
+      "category": "Command line",
+      "group": "Goals",
+      "title": "daedalus goal pause --registration ABS",
+      "description": "Pause the bound goal without injecting input",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:99",
+      "category": "Command line",
+      "group": "Goals",
+      "title": "daedalus goal resume --registration ABS",
+      "description": "Re-arm an existing goal; do not launch a process",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:100",
+      "category": "Command line",
+      "group": "Goals",
+      "title": "daedalus goal complete --registration ABS",
+      "description": "Explicitly complete the bound goal",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:101",
+      "category": "Command line",
+      "group": "Memory",
+      "title": "daedalus memory list --config-dir ABS",
+      "description": "Read local memory operation receipts",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:102",
+      "category": "Command line",
+      "group": "Memory",
+      "title": "daedalus memory status --config-dir ABS --key KEY",
+      "description": "Inspect an exact Hindsight receipt",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:103",
+      "category": "Command line",
+      "group": "Memory",
+      "title": "daedalus memory refresh --config-dir ABS --key KEY",
+      "description": "Query one correlated async operation; never upload or retry it",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:104",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus agent-identity preview --config-dir ABS --target ABS --agent NAME --name NEW_BASE --event ID",
+      "description": "Review preserving numeric identity while renaming optional Armonia metadata",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:105",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus agent-identity apply --config-dir ABS --target ABS --agent NAME --name NEW_BASE --event ID --approve DIGEST",
+      "description": "Apply a reviewed exact identity rename",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:106",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus agent-identity status --config-dir ABS --operation OP",
+      "description": "Reconcile uncertain metadata without replaying a rename",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:107",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus diagnostics --config-dir ABS --json",
+      "description": "Read redacted queue, registration and configuration health",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:108",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus job --help",
+      "description": "Native terminal, session and route aliases; explicit targets required",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    },
+    {
+      "id": "native-reference:109",
+      "category": "Command line",
+      "group": "Identity and diagnostics",
+      "title": "daedalus tma --config-dir ABS --target ABS",
+      "description": "Review independent exact-target terminal attachment",
+      "interface": "Native CLI reference",
+      "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
+      "aliases": [],
+      "icon": "terminal",
+      "badges": [],
+      "execution": "shell_reference"
+    }
+  ]
+}

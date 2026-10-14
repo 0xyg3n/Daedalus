@@ -1,0 +1,21 @@
+{
+  "harness": "claude",
+  "version": "2.1.296",
+  "evidence": "Installed built-in registration table and official https://code.claude.com/docs/en/commands; audited 2026-10-13. Contract fixtures are not runtime success receipts.",
+  "commands": [
+    {"input":"clear","literal":"/clear","model_work":false},
+    {"input":"compact","literal":"/compact","model_work":true},
+    {"input":"context","literal":"/context","model_work":false},
+    {"input":"cost","literal":"/cost","model_work":false},
+    {"input":"agents","literal":"/agents","model_work":false},
+    {"input":"mcp","literal":"/mcp","model_work":false},
+    {"input":"review","literal":"/review","model_work":true},
+    {"input":"secreview","literal":"/security-review","model_work":true},
+    {"input":"export","literal":"/export","model_work":false},
+    {"input":"config","literal":"/config","model_work":false},
+    {"input":"memory","literal":"/memory","model_work":false},
+    {"input":"model","literal":"/model","model_work":false},
+    {"input":"effort","literal":"/effort","model_work":false},
+    {"input":"plan","literal":"/plan","model_work":false}
+  ]
+}
