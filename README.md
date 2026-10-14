@@ -20,7 +20,7 @@
 
 <table>
 <tr>
-<td width="24%"><video src="https://github.com/user-attachments/assets/066e90e5-912e-4b17-8e81-a79eeb36dfe7" controls width="100%"></video></td>
+<td width="24%"><video src="https://github.com/user-attachments/assets/23962301-ad86-4f93-bab9-c6b2e53f5942" controls width="100%"></video></td>
 <td width="76%"><img src="assets/screenshots/demo.gif" alt="Daedalus attaching to a Claude Code agent and following a Herdr tab of agents in Tree, Tiles, Wall and Focus while the agents message each other" width="100%"></td>
 </tr>
 <tr>
