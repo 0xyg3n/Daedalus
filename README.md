@@ -108,15 +108,22 @@ Requirements and limits: the agent must run in a Herdr pane with Herdr's agent i
 | OpenCode | Yes | Yes | Existing process | No | No |
 | AGY (`agy`) | Terminal only | No | No | No | No |
 
-"Existing process" means hooks are registered on a running, verified process rather than through a guided first launch. Resume and fork are offered only when the installed CLI advertises them. Version details are in the [harness guide](docs/HARNESSES.md).
+The table above describes Linux support. Native Windows has a smaller [hook and harness compatibility matrix](docs/HARNESSES.md#native-windows-boundaries). "Existing process" means hooks are registered on a running, verified process rather than through a guided first launch. Resume and fork are offered only when the installed CLI advertises them. Version details are in the [harness guide](docs/HARNESSES.md).
+
+## Platform support
+
+| Platform | Status | Terminal backends | Installation |
+| --- | --- | --- | --- |
+| Linux x86-64 | Stable release; tested locally | tmux and Herdr | [Linux release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.1.0) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.1) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
+
+Both platforms use the same Rust executable and Ratatui interface; no Python runtime is required. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
+
+The Windows preview passes cross-compilation and 384 Windows unit tests under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
 
 ## Install
 
-Linux and native Windows x64 use the same Rust application. Windows defaults to Herdr and supports explicitly configured compatible native multiplexers;
-its native console/backend paths still require real Windows validation. See the
-[Windows installation and local checks](docs/INSTALL.md#native-windows-install).
-
-Linux prebuilt binaries are attached to each [GitHub release](https://github.com/0xyg3n/Daedalus/releases):
+The stable Linux x86-64 release includes a binary and checksum:
 
 ```bash
 base=https://github.com/0xyg3n/Daedalus/releases/download/v0.1.0
