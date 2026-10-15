@@ -9,7 +9,7 @@ signed-in indicator does not prove the account can use a given model.
 | --- | --- | --- | --- |
 | Claude Code | JSON matcher groups, 2.1.295+ | Yes | Stop-hook block |
 | Codex | `hooks.json`; approve it in Codex's `/hooks` trust review | No; register a running process | Native hook response |
-| Grok | Native lifecycle; goals need 1.0.46 | Yes | End-turn gated |
+| Grok | Native lifecycle; goals 1.0.46 or 1.0.52+; idle readiness 1.0.52+ | Yes | End-turn gated |
 | Hermes | YAML shell hooks | No; register a running process | Not available |
 | Cursor | `hooks.json` version 1 | No; register a running process | Bounded follow-ups |
 | Pi | Extension bridge, 0.87+ or 1.1.x | Yes, 1.1.x | Before-settle |
@@ -33,6 +33,9 @@ does not copy the first tool's internal state.
 Daedalus marks an agent idle only from verified events: Cursor and Hermes from
 correlated turn events, OpenCode from its server bridge, Pi from `agent_settled`.
 A Grok Stop event leaves readiness Unknown because Grok may continue the turn.
+Grok 1.0.52+ in the 1.0 series can become ready through its native
+`Notification` / `idle_prompt` event, typically about a minute after settlement.
+This proves readiness for another prompt, not success or a final answer.
 
 Telegram and `terminal control` slash commands need Claude Code 2.1.296, the exact
 live process and an idle registration. They submit the command; they do not confirm

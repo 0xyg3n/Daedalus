@@ -110,16 +110,26 @@ Requirements and limits: the agent must run in a Herdr pane with Herdr's agent i
 
 The table above describes Linux support. Native Windows has a smaller [hook and harness compatibility matrix](docs/HARNESSES.md#native-windows-boundaries). "Existing process" means hooks are registered on a running, verified process rather than through a guided first launch. Resume and fork are offered only when the installed CLI advertises them. Version details are in the [harness guide](docs/HARNESSES.md).
 
+## Use Daedalus from another agent
+
+An agent with a local command tool can call the same Rust operations as the TUI. `daedalus agent capabilities` lists the available operations; `daedalus agent call` accepts one JSON request on stdin and returns a versioned JSON result.
+
+```json
+{"tool":"inventory","args":["--config-dir","/abs/instance","--json"]}
+```
+
+Pass that request to `daedalus agent call`. Terminal control, checkpoints, routes, hooks, goals, Telegram administration and diagnostics use their existing identity checks and preview/apply rules. No approval flags are added automatically. Interactive attachment, sign-in and setup stay in the native CLI or TUI. This is a local JSON CLI interface; it is not an MCP server. See the [agent tools guide](docs/AGENT_TOOLS.md) for integration examples and current coverage.
+
 ## Platform support
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
 | Linux x86-64 | Stable release; tested locally | tmux and Herdr | [Linux release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.1.0) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.1) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
+| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.2) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
 
 Both platforms use the same Rust executable and Ratatui interface; no Python runtime is required. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
-The Windows preview passes cross-compilation and 384 Windows unit tests under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
+The Windows preview passes cross-compilation and Windows unit tests under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
 
 ## Install
 
@@ -142,10 +152,10 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.1) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.2) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
 
 ```powershell
-$exe = 'daedalus-0.2.0-beta.1-x86_64-windows.exe'
+$exe = 'daedalus-0.2.0-beta.2-x86_64-windows.exe'
 $expected = (Get-Content "$exe.sha256").Split(' ')[0]
 if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
 & ".\$exe" setup
@@ -161,6 +171,7 @@ Setup chooses available terminal backends and the agent tools you use, and lists
 | --- | --- |
 | [Install](docs/INSTALL.md) | Installer, first run, configuration directory, update and removal |
 | [TUI](docs/TUI.md) | Pages, views, keys, workspaces and Armonia |
+| [Agent tools](docs/AGENT_TOOLS.md) | JSON requests for harness command tools; capabilities, reviews and limitations |
 | [Commands](docs/COMMANDS.md) | CLI, Telegram commands and diagnostics |
 | [Harnesses](docs/HARNESSES.md) | Per-tool contracts and tested versions |
 | [Hooks](docs/HOOKS.md) | What each hook does, its limits, and optional memory |

@@ -162,13 +162,13 @@ impl Registration {
                 "Assistant response hook is unavailable for this harness",
             ));
         }
-        if self.scope.harness != Harness::Pi
-            && self
-                .events
-                .iter()
-                .any(|e| matches!(e, EventKind::Activity | EventKind::Settled))
+        if (self.scope.harness != Harness::Pi && self.events.contains(&EventKind::Activity))
+            || (!matches!(self.scope.harness, Harness::Pi | Harness::Grok)
+                && self.events.contains(&EventKind::Settled))
         {
-            return Err(Error::Invalid("Generated bridge lifecycle requires Pi"));
+            return Err(Error::Invalid(
+                "Activity requires Pi; settlement requires Pi or reviewed Grok idle notifications",
+            ));
         }
         if self.scope.harness != Harness::Claude && self.events.contains(&EventKind::PreToolUse) {
             return Err(Error::Invalid(
@@ -845,7 +845,13 @@ fn native_prompt(harness: Harness, payload: &Value) -> Option<&str> {
     }
 }
 fn native_completed(harness: Harness, payload: &Value) -> bool {
-    if harness == Harness::Opencode {
+    if harness == Harness::Grok {
+        matches!(
+            payload.get("hookEventName").and_then(Value::as_str),
+            Some("notification" | "Notification")
+        ) && payload.get("notificationType").and_then(Value::as_str) == Some("idle_prompt")
+            && payload.get("subagentType").is_none_or(Value::is_null)
+    } else if harness == Harness::Opencode {
         opencode_completion(payload).is_some()
     } else if harness == Harness::Pi {
         matches!(
@@ -906,6 +912,22 @@ fn event_key(
         && let Some(turn) = native_turn(registration.scope.harness, payload)
     {
         turn.to_owned()
+    } else if registration.scope.harness == Harness::Grok
+        && event.kind == EventKind::UserPromptSubmit
+    {
+        native_turn(Harness::Grok, payload)
+            .ok_or(Error::EventIdentity)?
+            .to_owned()
+    } else if registration.scope.harness == Harness::Grok && event.kind == EventKind::Settled {
+        let timestamp = payload
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .ok_or(Error::EventIdentity)?;
+        format!(
+            "idle:{:x}",
+            Sha256::digest(serde_json::to_vec(&(timestamp, payload)).map_err(|_| Error::Input)?)
+        )
     } else if event.kind == EventKind::Stop && registration.scope.harness == Harness::Claude {
         if let Some(final_text) = payload
             .get("last_assistant_message")
@@ -941,6 +963,7 @@ fn event_key(
 /// Events without provider IDs are distinct hook invocations. This deduplicates
 /// retries inside the same process, not a provider restarting the hook process.
 /// Stop always requires a stable assistant boundary or explicit provider ID.
+#[cfg(unix)]
 fn invocation_id() -> Result<String> {
     let stat = fs::read_to_string("/proc/self/stat").map_err(|_| Error::EventIdentity)?;
     let start = stat
@@ -953,6 +976,14 @@ fn invocation_id() -> Result<String> {
         "invocation-{:x}",
         Sha256::digest(format!("{}:{}:{}", boot.trim(), std::process::id(), start))
     ))
+}
+#[cfg(windows)]
+fn invocation_id() -> Result<String> {
+    let process =
+        crate::platform::process_identity(std::process::id()).map_err(|_| Error::EventIdentity)?;
+    let encoded = serde_json::to_vec(&(process.owner, process.pid, process.creation_time))
+        .map_err(|_| Error::EventIdentity)?;
+    Ok(format!("invocation-{:x}", Sha256::digest(encoded)))
 }
 #[derive(Debug)]
 pub struct Outcome {
@@ -1198,7 +1229,12 @@ fn run_verified(
     let payload: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Input)?;
     let kind =
         hooks::native_kind(registration.scope.harness, &payload).map_err(|_| Error::Input)?;
-    if expected.is_some_and(|expected| expected != kind) {
+    if expected.is_some_and(|expected| {
+        expected != kind
+            && !(registration.scope.harness == Harness::Grok
+                && expected == EventKind::Notification
+                && kind == EventKind::Settled)
+    }) {
         return Err(Error::Invalid(
             "Hook event does not match its installed command",
         ));
@@ -2132,6 +2168,104 @@ mod tests {
         assert_eq!(first.event_id, duplicate.event_id);
     }
     #[test]
+    fn grok_idle_notifications_correlate_reservations_and_ignore_other_turns() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Grok;
+        fixture.0.goal_id = None;
+        fixture.0.options.telegram_progress = true;
+        fixture.0.events = vec![
+            EventKind::UserPromptSubmit,
+            EventKind::Stop,
+            EventKind::Settled,
+            EventKind::Notification,
+        ];
+        let path = install(&fixture.0).unwrap();
+        let invoke = |id: &str, mut data: Value, now| {
+            data["sessionId"] = "session".into();
+            execute(
+                serde_json::to_vec(&data).unwrap().as_slice(),
+                &fixture.0,
+                Some(id),
+                &mut Verified,
+                &mut FakeClock(now),
+            )
+        };
+        let idle = json!({"hookEventName":"notification","notificationType":"idle_prompt"});
+        let bootstrap = invoke("initial-idle", idle.clone(), 1).unwrap();
+        assert!(
+            !bootstrap
+                .planned_effects
+                .iter()
+                .any(|e| e.contains("reply"))
+        );
+        assert_eq!(readiness(&path, 1, 100).unwrap(), Readiness::Idle);
+        let scope = serde_json::to_string(&fixture.0.scope).unwrap();
+        let db = readiness_connection(&fixture.0.directory).unwrap();
+        db.execute(
+            "INSERT INTO hook_reservations(scope,correlation) VALUES(?,?)",
+            params![scope, format!("{:x}", Sha256::digest(b"queued prompt"))],
+        )
+        .unwrap();
+        invoke("unconsumed-idle", idle.clone(), 2).unwrap();
+        assert_eq!(readiness(&path, 2, 100).unwrap(), Readiness::Busy);
+        invoke("accepted", json!({"hookEventName":"user_prompt_submit","promptId":"current","prompt":"queued prompt"}), 3).unwrap();
+        invoke("stop-gate", json!({"hookEventName":"stop","promptId":"current","reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"answer"}), 4).unwrap();
+        assert_eq!(readiness(&path, 4, 100).unwrap(), Readiness::Unknown);
+        invoke("older-idle", json!({"hookEventName":"notification","notificationType":"idle_prompt","promptId":"old"}), 5).unwrap();
+        assert_eq!(readiness(&path, 5, 100).unwrap(), Readiness::Unknown);
+        invoke("settled", idle.clone(), 6).unwrap();
+        assert_eq!(readiness(&path, 6, 100).unwrap(), Readiness::Idle);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM hook_reservations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        invoke("new-prompt", json!({"hookEventName":"user_prompt_submit","promptId":"new","prompt":"another prompt"}), 7).unwrap();
+        invoke("old-completion", json!({"hookEventName":"notification","notificationType":"idle_prompt","promptId":"current"}), 8).unwrap();
+        invoke(
+            "permission",
+            json!({"hookEventName":"notification","notificationType":"permission_prompt"}),
+            9,
+        )
+        .unwrap();
+        assert!(invoke("nested", json!({"hookEventName":"notification","notificationType":"idle_prompt","subagentType":"worker"}), 10).is_err());
+        assert_eq!(readiness(&path, 10, 100).unwrap(), Readiness::Busy);
+    }
+    #[test]
+    fn grok_native_idle_is_deduplicated_across_notification_wrappers() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Grok;
+        fixture.0.goal_id = None;
+        fixture.0.events = vec![EventKind::Settled, EventKind::Notification];
+        install(&fixture.0).unwrap();
+        let data = serde_json::to_vec(&json!({"sessionId":"session","hookEventName":"notification","notificationType":"idle_prompt","timestamp":"2026-10-15T12:00:00Z"})).unwrap();
+        let mut output = Vec::new();
+        let first = run_verified(
+            data.as_slice(),
+            &mut output,
+            &fixture.0,
+            None,
+            Some(EventKind::Settled),
+            &mut Verified,
+            &mut FakeClock(1),
+        )
+        .unwrap();
+        let duplicate = run_verified(
+            data.as_slice(),
+            &mut output,
+            &fixture.0,
+            None,
+            Some(EventKind::Notification),
+            &mut Verified,
+            &mut FakeClock(2),
+        )
+        .unwrap();
+        assert!(first.admitted);
+        assert!(!duplicate.admitted);
+        assert_eq!(first.event_id, duplicate.event_id);
+    }
+    #[test]
     fn grok_goal_gate_correlates_continuations_and_never_rearms_on_timeout() {
         let mut f = Fixture::new();
         f.0.scope.harness = Harness::Grok;
@@ -2885,7 +3019,12 @@ fn observe_readiness(
         && kind == EventKind::UserPromptSubmit
         && matches!(
             r.scope.harness,
-            Harness::Codex | Harness::Cursor | Harness::Hermes | Harness::Pi | Harness::Opencode
+            Harness::Codex
+                | Harness::Cursor
+                | Harness::Hermes
+                | Harness::Pi
+                | Harness::Opencode
+                | Harness::Grok
         )
     {
         if let Some(turn) = native_turn(r.scope.harness, payload) {
@@ -2903,13 +3042,33 @@ fn observe_readiness(
         )
         .optional()
         .map_err(|_| Error::Persistence)?;
-    let active_provider_stop = matches!(
-        r.scope.harness,
-        Harness::Codex | Harness::Cursor | Harness::Hermes | Harness::Pi | Harness::Opencode
-    ) && active_turn.as_ref().is_some_and(|turn| {
-        native_turn(r.scope.harness, payload) == Some(turn)
-            && native_completed(r.scope.harness, payload)
-    });
+    let grok_idle = r.scope.harness == Harness::Grok
+        && kind == EventKind::Settled
+        && native_completed(Harness::Grok, payload);
+    if grok_idle
+        && native_turn(Harness::Grok, payload)
+            .is_some_and(|turn| active_turn.as_deref().is_some_and(|active| active != turn))
+    {
+        return Ok(()); // A delayed older turn must not supersede the newest observation.
+    }
+    let active_provider_stop = if r.scope.harness == Harness::Grok {
+        grok_idle
+            && native_turn(Harness::Grok, payload)
+                .is_none_or(|turn| active_turn.as_deref().is_none_or(|active| active == turn))
+    } else {
+        matches!(
+            r.scope.harness,
+            Harness::Codex
+                | Harness::Cursor
+                | Harness::Hermes
+                | Harness::Pi
+                | Harness::Opencode
+                | Harness::Grok
+        ) && active_turn.as_ref().is_some_and(|turn| {
+            native_turn(r.scope.harness, payload) == Some(turn)
+                && native_completed(r.scope.harness, payload)
+        })
+    };
     let reservation: Option<String> = tx
         .query_row(
             "SELECT correlation FROM hook_reservations WHERE scope=?",
@@ -2927,7 +3086,12 @@ fn observe_readiness(
     if correlated {
         if matches!(
             r.scope.harness,
-            Harness::Codex | Harness::Cursor | Harness::Hermes | Harness::Pi | Harness::Opencode
+            Harness::Codex
+                | Harness::Cursor
+                | Harness::Hermes
+                | Harness::Pi
+                | Harness::Opencode
+                | Harness::Grok
         ) && let Some(turn) = native_turn(r.scope.harness, payload)
         {
             tx.execute("INSERT INTO hook_prompt_turns(scope,turn_id) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET turn_id=excluded.turn_id",params![scope,turn]).map_err(|_|Error::Persistence)?;
@@ -2948,7 +3112,12 @@ fn observe_readiness(
         && kind == EventKind::UserPromptSubmit
         && matches!(
             r.scope.harness,
-            Harness::Codex | Harness::Cursor | Harness::Hermes | Harness::Pi | Harness::Opencode
+            Harness::Codex
+                | Harness::Cursor
+                | Harness::Hermes
+                | Harness::Pi
+                | Harness::Opencode
+                | Harness::Grok
         )
         && reservation.is_some()
         && prompt_seen == reservation
@@ -2985,12 +3154,18 @@ fn observe_readiness(
         .optional()
         .map_err(|_| Error::Persistence)?;
     let provider_completed = active_provider_stop
-        && codex_turn
-            .as_ref()
-            .is_some_and(|turn| native_turn(r.scope.harness, payload) == Some(turn))
+        && codex_turn.as_ref().is_some_and(|turn| {
+            if r.scope.harness == Harness::Grok {
+                active_turn.as_ref() == Some(turn)
+                    && native_turn(Harness::Grok, payload)
+                        .is_none_or(|event_turn| event_turn == turn)
+            } else {
+                native_turn(r.scope.harness, payload) == Some(turn)
+            }
+        })
         && native_completed(r.scope.harness, payload);
     let completed = ((kind == EventKind::Stop && r.scope.harness != Harness::Pi)
-        || (r.scope.harness == Harness::Pi && kind == EventKind::Settled))
+        || (matches!(r.scope.harness, Harness::Pi | Harness::Grok) && kind == EventKind::Settled))
         && matches!(reply, Some(Reply::Empty))
         && reservation.as_ref().is_some_and(|sha| {
             prompt_seen.as_ref() == Some(sha)
@@ -3030,7 +3205,12 @@ fn observe_readiness(
     } else if (reservation.is_some() && !completed)
         || (matches!(
             r.scope.harness,
-            Harness::Codex | Harness::Cursor | Harness::Hermes | Harness::Pi | Harness::Opencode
+            Harness::Codex
+                | Harness::Cursor
+                | Harness::Hermes
+                | Harness::Pi
+                | Harness::Opencode
+                | Harness::Grok
         ) && matches!(kind, EventKind::Stop | EventKind::Settled)
             && !active_provider_stop)
     {
@@ -3279,6 +3459,33 @@ pub struct ReadySnapshot {
     pub state: Readiness,
     pub scope: Scope,
 }
+// Revalidate native bootstrap evidence each time it could authorize input.
+// A later provider log write invalidates it even if no hook was delivered.
+fn native_observation_valid(
+    con: &Connection,
+    r: &Registration,
+    proc_root: &Path,
+    sequence: i64,
+) -> Result<bool> {
+    let evidence: Option<(String, String)> = con
+        .query_row(
+            "SELECT event_id,payload FROM hook_observations WHERE seq=? AND scope=?",
+            params![
+                sequence,
+                serde_json::to_string(&r.scope).map_err(|_| Error::Input)?
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| Error::Persistence)?;
+    let Some((event, proof)) = evidence else {
+        return Ok(false);
+    };
+    if !event.starts_with("native-grok:") {
+        return Ok(true);
+    }
+    Ok(matches!(super::grok_state::idle_proof(r,proc_root), Ok(Some(current)) if current==proof))
+}
 /// Persistent Idle requires a pinned live harness process, not just a terminal
 /// shell. Caller must independently verify terminal identity before injection.
 pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
@@ -3301,6 +3508,39 @@ pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
         )
         .optional()
         .map_err(|_| Error::Persistence)?;
+    // Existing Grok sessions can predate hook installation. Bootstrap only
+    // from an exact, still-open native event log; this is source evidence,
+    // not a synthesized hook or a successful Telegram delivery.
+    if row.is_none()
+        && let Ok(Some(proof)) = super::grok_state::idle_proof(&r, proc_root)
+    {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .ok_or(Error::Input)?;
+        let event = format!("native-grok:{}:{proof}", r.id);
+        con.execute(
+            "INSERT OR IGNORE INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) SELECT ?1,?2,?3,'\"idle\"',?4,1 WHERE NOT EXISTS(SELECT 1 FROM hook_observations WHERE scope=?1) AND NOT EXISTS(SELECT 1 FROM hook_reservations WHERE scope=?1)",
+            params![serde_json::to_string(&r.scope).map_err(|_|Error::Input)?, event, proof, now],
+        ).map_err(|_|Error::Persistence)?;
+        let row: Option<(i64, String)> = con
+            .query_row(
+                "SELECT seq,state FROM hook_observations WHERE scope=? ORDER BY seq DESC LIMIT 1",
+                [serde_json::to_string(&r.scope).map_err(|_| Error::Input)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| Error::Persistence)?;
+        return Ok(ReadySnapshot {
+            sequence: row.as_ref().map_or(0, |(seq, _)| *seq),
+            state: row
+                .map(|(_, state)| serde_json::from_str(&state).map_err(|_| Error::Persistence))
+                .transpose()?
+                .unwrap_or(Readiness::Unknown),
+            scope: r.scope,
+        });
+    }
     let (sequence, state) = match row {
         Some((seq, s)) => (
             seq,
@@ -3308,6 +3548,12 @@ pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
         ),
         None => (0, Readiness::Unknown),
     };
+    let state =
+        if state == Readiness::Idle && !native_observation_valid(&con, &r, proc_root, sequence)? {
+            Readiness::Unknown
+        } else {
+            state
+        };
     Ok(ReadySnapshot {
         sequence,
         state,
@@ -3328,6 +3574,9 @@ pub fn consume_ready_for_control(path: &Path, proc_root: &Path, sequence: i64) -
     let tx = con
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|_| Error::Persistence)?;
+    if !native_observation_valid(&tx, &r, proc_root, sequence)? {
+        return Ok(false);
+    }
     // An interactive control is not a model prompt. Invalidate the observation
     // without inventing a prompt hash that no provider event could ever satisfy.
     let changed = tx.execute("UPDATE hook_observations SET state='\"unknown\"' WHERE seq=? AND scope=? AND state='\"idle\"' AND seq=(SELECT MAX(seq) FROM hook_observations WHERE scope=?) AND NOT EXISTS(SELECT 1 FROM hook_reservations WHERE scope=?)", params![sequence,scope,scope,scope]).map_err(|_| Error::Persistence)?;
@@ -3366,6 +3615,9 @@ pub fn reserve_ready_for(
     let tx = con
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|_| Error::Persistence)?;
+    if !native_observation_valid(&tx, &r, proc_root, sequence)? {
+        return Ok(false);
+    }
     let n=tx.execute("UPDATE hook_observations SET state='\"busy\"' WHERE seq=? AND scope=? AND state='\"idle\"' AND seq=(SELECT MAX(seq) FROM hook_observations WHERE scope=?) AND NOT EXISTS(SELECT 1 FROM hook_reservations WHERE scope=?)",params![sequence,scope,scope,scope]).map_err(|_|Error::Persistence)?;
     if n == 1 {
         tx.execute(

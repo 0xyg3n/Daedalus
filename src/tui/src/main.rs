@@ -105,6 +105,14 @@ enum Step {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "agent") {
+        return daedalus_tui::app::agent_tools::run(
+            &args[1..],
+            io::stdin().lock(),
+            &mut io::stdout(),
+        )
+        .map_err(io::Error::other);
+    }
     if args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "job" | "jobs" | "jobctl"))
@@ -241,7 +249,7 @@ fn main() -> io::Result<()> {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, inventory, terminal, checkpoint, route, job, hook, goal, telegram, memory, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
+            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, agent, inventory, terminal, checkpoint, route, job, hook, goal, telegram, memory, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());

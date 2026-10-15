@@ -13,6 +13,7 @@ digest where one is required.
 | --- | --- |
 | `daedalus` | Open the control panel; `setup` opens setup (`setup --cli` for prompts) |
 | `config` | `init`, `import`, `import-instance`, `validate` |
+| `agent` | `capabilities`, `call` with one bounded JSON request on stdin; see [agent tools](AGENT_TOOLS.md) |
 | `inventory --json` | List tmux and Herdr terminals |
 | `terminal` | `list`, `capture`, `send`, `interrupt`, `close`, `focus`, `attach`, `rename`, `launch`, `wait`, `command`, `keys`, `control` |
 | `checkpoint` | `list`, `show`, `save`, `remove`, `spawn --operation resume\|fork\|handoff` |
@@ -20,7 +21,7 @@ digest where one is required.
 | `hook` | `install`, `inspect`, `run`; `profile-*` (preview, apply, rollback, remove); `launch-*` (preview, apply, cleanup) |
 | `goal` | `arm`, `status`, `pause`, `resume`, `complete` |
 | `memory` | `list`, `status`, `refresh` for Hindsight retention receipts |
-| `telegram` | `config init\|import\|check`, `serve`, `cutover preview\|apply\|rollback` |
+| `telegram` | `status`, `start`, `stop`, `bindings`, `bind`, `config init\|import\|check`, `serve`, `cutover preview\|apply\|rollback` |
 | `agent-identity` | Optional Armonia rename: `preview`, `apply`, `status` |
 | `diagnostics --json` | Queue, route, registration and configuration health |
 | `update check [--json]` | Check for a newer GitHub release; installs nothing |
@@ -69,6 +70,15 @@ file, sender grants (Read, Send, Manage), feeder registrations and reply
 recipients. `daedalus telegram serve --config-dir ABS` runs the service in the
 foreground; in the panel, **Telegram → Start the Telegram connection** starts it
 after confirmation. Nothing starts it automatically.
+
+Local agents can inspect `telegram status --config-dir ABS`, preview `telegram
+start` or `telegram stop`, then apply with `--apply --approve DIGEST` using the
+unchanged preview digest. Start/stop request a transition; check status afterward.
+`telegram bindings --config-dir ABS --registration ABS` lists eligible reply
+recipients. `telegram bind --config-dir ABS --registration ABS --chat ID --actor
+ID` previews an exact hook-to-chat binding; applying also requires `--apply
+--approve DIGEST`. Existing grants and live registration/conversation identity
+are checked. These commands never accept a token argument.
 
 Each chat routes to one exact terminal and conversation. In Herdr, run
 `herdr integration install claude` so Herdr reports the Claude conversation ID that

@@ -106,6 +106,14 @@ impl Menu {
         if self.pending() {
             return Err("Finish the current Telegram dialog first".into());
         }
+        if action == "telegram.start" {
+            let Reply::Data(status) = source.telegram(Request::Inspect)? else {
+                return Err("Invalid Telegram settings response".into());
+            };
+            if status["configured"] == false {
+                return self.start("telegram.details", source, _config, seq);
+            }
+        }
         match action {
             "telegram.route" => {
                 let Reply::Data(data)=source.telegram(Request::Routes)? else {return Err("Invalid route inventory".into());};
@@ -452,6 +460,17 @@ mod tests {
         for text in ["fixture", "123", "456", "-100789"] {
             answer(menu, local, seq, json!(text));
         }
+    }
+    #[test]
+    fn starting_an_unconfigured_connection_opens_setup_without_starting_service() {
+        let (mut menu, mut local, mut seq) = (Menu::default(), Local::new(), 0);
+        let result = menu
+            .start("telegram.start", &mut local, &config(), &mut seq)
+            .unwrap();
+        assert_eq!(result.frames[0]["title"], "Instance name");
+        assert_eq!(local.applied, 0);
+        assert!(!local.directory.join("telegram-service.json").exists());
+        assert!(!local.directory.join("telegram-process.json").exists());
     }
     #[test]
     fn fresh_details_require_review_and_confirmation_is_single_use() {

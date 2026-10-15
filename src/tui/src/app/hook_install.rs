@@ -167,6 +167,10 @@ fn version_triple(version: &str) -> Option<(u32, u32, u32)> {
     }
     Some((parts[0], parts[1], parts[2]))
 }
+pub(crate) fn grok_readiness_supported(version: &str) -> bool {
+    version_triple(version)
+        .is_some_and(|(major, minor, patch)| major == 1 && minor == 0 && patch >= 52)
+}
 fn supported(version: &str) -> bool {
     let numbers = version
         .trim()
@@ -249,8 +253,11 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     if request.harness == Harness::Grok
         && request.goal_id.is_some()
         && version_triple(&request.harness_version) != Some((1, 0, 46))
+        && !grok_readiness_supported(&request.harness_version)
     {
-        return Err("Grok goal hooks require verified version 1.0.46".into());
+        return Err(
+            "Grok goal hooks require verified version 1.0.46 or 1.0.52+ in the 1.0 series".into(),
+        );
     }
     if request.harness == Harness::Claude && !supported(&request.harness_version) {
         return Err("Claude hook profiles require an observed version >=2.1.295".into());
@@ -331,6 +338,12 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     if request.options.hindsight && !matches!(request.harness, Harness::Hermes | Harness::Pi) {
         registration.events.push(EventKind::PreCompact);
     }
+    if request.harness == Harness::Grok
+        && grok_readiness_supported(&request.harness_version)
+        && (request.options.telegram_delivery || request.options.telegram_progress)
+    {
+        registration.events.push(EventKind::Settled);
+    }
     if request.options.notifications {
         registration.events.push(EventKind::SubagentStop);
         if matches!(request.harness, Harness::Claude | Harness::Grok) {
@@ -377,7 +390,9 @@ pub(crate) fn launch_hooks(
     registration.validate().map_err(|e| e.to_string())?;
     let supported_provider = match registration.scope.harness {
         Harness::Claude => supported(version),
-        Harness::Grok => version_triple(version) == Some((1, 0, 46)),
+        Harness::Grok => {
+            version_triple(version) == Some((1, 0, 46)) || grok_readiness_supported(version)
+        }
         Harness::Pi => {
             version_triple(version).is_some_and(|(major, minor, _)| major == 1 && minor == 1)
         }
@@ -385,6 +400,12 @@ pub(crate) fn launch_hooks(
     };
     if registration.harness_process.is_some() || !supported_provider {
         return Err("First-launch hooks require Claude >=2.1.295, Pi 1.1.x or Grok 1.0.46 and an unbound template".into());
+    }
+    if registration.scope.harness == Harness::Grok
+        && registration.events.contains(&EventKind::Settled)
+        && !grok_readiness_supported(version)
+    {
+        return Err("Grok idle readiness requires verified 1.0.52+ in the 1.0 series".into());
     }
     let bytes = merge(None, registration, binary)?;
     if registration.scope.harness != Harness::Grok {
@@ -511,12 +532,23 @@ fn merge(before: Option<&[u8]>, registration: &Registration, binary: &Path) -> R
         {
             handler["onFailure"] = "block".into();
         }
+        let grok_idle = registration.scope.harness == Harness::Grok && *event == EventKind::Settled;
+        let native_event = if grok_idle {
+            "Notification".to_owned()
+        } else {
+            name
+        };
+        let group = if grok_idle {
+            json!({"matcher":"idle_prompt","hooks":[handler]})
+        } else {
+            json!({"hooks":[handler]})
+        };
         hooks
-            .entry(name)
+            .entry(native_event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .ok_or("Invalid event hooks")?
-            .push(json!({"hooks":[handler]}));
+            .push(group);
     }
     serde_json::to_vec_pretty(&settings).map_err(|_| "Cannot encode profile".into())
 }
@@ -1947,6 +1979,43 @@ esac
         let original: Value =
             serde_json::from_slice(&fs::read(&f.request.profile).unwrap()).unwrap();
         assert_eq!(original["hooks"]["stop"].as_array().unwrap().len(), 1);
+    }
+    #[test]
+    fn grok_readiness_installs_native_idle_matcher_only_for_verified_versions() {
+        let mut f = Fixture::new();
+        f.request.harness = Harness::Grok;
+        f.request.goal_id = None;
+        f.request.options.telegram_progress = true;
+        f.request.options.notifications = false;
+        f.request.harness_version = "1.0.52".into();
+        f.request.profile = f.dir.join("grok-hooks.json");
+        let plan = preview(&f.request, &f.terminals).unwrap();
+        assert!(plan.registration.events.contains(&EventKind::Settled));
+        let profile: Value = serde_json::from_slice(&plan.after).unwrap();
+        assert!(profile["hooks"].get("Settled").is_none());
+        assert_eq!(
+            profile["hooks"]["Notification"][0]["matcher"],
+            "idle_prompt"
+        );
+        assert!(
+            profile["hooks"]["Notification"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("--event-kind 'Settled'")
+        );
+        assert_eq!(
+            merge(Some(&plan.after), &plan.registration, &f.request.binary).unwrap(),
+            plan.after
+        );
+        f.request.harness_version = "1.0.51".into();
+        assert!(
+            !preview(&f.request, &f.terminals)
+                .unwrap()
+                .registration
+                .events
+                .contains(&EventKind::Settled)
+        );
+        assert!(!grok_readiness_supported("2.0.0"));
     }
     #[test]
     fn grok_native_profile_is_passive_private_and_idempotent() {

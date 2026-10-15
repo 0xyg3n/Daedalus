@@ -56,7 +56,7 @@ impl Plan {
         ))
     }
     pub fn review(&self) -> Value {
-        json!({"harness":self.request.harness,"profile":self.profile,"cwd":self.request.cwd,"parent":{"backend":self.request.parent.get("backend"),"pane_id":self.request.parent.get("pane_id"),"session":self.request.parent.get("session"),"workspace":self.request.parent.get("workspace_name")},"conversation":self.hook.spec.registration.scope.conversation,"action":"Create a new split pane; register hooks before native provider starts","account":"Selected native profile; sign-in remains with the provider","delivery":"Delivery and progress hooks are preconfigured; connect an explicitly authorized Telegram recipient before messages can be sent. Memory stays optional.","native_hook_profile":self.hook.spec.hook_profile,"created_hook_file":self.hook.native_hook_file(),"capabilities":if self.request.harness == "grok" { "Native turn-end goal continuation; feeder readiness remains unavailable" } else { "Native lifecycle hooks" }})
+        json!({"harness":self.request.harness,"profile":self.profile,"cwd":self.request.cwd,"parent":{"backend":self.request.parent.get("backend"),"pane_id":self.request.parent.get("pane_id"),"session":self.request.parent.get("session"),"workspace":self.request.parent.get("workspace_name")},"conversation":self.hook.spec.registration.scope.conversation,"action":"Create a new split pane; register hooks before native provider starts","account":"Selected native profile; sign-in remains with the provider","delivery":"Delivery and progress hooks are preconfigured; connect an explicitly authorized Telegram recipient before messages can be sent. Memory stays optional.","native_hook_profile":self.hook.spec.hook_profile,"created_hook_file":self.hook.native_hook_file(),"capabilities":if self.request.harness == "grok" { "Native turn-end goal continuation; Telegram input requires a verified idle notification on a supported version" } else { "Native lifecycle hooks" }})
     }
     fn ticket(&self) -> PathBuf {
         self.hook
@@ -163,7 +163,7 @@ pub fn prepare(
     } else {
         Harness::Claude
     };
-    let events = if harness == Harness::Pi {
+    let mut events = if harness == Harness::Pi {
         vec![
             EventKind::SessionStart,
             EventKind::UserPromptSubmit,
@@ -183,6 +183,9 @@ pub fn prepare(
             EventKind::SessionEnd,
         ]
     };
+    if harness == Harness::Grok && super::hook_install::grok_readiness_supported(version) {
+        events.push(EventKind::Settled);
+    }
     // Claude uses its documented cwd-encoded project transcript directory.
     let transcript = if harness == Harness::Claude {
         let cwd = request.cwd.to_str().ok_or("Project path is not UTF-8")?;

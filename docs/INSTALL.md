@@ -36,7 +36,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-The [0.2.0-beta.1 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.1) provides `daedalus-0.2.0-beta.1-x86_64-windows.exe` and its `.sha256` file. The executable needs no Rust or Python installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. Install Herdr or a compatible native multiplexer separately. Stable update checks do not select prereleases.
+The [0.2.0-beta.1 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.2) provides `daedalus-0.2.0-beta.2-x86_64-windows.exe` and its `.sha256` file. The executable needs no Rust or Python installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. Install Herdr or a compatible native multiplexer separately. Stable update checks do not select prereleases.
 
 
 Use native PowerShell and Windows Terminal. **Herdr** is the default backend.

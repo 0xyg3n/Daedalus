@@ -168,6 +168,7 @@ impl Plan {
         }
         let mut review = Review { environment, selection, installed: vec![], operations: vec![], blockers: vec![], notices: vec!["Account sign-in remains with each harness; Daedalus does not inspect credentials or launch agents. Publisher installers may access existing native profiles.".into(), "Package installation can execute publisher package scripts. Completed installs are not rolled back if a later step fails. Script digests bind the bootstrap script only; publisher downloads and package versions follow the official current distribution.".into(), "The CLI asks sudo to authenticate through its terminal only after approval; noninteractive callers must prepare sudo credentials separately.".into(), "No Python runtime is required by Daedalus; a selected third-party harness may have its own runtime requirements.".into()] };
         if review.environment.os == "windows" {
+            review.notices.retain(|notice| !notice.contains("sudo"));
             let mut selected = review.selection.harnesses.clone();
             if review.selection.herdr {
                 selected.push("herdr".into());
@@ -185,6 +186,8 @@ impl Plan {
                     .unwrap_or_else(|| review.environment.binaries.contains_key(&id));
                 if installed {
                     review.installed.push(id);
+                } else if id == "tmux" {
+                    review.blockers.push("Install the configured tmux-compatible Windows backend (for example PSMux) from its official distribution, then refresh setup.".into());
                 } else {
                     review.blockers.push(format!(
                         "Install {id} with its official Windows installer, then refresh setup."

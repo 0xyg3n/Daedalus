@@ -123,6 +123,12 @@ pub fn parse(harness: Harness, bytes: &[u8], expected: &Binding) -> Result<Event
         return Err(Error::IdentityMismatch);
     }
     let kind = native_kind(harness, &value)?;
+    if harness == Harness::Grok
+        && !matches!(kind, EventKind::SubagentStop | EventKind::Notification)
+        && value.get("subagentType").is_some_and(|v| !v.is_null())
+    {
+        return Err(Error::IdentityMismatch);
+    }
     if matches!(harness, Harness::Pi | Harness::Opencode)
         && (value.get("bridge_version").and_then(Value::as_str)
             != Some(if harness == Harness::Pi {
@@ -198,6 +204,11 @@ pub fn native_kind(harness: Harness, value: &Value) -> Result<EventKind, Error> 
             "stop" | "Stop" => Ok(EventKind::Stop),
             "pre_compact" | "PreCompact" => Ok(EventKind::PreCompact),
             "subagent_stop" | "SubagentStop" => Ok(EventKind::SubagentStop),
+            "notification" | "Notification"
+                if value.get("notificationType").and_then(Value::as_str) == Some("idle_prompt") =>
+            {
+                Ok(EventKind::Settled)
+            }
             "notification" | "Notification" => Ok(EventKind::Notification),
             _ => Err(Error::UnsupportedEvent),
         };

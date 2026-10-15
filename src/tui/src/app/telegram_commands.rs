@@ -1197,7 +1197,7 @@ impl Operations for NativeOperations {
             return Err("Streaming requires verified prompt hooks".into());
         }
         if registration.scope.harness == super::hooks::Harness::Grok {
-            return Err("Grok streaming requires verified feeder turn ownership; feeder readiness is not available yet".into());
+            return Err("Grok live streaming is not supported; native idle notifications provide feeder readiness only".into());
         }
         if !registration.events.iter().any(|event| {
             matches!(

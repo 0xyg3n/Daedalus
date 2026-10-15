@@ -77,3 +77,33 @@ Claude Code 2.1.296+, Hermes, Pi and OpenCode. Windows guided hooked first launc
 Codex/Grok/Cursor hooks and hooks through native tmux-compatible backends are
 unverified and fail closed. Native terminal controls and ordinary launch are
 separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boundaries).
+
+### Grok idle readiness
+
+For Grok 1.0.52+ in the 1.0 series, reviewed profiles with Telegram delivery or
+progress enabled also install a native `Notification` matcher for `idle_prompt`.
+Reinstall the reviewed profile to enable this on an existing registration; simply
+updating the binary does not change private provider profiles.
+
+`Stop` remains a continuation gate and never proves readiness. The idle ping
+usually arrives about a minute after the session settles, including failed or
+cancelled turns. It does not prove a successful task or queue a final answer.
+Daedalus correlates `promptId` with the newest accepted prompt, ignores older
+turns and subagents, and keeps a queued-input reservation until that exact input
+was observed. A session-scoped idle ping can initialize readiness, but cannot
+release an input that the harness has not acknowledged. Permission notifications
+do not mark the agent idle. Grok live Telegram streaming remains unavailable.
+
+Contract: [Grok native hooks and busy/idle tracking](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md).
+
+For an existing Grok process that predates Daedalus hooks, initial readiness can
+be established from its native `events.jsonl` only when the exact registered
+process still holds that file open, its sibling session summary matches the
+registered conversation, and the last lifecycle record is `turn_ended`
+with a completed outcome. Only explicit `mcp_health_check` telemetry may follow
+that record; activity, unknown records and incomplete writes prevent bootstrap. The session directory must be owned and private (0700 on Linux); native summary
+files recreated by Grok are accepted only inside that directory. Reads are bounded
+and reject changing or partial files.
+This bootstrap applies only before any hook observations or reservations exist;
+it cannot overwrite busy state, settle a reserved input, or invent a reply.
+Reload the reviewed hooks in Grok before enabling Telegram delivery.

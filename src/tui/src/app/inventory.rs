@@ -68,6 +68,54 @@ fn socket_candidates(config: &ControlConfig, current_tmux: Option<&str>) -> Vec<
     sockets
 }
 
+/// Only a definite dead Unix endpoint may be removed from completeness errors.
+/// A nonblocking connect keeps a full listener backlog from hanging discovery.
+#[cfg(unix)]
+fn stale_tmux_socket(path: &str) -> bool {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    };
+    let bytes = std::path::Path::new(path).as_os_str().as_bytes();
+    unsafe {
+        let mut address: libc::sockaddr_un = std::mem::zeroed();
+        if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+            return false;
+        }
+        let descriptor = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if descriptor < 0 {
+            return false;
+        }
+        let socket = OwnedFd::from_raw_fd(descriptor);
+        if libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) < 0
+            || libc::fcntl(socket.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) < 0
+        {
+            return false;
+        }
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (target, &byte) in address.sun_path.iter_mut().zip(bytes) {
+            *target = byte as libc::c_char;
+        }
+        let length = std::mem::size_of_val(&address) as libc::socklen_t;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        if libc::connect(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            length,
+        ) == 0
+        {
+            return false;
+        }
+        matches!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+        )
+    }
+}
+
 fn collect_with_socket(
     config: &ControlConfig,
     terminals: &Terminals,
@@ -160,6 +208,16 @@ fn collect_with_socket(
                         }
                     }
                     Err(error) => {
+                        #[cfg(unix)]
+                        if let Endpoint::Tmux(socket) = endpoint
+                            && stale_tmux_socket(socket)
+                        {
+                            snapshot["stale_sockets"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(json!({"backend":"tmux","endpoint":socket,"error":error}));
+                            continue;
+                        }
                         let (backend, endpoint) = match endpoint {
                             Endpoint::Tmux(s) => ("tmux", s),
                             Endpoint::Herdr(s) => ("herdr", s),
@@ -185,6 +243,57 @@ fn collect_with_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn stale_socket_does_not_hide_live_query_failure_or_delete_endpoints() {
+        use std::os::unix::net::UnixListener;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("dd-inventory-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let stale = root.join("stale");
+        let live = root.join("live");
+        drop(UnixListener::bind(&stale).unwrap());
+        let listener = UnixListener::bind(&live).unwrap();
+        use std::os::fd::AsRawFd;
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut config = ControlConfig::fresh(&root).unwrap();
+        config.discovery.automatic = false;
+        config.tmux_sockets = vec![
+            stale.to_string_lossy().into_owned(),
+            live.to_string_lossy().into_owned(),
+        ];
+        let terminals = Terminals {
+            tmux: root.join("missing-tmux-query"),
+            ..Terminals::default()
+        };
+        let snapshot = collect_with_socket(&config, &terminals, &[], None);
+        assert_eq!(snapshot["stale_sockets"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            snapshot["stale_sockets"][0]["endpoint"],
+            stale.to_str().unwrap()
+        );
+        assert_eq!(snapshot["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["errors"][0]["endpoint"], live.to_str().unwrap());
+        assert_eq!(snapshot["panes"], json!([]));
+        assert!(stale.exists() && live.exists());
+        // Saturated live listeners must remain failures, not stale endpoints.
+        for _ in 0..8 {
+            assert!(!stale_tmux_socket(live.to_str().unwrap()));
+        }
+        assert!(stale_tmux_socket(root.join("missing").to_str().unwrap()));
+        assert!(!stale_tmux_socket(&"x".repeat(1024)));
+    }
     #[test]
     fn active_custom_socket_is_included_only_with_automatic_discovery() {
         let mut config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
