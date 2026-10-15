@@ -37,6 +37,9 @@ impl std::error::Error for Error {}
 
 pub trait Api {
     fn get_me(&mut self) -> Result<Value>;
+    fn register_commands(&mut self, _commands: Value) -> Result<()> {
+        Err(Error::Invalid("Telegram command registration unavailable"))
+    }
     fn typing(&mut self, _chat: i64) -> Result<()> {
         Err(Error::Invalid("Telegram typing adapter unavailable"))
     }
@@ -214,6 +217,31 @@ fn valid_chat(chat: i64) -> Result<()> {
         Ok(())
     }
 }
+fn validate_commands(commands: &Value) -> Result<()> {
+    let entries = commands
+        .as_array()
+        .ok_or(Error::Invalid("Invalid Telegram command catalog"))?;
+    if entries.len() > 100 {
+        return Err(Error::Invalid("Telegram command catalog exceeds limit"));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for entry in entries {
+        let name = entry["command"].as_str().unwrap_or_default();
+        let description = entry["description"].as_str().unwrap_or_default();
+        if name.is_empty()
+            || name.len() > 32
+            || !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            || !names.insert(name)
+            || description.is_empty()
+            || description.chars().count() > 256
+            || description.chars().any(char::is_control)
+            || entry.as_object().is_none_or(|object| object.len() != 2)
+        {
+            return Err(Error::Invalid("Invalid Telegram command catalog"));
+        }
+    }
+    Ok(())
+}
 fn validate_keyboard(keyboard: &Value) -> Result<()> {
     let rows = keyboard
         .as_array()
@@ -247,6 +275,20 @@ fn validate_keyboard(keyboard: &Value) -> Result<()> {
     Ok(())
 }
 impl Api for BotApi {
+    fn register_commands(&mut self, commands: Value) -> Result<()> {
+        validate_commands(&commands)?;
+        for scope in ["default", "all_private_chats"] {
+            if self.call(
+                "setMyCommands",
+                &json!({"commands":commands,"scope":{"type":scope}}),
+            )? != true
+            {
+                return Err(Error::Uncertain);
+            }
+        }
+        Ok(())
+    }
+
     // https://core.telegram.org/bots/api#editmessagetext
     fn edit_text(&mut self, chat: i64, message: i64, text: &str) -> Result<Value> {
         valid_chat(chat)?;
@@ -321,7 +363,7 @@ impl Api for BotApi {
         let mut params = json!({"chat_id":chat,"text":text});
         if let Some(id) = reply_to {
             params["reply_parameters"] =
-                json!({"message_id":id,"allow_sending_without_reply":false});
+                json!({"message_id":id,"allow_sending_without_reply":true});
         }
         message_receipt(self.call("sendMessage", &params)?, chat)
     }
@@ -345,7 +387,7 @@ impl Api for BotApi {
             json!({"chat_id":chat,"text":text,"reply_markup":{"inline_keyboard":keyboard}});
         if let Some(id) = reply_to {
             params["reply_parameters"] =
-                json!({"message_id":id,"allow_sending_without_reply":false});
+                json!({"message_id":id,"allow_sending_without_reply":true});
         }
         message_receipt(self.call("sendMessage", &params)?, chat)
     }
@@ -478,13 +520,95 @@ mod tests {
         (BotApi::build("123:fixture", &origin, true).unwrap(), join)
     }
     #[test]
+    fn command_catalog_is_bounded_unique_and_literal() {
+        for invalid in [
+            json!({}),
+            json!([{"command":"Bad","description":"Good"}]),
+            json!([{"command":"x1","description":"Good"}]),
+            json!([{"command":"x","description":""}]),
+            json!([{"command":"x","description":"Good"},{"command":"x","description":"Again"}]),
+            json!([{"command":"x","description":"Good","extra":true}]),
+            json!([{"command":"x","description":"x".repeat(257)}]),
+            json!([{"command":"x".repeat(33),"description":"Good"}]),
+            json!(vec![json!({"command":"x","description":"Good"}); 101]),
+        ] {
+            assert!(validate_commands(&invalid).is_err());
+        }
+        validate_commands(&json!([{"command":"session_rename","description":"Rename session"}]))
+            .unwrap();
+    }
+    #[test]
+    fn command_registration_requires_true_receipt() {
+        let commands = json!([{"command":"menu","description":"Open controls"}]);
+        let (mut api, join) = server("200 OK", json!({"ok":true,"result":false}));
+        assert_eq!(
+            api.register_commands(commands.clone()),
+            Err(Error::Uncertain)
+        );
+        let request = join.join().unwrap();
+        assert!(request.contains("/setMyCommands"));
+        let body: Value = serde_json::from_str(request.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({"commands":commands,"scope":{"type":"default"}})
+        );
+    }
+    #[test]
+    fn command_registration_updates_default_and_private_scopes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let join = thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).unwrap();
+                bodies.push(serde_json::from_slice::<Value>(&bytes).unwrap());
+                let response = r#"{"ok":true,"result":true}"#;
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .unwrap();
+            }
+            bodies
+        });
+        let mut api = BotApi::build("123:fixture", &origin, true).unwrap();
+        let commands = json!([{"command":"menu","description":"Open controls"}]);
+        api.register_commands(commands.clone()).unwrap();
+        let bodies = join.join().unwrap();
+        assert_eq!(
+            bodies,
+            vec![
+                json!({"commands":commands,"scope":{"type":"default"}}),
+                json!({"commands":commands,"scope":{"type":"all_private_chats"}})
+            ]
+        );
+    }
+    #[test]
     fn feedback_uses_native_actions_without_sending_text() {
         let (mut api, join) = server("200 OK", json!({"ok":true,"result":true}));
         api.typing(42).unwrap();
         let request = join.join().unwrap();
         assert!(request.contains("/sendChatAction"));
-        let body: Value = serde_json::from_str(request.lines().last().unwrap())
-            .unwrap_or_else(|_| serde_json::from_str(request.lines().last().unwrap()).unwrap());
+        let body: Value = serde_json::from_str(request.lines().last().unwrap()).unwrap();
         assert_eq!(body, json!({"chat_id":42,"action":"typing"}));
         let (mut api, join) = server("200 OK", json!({"ok":true,"result":true}));
         api.acknowledge(42, 7).unwrap();
@@ -514,6 +638,42 @@ mod tests {
             json!({"ok":true,"result":{"message_id":7,"chat":{"id":99}}}),
         );
         assert_eq!(api.send_text(42, "hello", None), Err(Error::Uncertain));
+        join.join().unwrap();
+    }
+    #[test]
+    fn deleted_source_reply_stays_in_exact_chat_without_resubmission() {
+        for menu in [false, true] {
+            let (mut api, join) = server(
+                "200 OK",
+                json!({"ok":true,"result":{"message_id":8,"chat":{"id":42}}}),
+            );
+            let receipt = if menu {
+                api.send_menu(
+                    42,
+                    "hello",
+                    Some(5),
+                    json!([[{"text":"Open","callback_data":"review"}]]),
+                )
+            } else {
+                api.send_text(42, "hello", Some(5))
+            }
+            .unwrap();
+            assert_eq!(receipt, json!({"chat_id":42,"message_id":8}));
+            let request = join.join().unwrap();
+            let body: Value = serde_json::from_str(request.lines().last().unwrap()).unwrap();
+            assert_eq!(body["chat_id"], 42);
+            assert_eq!(body["text"], "hello");
+            assert_eq!(
+                body["reply_parameters"],
+                json!({"message_id":5,"allow_sending_without_reply":true})
+            );
+        }
+        // A definite rejection stays rejected; there is no second unthreaded send.
+        let (mut api, join) = server("400 Bad Request", json!({"ok":false,"error_code":400}));
+        assert_eq!(
+            api.send_text(42, "hello", Some(5)),
+            Err(Error::Rejected(400))
+        );
         join.join().unwrap();
     }
     #[test]

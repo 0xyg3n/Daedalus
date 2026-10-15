@@ -29,6 +29,8 @@
 </tr>
 </table>
 
+The Rust migration is still in beta. See the [migration audit](docs/ARCHITECTURE.md#python-migration-audit) for remaining differences from the Python version.
+
 ## What it does
 
 You run coding agents such as Claude Code, Codex or Grok in tmux or Herdr terminals. Daedalus finds those terminals, shows them side by side and lets you watch, type into or message exactly the one you choose, from the terminal UI, the command line or a Telegram chat. It does not replace the agents or their sign-in. Everything ships as one Rust executable.
@@ -125,7 +127,7 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
 | Linux x86-64 | Stable release; tested locally | tmux and Herdr | [Linux release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.1.0) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.2) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
+| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
 
 Both platforms use the same Rust executable and Ratatui interface; no Python runtime is required. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -152,10 +154,10 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.2) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
 
 ```powershell
-$exe = 'daedalus-0.2.0-beta.2-x86_64-windows.exe'
+$exe = 'daedalus-0.2.0-beta.3-x86_64-windows.exe'
 $expected = (Get-Content "$exe.sha256").Split(' ')[0]
 if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
 & ".\$exe" setup

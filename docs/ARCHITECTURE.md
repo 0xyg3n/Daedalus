@@ -86,3 +86,42 @@ state.
 Tests do not prove OAuth acceptance, live Telegram delivery, Hindsight indexing or
 compatibility with untested upstream versions. Run a credential scan on the
 current tree before publishing.
+
+## Python migration audit
+
+The Rust implementation is not yet at full behavior parity with the previous
+Python application. An action existing in a menu, a transport method compiling,
+or a passing fixture does not establish that the complete user flow works.
+This audit compares the previous control/menu implementation and the legacy
+feeder, delivery and hook code. Private deployments remain outside the public
+configuration examples.
+
+| Previous behavior | Current Rust status and evidence |
+| --- | --- |
+| Exact terminal routes, grants, queue, text replies | Implemented; isolated delivery/authorization tests and an observed Linux Grok Telegram round trip. This is not a live validation of every provider. |
+| Typing and receipt reaction | Restored; bounded separate feedback worker and HTTP fixture tests. Reaction means saved to the queue, not completed. Queue-specific reaction transitions are still missing. |
+| Telegram command autocomplete | Restored for default and private-chat scopes, using a validated canonical catalog. Aliases share the ordinary authorization path. |
+| Reply after the triggering message was deleted | Restored; exact chat and message targeting, with Telegram allowing an unthreaded reply when the source disappeared. No resend fallback. |
+| Context-only terminal checkpoints | Restored for verified terminals without native session identity; resume/fork still require a supported verified native session. |
+| Grok final-response Hindsight retention | Fixed native camelCase payload dispatch; runtime and downstream memory tests. This does not cover all earlier local memory hooks. |
+| Native terminal layout/attach/view controls | Implemented, including actual Focus divider resizing. Native Windows limitations remain in the platform matrix. |
+| Grok live assistant/tool streaming | Missing native update cursor and causal turn adapter; command remains explicitly blocked. Final reply/progress delivery is separate. |
+| Rich Markdown replies and outbound files/media | Missing end-to-end operations. Replies remain plain text. The document transport method alone is not a supported file-sending product flow. |
+| Detailed phase/tool/elapsed/task progress | Partial: a receipt-owned progress message is edited, but the old detail fields are absent. |
+| Edited incoming messages, burst coalescing and sender repeat/flood controls | Not migrated. Durable duplicate-update protection is narrower than these behaviors. |
+| Legacy goal files | Native goal state and controls exist. Old text flags are not imported by the instance wizard; the internal import helper alone is not a user flow. Exact scope review and paused import are required before restoring this. |
+| Checkpoint model selection | Model/launcher metadata from older checkpoints is not currently restored. Arbitrary old shell launchers must not be executed as migration data. |
+| Startup context, local memory recall and local session-note persistence | No equivalent generic Rust flow yet. Optional Hindsight is not a replacement for all three. |
+| Memory retention at compaction/session end | No verified native transcript extraction contract yet. Final-response retention must not be advertised as these lifecycle features. |
+| Legacy tool-policy and signed-frame hooks | Not shipped. Native PreToolUse authorization currently rejects unsupported policy; it does not implement the old heuristics. Those heuristics were not a sandbox. |
+| Older installations without control.json | Instance import requires a modern control file; environment-only legacy setups need an explicit conversion step. |
+
+Discord, Grok voice, Telegram transcription and raw console mirroring were removed
+by scope decision. Private persona defaults, account orchestration and deployment
+watchdogs must not be copied into a generic public installation.
+
+For each remaining row, completion requires an executable user entry point,
+configuration/import behavior, provider identity and authorization checks, and
+isolated end-to-end regression coverage. Live acceptance must be reported
+separately from fixture and cross-compilation results. Do not remove a guard or
+call an unconnected helper a completed migration.

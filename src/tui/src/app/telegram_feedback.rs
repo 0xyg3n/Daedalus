@@ -30,9 +30,13 @@ impl From<super::telegram::Frame> for Receipt {
         }
     }
 }
+enum Operation {
+    Typing(i64),
+    Acknowledge(i64, i64),
+    Commands,
+}
 struct Action {
-    chat: i64,
-    message: Option<i64>,
+    operation: Operation,
     expires: Instant,
 }
 pub struct Feedback {
@@ -51,9 +55,10 @@ impl Feedback {
                     if Instant::now() >= action.expires || Instant::now() < retry_at {
                         continue;
                     }
-                    let result = match action.message {
-                        Some(message) => api.acknowledge(action.chat, message),
-                        None => api.typing(action.chat),
+                    let result = match action.operation {
+                        Operation::Acknowledge(chat,message) => api.acknowledge(chat, message),
+                        Operation::Typing(chat) => api.typing(chat),
+                        Operation::Commands => api.register_commands(serde_json::json!(super::telegram_commands::BOT_COMMANDS.iter().map(|(command,description)|serde_json::json!({"command":command,"description":description})).collect::<Vec<_>>())),
                     };
                     // Cosmetic failures never fail delivery or trigger retries.
                     if let Err(Error::RateLimited(seconds)) = result {
@@ -71,10 +76,20 @@ impl Feedback {
     fn offer(&self, chat: i64, message: Option<i64>) {
         if let Some(requests) = &self.requests {
             let _ = requests.try_send(Action {
-                chat,
-                message,
+                operation: match message {
+                    Some(message) => Operation::Acknowledge(chat, message),
+                    None => Operation::Typing(chat),
+                },
                 expires: Instant::now()
                     + Duration::from_secs(if message.is_some() { 10 } else { 1 }),
+            });
+        }
+    }
+    pub fn register_commands(&self) {
+        if let Some(requests) = &self.requests {
+            let _ = requests.try_send(Action {
+                operation: Operation::Commands,
+                expires: Instant::now() + Duration::from_secs(10),
             });
         }
     }
@@ -223,8 +238,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .send(Action {
-                    chat: 42,
-                    message: None,
+                    operation: Operation::Typing(42),
                     expires: Instant::now() - Duration::from_secs(1),
                 })
                 .unwrap();

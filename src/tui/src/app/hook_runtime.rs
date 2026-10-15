@@ -1320,6 +1320,16 @@ fn memory_event(harness: Harness, kind: EventKind, payload: &Value) -> Option<Ev
     {
         return Some(EventKind::SessionStart);
     }
+    // Grok's native Stop payload uses camelCase. Do not accept guessed aliases
+    // or lifecycle events that do not carry a verified assistant response.
+    if harness == Harness::Grok {
+        return (kind == EventKind::Stop
+            && payload
+                .get("lastAssistantMessage")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty()))
+        .then_some(EventKind::Stop);
+    }
     if matches!(
         kind,
         EventKind::Stop
@@ -1878,6 +1888,32 @@ mod tests {
         );
         assert!(memory_event(Harness::Grok, EventKind::SessionStart, &json!({})).is_none());
         assert!(memory_event(Harness::Claude, EventKind::SessionEnd, &json!({})).is_none());
+    }
+    #[test]
+    fn grok_memory_dispatch_requires_native_stop_assistant_text() {
+        let native = json!({"lastAssistantMessage":"verified native result"});
+        assert_eq!(
+            memory_event(Harness::Grok, EventKind::Stop, &native),
+            Some(EventKind::Stop)
+        );
+        for payload in [
+            json!({}),
+            json!({"lastAssistantMessage":"  "}),
+            json!({"lastAssistantMessage":42}),
+            json!({"last_assistant_message":"wrong alias"}),
+            json!({"text":"wrong alias"}),
+            json!({"extra":{"assistant_response":"wrong provider"}}),
+        ] {
+            assert!(memory_event(Harness::Grok, EventKind::Stop, &payload).is_none());
+        }
+        for kind in [
+            EventKind::SessionStart,
+            EventKind::AssistantResponse,
+            EventKind::PreCompact,
+            EventKind::SessionEnd,
+        ] {
+            assert!(memory_event(Harness::Grok, kind, &native).is_none());
+        }
     }
     #[test]
     fn optional_memory_configuration_failure_preserves_successful_hook_reply() {

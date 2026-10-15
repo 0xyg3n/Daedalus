@@ -327,6 +327,28 @@ fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option
 fn process_fingerprint(evidence: &Option<ProcessEvidence>) -> Value {
     evidence.as_ref().map(|p|json!({"pid":p.pid,"start":p.start,"argv_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&p.argv).expect("argv strings"))),"cwd":p.cwd,"profile":p.profile})).unwrap_or(Value::Null)
 }
+fn capture_fingerprint(
+    _adapter: &Terminals,
+    _pane: &Value,
+    _harness: &str,
+    evidence: &Option<ProcessEvidence>,
+) -> Result<Value> {
+    let observed = process_fingerprint(evidence);
+    #[cfg(windows)]
+    return native_fingerprint_or(observed, || {
+        windows_native_process(_adapter, _pane, _harness)
+    });
+    #[cfg(not(windows))]
+    Ok(observed)
+}
+#[cfg(any(windows, test))]
+fn native_fingerprint_or(observed: Value, native: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    if observed.is_null() {
+        native()
+    } else {
+        Ok(observed)
+    }
+}
 fn check_process(
     adapter: &Terminals,
     evidence: &Option<ProcessEvidence>,
@@ -619,13 +641,9 @@ impl SessionStore {
             return Err("Handoff source changed while preparing; select it again".into());
         }
         let mut frozen = before;
-        frozen["_daedalus_handoff_process"] = process_fingerprint(&evidence);
-        #[cfg(windows)]
-        if evidence.is_none() {
-            frozen["_daedalus_handoff_process"] =
-                windows_native_process(adapter, &frozen, &harness)?;
-        }
-        if checkpoint.sid.is_empty() && evidence.is_none() {
+        frozen["_daedalus_handoff_process"] =
+            capture_fingerprint(adapter, &frozen, &harness, &evidence)?;
+        if checkpoint.sid.is_empty() && frozen["_daedalus_handoff_process"].is_null() {
             return Err(
                 "Handoff requires a native session ID or a verifiable foreground process".into(),
             );
@@ -642,17 +660,45 @@ impl SessionStore {
     ) -> Result<CheckpointRow> {
         let _lock = lock(&self.directory)?;
         let before = adapter.verify(pane)?;
-        let process = foreground(adapter, &before, &field(&before, "agent"))?;
-        let mut row = self.live_source(adapter, config, environment, pane, &request.sid)?;
+        let observed = field(&before, "agent").to_lowercase();
+        // A terminal excerpt is useful even when no native conversation can be
+        // identified. Never promote shell/Node metadata into a provider ID.
+        let context_only = harnesses::tool(&observed).is_none()
+            && request.include_output
+            && request.sid.trim().is_empty();
+        let mut row = if context_only {
+            // Preserve registered Pi identity when it is genuinely observable;
+            // failure here only falls back to an explicitly context-only record.
+            match self.live_source(adapter, config, environment, pane, "") {
+                Ok(row) if row.harness == "pi" => row,
+                _ => self.capture_terminal_context(adapter, pane, &before, &request.name)?,
+            }
+        } else {
+            if harnesses::tool(&observed).is_none()
+                && !matches!(observed.as_str(), "" | "node" | "nodejs")
+            {
+                return Err(
+                    "This terminal has no verified native harness; save visible output instead"
+                        .into(),
+                );
+            }
+            self.live_source(adapter, config, environment, pane, &request.sid)?
+        };
+        let process = if row.context_file.is_empty() {
+            foreground(adapter, &before, &row.harness)?
+        } else {
+            None
+        };
         row.name = request.name.trim().into();
-        if request.include_output {
+        if request.include_output && row.context_file.is_empty() {
             let mut frozen = before.clone();
-            frozen["_daedalus_handoff_process"] = process_fingerprint(&process);
+            frozen["_daedalus_handoff_process"] =
+                capture_fingerprint(adapter, &frozen, &row.harness, &process)?;
             row = self.capture_handoff(adapter, &frozen, row)?;
         }
         row.validate()?;
         let after = adapter.verify(pane)?;
-        check_process(adapter, &process, &field(&before, "agent"))?;
+        check_process(adapter, &process, &row.harness)?;
         if before.get("agent_session") != after.get("agent_session")
             || before.get("agent") != after.get("agent")
         {
@@ -672,6 +718,53 @@ impl SessionStore {
                 .to_string_lossy()
                 .into_owned(),
         })
+    }
+    fn capture_terminal_context(
+        &self,
+        adapter: &Terminals,
+        pane: &Value,
+        before: &Value,
+        name: &str,
+    ) -> Result<Checkpoint> {
+        let cwd = first(before, &["foreground_cwd", "cwd"]);
+        if !Path::new(&cwd).is_dir() {
+            return Err("Cannot determine an existing project directory".into());
+        }
+        let mut checkpoint = Checkpoint {
+            name: name.trim().into(),
+            harness: "unknown".into(),
+            sid: String::new(),
+            cwd,
+            profile: String::new(),
+            origin: "Terminal context only".into(),
+            created_at: utc_now(),
+            context_file: String::new(),
+            source: Some(terminal_ref(before)?),
+        };
+        let content = adapter.capture(pane, 120)?;
+        let after = adapter.verify(pane)?;
+        if !terminal_ref(before)?.same_identity(&terminal_ref(&after)?)
+            || before.get("agent") != after.get("agent")
+            || before.get("agent_session") != after.get("agent_session")
+            || first(&after, &["foreground_cwd", "cwd"]) != checkpoint.cwd
+        {
+            return Err("Terminal changed during context capture; select it again".into());
+        }
+        self.write_context(&mut checkpoint, &content)?;
+        Ok(checkpoint)
+    }
+    fn write_context(&self, checkpoint: &mut Checkpoint, content: &str) -> Result<()> {
+        let captured = format!(
+            "# Session handoff\n\nProject: {}\nSource harness: {}\n\nThis is a captured terminal excerpt, not a full conversation archive.\n\n```text\n{}\n```\n",
+            checkpoint.cwd, checkpoint.harness, content
+        );
+        let path = self
+            .directory
+            .join("checkpoints")
+            .join(format!("{:x}.md", Sha256::digest(captured.as_bytes())));
+        layouts::write_private(&path, captured.as_bytes())?;
+        checkpoint.context_file = path.to_string_lossy().into_owned();
+        checkpoint.validate()
     }
     pub fn capture_handoff(
         &self,
@@ -696,8 +789,9 @@ impl SessionStore {
             return Err("Handoff harness changed; select it again".into());
         }
         let process = foreground(adapter, &before, &harness)?;
+        let fingerprint = capture_fingerprint(adapter, &before, &harness, &process)?;
         if let Some(frozen) = pane.get("_daedalus_handoff_process") {
-            if *frozen != process_fingerprint(&process) {
+            if *frozen != fingerprint {
                 return Err("Handoff foreground process changed; select it again".into());
             }
         } else if checkpoint.sid.is_empty() {
@@ -705,7 +799,7 @@ impl SessionStore {
                 "Handoff requires frozen foreground process evidence; select it again".into(),
             );
         }
-        if checkpoint.sid.is_empty() && process.is_none() {
+        if checkpoint.sid.is_empty() && fingerprint.is_null() {
             return Err(
                 "Handoff requires a native session ID or a verifiable foreground process".into(),
             );
@@ -734,22 +828,15 @@ impl SessionStore {
         let content = adapter.capture(pane, 120)?;
         let after = adapter.verify(pane)?;
         check_process(adapter, &process, &harness)?;
+        if fingerprint != capture_fingerprint(adapter, &after, &harness, &process)? {
+            return Err("Handoff foreground process changed during context capture".into());
+        }
         if before.get("agent") != after.get("agent")
             || before.get("agent_session") != after.get("agent_session")
         {
             return Err("Harness changed during context capture".into());
         }
-        let captured = format!(
-            "# Session handoff\n\nProject: {}\nSource harness: {}\n\nThis is a captured terminal excerpt, not a full conversation archive.\n\n```text\n{}\n```\n",
-            checkpoint.cwd, checkpoint.harness, content
-        );
-        let path = self
-            .directory
-            .join("checkpoints")
-            .join(format!("{:x}.md", Sha256::digest(captured.as_bytes())));
-        layouts::write_private(&path, captured.as_bytes())?;
-        checkpoint.context_file = path.to_string_lossy().into_owned();
-        checkpoint.validate()?;
+        self.write_context(&mut checkpoint, &content)?;
         Ok(checkpoint)
     }
     /// Evidence must come from a successful bounded native help query. This
@@ -1543,6 +1630,96 @@ mod tests {
         }
     }
     #[test]
+    fn unknown_terminal_context_is_saved_without_inventing_native_identity() {
+        for agent in ["", "bash", "node", "custom-runner"] {
+            let mut f = fixture();
+            f.pane["agent"] = json!(agent);
+            // Even stray provider-shaped metadata on a generic terminal is not
+            // evidence of a native provider conversation.
+            fs::write(
+                f.dir.join("pane.json"),
+                serde_json::to_vec(&json!({"pane":f.pane})).unwrap(),
+            )
+            .unwrap();
+            let saved = save(&f, true);
+            assert_eq!(saved.checkpoint.harness, "unknown");
+            assert!(saved.checkpoint.sid.is_empty());
+            assert!(saved.checkpoint.profile.is_empty());
+            assert_eq!(saved.checkpoint.origin, "Terminal context only");
+            assert!(
+                fs::read_to_string(&saved.checkpoint.context_file)
+                    .unwrap()
+                    .contains("private fixture transcript")
+            );
+            let caps = capabilities(&f);
+            for operation in [Operation::Resume, Operation::NativeFork] {
+                assert!(
+                    checkpoints::plan(&saved.checkpoint, operation, &caps, &f.store.directory)
+                        .is_err()
+                );
+            }
+            assert!(
+                checkpoints::plan(
+                    &saved.checkpoint,
+                    Operation::Handoff,
+                    &caps,
+                    &f.store.directory
+                )
+                .is_ok()
+            );
+            assert!(
+                f.store
+                    .save(
+                        &f.adapter,
+                        &f.config,
+                        &f.environment,
+                        &f.pane,
+                        &SaveRequest {
+                            name: "False reference".into(),
+                            sid: "pretend-id".into(),
+                            include_output: true
+                        }
+                    )
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn context_capture_rejects_terminal_project_changed_during_capture() {
+        let mut f = fixture();
+        f.pane["agent"] = json!("bash");
+        let before = f.pane.clone();
+        fs::write(
+            f.dir.join("pane.json"),
+            serde_json::to_vec(&json!({"pane":f.pane})).unwrap(),
+        )
+        .unwrap();
+        let mut changed = f.pane.clone();
+        changed["cwd"] = json!(f.dir.join("profile"));
+        fs::write(
+            f.dir.join("changed.json"),
+            serde_json::to_vec(&json!({"pane":changed})).unwrap(),
+        )
+        .unwrap();
+        let script = fs::read_to_string(&f.adapter.herdr).unwrap().replace(
+            "read) printf",
+            &format!(
+                "read) /bin/cp '{}' '{}'; printf",
+                f.dir.join("changed.json").display(),
+                f.dir.join("pane.json").display()
+            ),
+        );
+        publish_script(&f.adapter.herdr, script);
+        assert!(
+            f.store
+                .capture_terminal_context(&f.adapter, &f.pane, &before, "Context")
+                .unwrap_err()
+                .contains("changed during context capture")
+        );
+        assert!(f.store.list().unwrap().is_empty());
+        assert!(!f.store.directory.join("checkpoints").exists());
+    }
+    #[test]
     fn saves_verified_reference_and_private_context() {
         let f = fixture();
         let saved = save(&f, true);
@@ -1929,4 +2106,30 @@ fn read_process(
     // process. Herdr's correlated native session metadata remains available;
     // never invent argv evidence by treating its display label as a command.
     Ok(None)
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    #[test]
+    fn windows_native_fingerprint_is_reused_for_capture_and_rejects_restart() {
+        let native =
+            json!({"pid":"42","start":"100","executable":"fixture.exe","arguments_observed":false});
+        let frozen = native_fingerprint_or(Value::Null, || Ok(native.clone())).unwrap();
+        let capture = native_fingerprint_or(Value::Null, || Ok(native.clone())).unwrap();
+        assert_eq!(frozen, capture);
+        assert!(!capture.is_null());
+        let mut restarted = native.clone();
+        restarted["start"] = json!("200");
+        assert_ne!(
+            frozen,
+            native_fingerprint_or(Value::Null, || Ok(restarted)).unwrap()
+        );
+        assert!(native_fingerprint_or(Value::Null, || Err("process disappeared".into())).is_err());
+        assert_eq!(
+            native_fingerprint_or(native.clone(), || panic!("must retain observed evidence"))
+                .unwrap(),
+            native
+        );
+    }
 }

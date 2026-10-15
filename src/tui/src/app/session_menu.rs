@@ -952,6 +952,11 @@ impl SessionMenu {
                         "A Daedalus view only; nothing changes in the terminal."
                     ]),
                 ];
+                // Native Herdr cannot currently create a second attach client
+                // on Windows. Keep Watch/Tiles available without a dead-end plan.
+                if cfg!(windows) && field(&pane, "backend") == "herdr" {
+                    options.retain(|option| option[0] != "viewer");
+                }
                 if field(&pane, "backend") == "tmux" {
                     if !self.link_destinations(&pane).is_empty() {
                         options.insert(
@@ -1405,8 +1410,8 @@ impl SessionMenu {
                         ]),
                         json!([
                             "context",
-                            "Reference + visible terminal output",
-                            "Save the last 120 lines privately for cross-harness handoff."
+                            "Visible output + session reference if available",
+                            "Save the last 120 lines privately, even without a native session ID; context-only saves support handoff, not native resume or fork."
                         ]),
                         json!([
                             "manual",
@@ -1959,6 +1964,25 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn herdr_duplicate_view_menu_matches_platform_support() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        let mut terminal = pane();
+        terminal["backend"] = json!("herdr");
+        let outcome = menu
+            .for_pane(
+                "terminal.duplicate",
+                terminal,
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+        let choices = outcome.frames[0]["options"].as_array().unwrap();
+        assert_eq!(choices.iter().any(|row| row[0] == "viewer"), !cfg!(windows));
+        assert!(choices.iter().any(|row| row[0] == "pin"));
+        assert!(source.requests.is_empty());
+    }
     #[test]
     fn checkpoint_save_invalid_reply_cancel_and_confirmation_are_single_use() {
         let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);

@@ -632,6 +632,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     let mut feedback = super::telegram_feedback::Feedback::spawn(
         BotApi::feedback(&token).map_err(|e| e.to_string())?,
     )?;
+    feedback.register_commands();
     drop(token);
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();

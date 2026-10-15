@@ -85,6 +85,53 @@ impl Action {
         )
     }
 }
+/// Canonical discovery names only; aliases remain accepted by the parser.
+/// Publishing this menu does not grant any command permission.
+pub const BOT_COMMANDS: &[(&str, &str)] = &[
+    ("menu", "Open the command panel"),
+    ("status", "Show the selected route and service state"),
+    ("windows", "Choose a terminal"),
+    ("use", "Select a terminal route"),
+    ("sessions", "List conversation routes"),
+    ("busy", "Check verified agent readiness"),
+    ("pending", "Inspect queued input"),
+    ("say", "Send text to the selected terminal"),
+    ("capture", "Show recent terminal output"),
+    ("interrupt", "Interrupt the selected terminal"),
+    ("stop", "Send Escape"),
+    ("enter", "Send Enter"),
+    ("keys", "Send supported terminal keys"),
+    ("kill", "Review closing the terminal"),
+    ("new", "Launch a hooked agent"),
+    ("pin", "Keep the selected route"),
+    ("unpin", "Release the route pin"),
+    ("quiet", "Require mentions or replies in groups"),
+    ("listen", "Listen to authorized group messages"),
+    ("stream", "Configure assistant text streaming"),
+    ("reason", "Configure tool name updates"),
+    ("goal", "Inspect or control the agent goal"),
+    ("checkpoint", "Save, resume or fork a checkpoint"),
+    ("session_rename", "Rename the selected tmux session"),
+    ("session_rename_status", "Inspect a session rename"),
+    ("rename", "Rename an optional Armonia agent"),
+    ("rename_status", "Inspect an Armonia rename"),
+    ("model", "Select the native Claude Code model"),
+    ("effort", "Select native reasoning effort"),
+    ("plan", "Enter native plan mode"),
+    ("clear", "Clear native conversation context"),
+    ("compact", "Compact native conversation context"),
+    ("context", "Inspect native context usage"),
+    ("cost", "Inspect native costs"),
+    ("agents", "Open native agents"),
+    ("mcp", "Open native MCP settings"),
+    ("review", "Run native code review"),
+    ("secreview", "Run native security review"),
+    ("export", "Open native conversation export"),
+    ("config", "Open native settings"),
+    ("memory", "Open native memory"),
+    ("cc", "Run a supported native slash command"),
+];
+
 /// None means explicitly addressed to another bot, never an agent prompt.
 pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
     if text.len() > 8192 || text.contains('\0') || !text.starts_with('/') {
@@ -124,7 +171,7 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
             no_args()?;
             Command::Status
         }
-        "/windows" | "/jobs" => {
+        "/windows" | "/jobs" | "/fleet" | "/wins" | "/tmux" => {
             no_args()?;
             Command::Windows
         }
@@ -171,7 +218,7 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
             no_args()?;
             Command::Close
         }
-        "/say" => {
+        "/say" | "/send" => {
             if rest.is_empty() {
                 return Err("Use /say <text> for the current route".into());
             }
@@ -185,15 +232,15 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
             no_args()?;
             Command::Busy
         }
-        "/pending" => {
+        "/pending" | "/queue" => {
             no_args()?;
             Command::Queue
         }
-        "/stop" | "/esc" => {
+        "/stop" | "/esc" | "/escape" => {
             no_args()?;
             Command::Keys(vec!["Escape".into()])
         }
-        "/enter" => {
+        "/enter" | "/ret" | "/return" => {
             no_args()?;
             Command::Keys(vec!["Enter".into()])
         }
@@ -214,9 +261,9 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
                 arguments: rest.into(),
             })
         }
-        "/quiet" | "/listen" => {
+        "/quiet" | "/mute" | "/hush" | "/ping" | "/listen" | "/watch" | "/unmute" => {
             no_args()?;
-            Command::Listen(name == "/listen")
+            Command::Listen(matches!(name, "/listen" | "/watch" | "/unmute"))
         }
         "/resume" => Command::Checkpoint(Action::CheckpointResume(checkpoint_key(rest)?)),
         "/use" => Command::Use(if rest.is_empty() {
@@ -236,7 +283,7 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
             no_args()?;
             Command::Capture
         }
-        "/interrupt" | "/ctrlc" => {
+        "/interrupt" | "/ctrlc" | "/cancel" => {
             no_args()?;
             Command::Interrupt
         }
@@ -1580,6 +1627,41 @@ impl NativeOperations {
 mod tests {
     use super::*;
     use crate::core::identity::Backend;
+    #[test]
+    fn legacy_aliases_keep_the_canonical_authorization_path() {
+        for (canonical, aliases) in [
+            ("/windows", vec!["/jobs", "/fleet", "/wins", "/tmux"]),
+            ("/say hello", vec!["/send hello"]),
+            ("/pending", vec!["/queue"]),
+            ("/stop", vec!["/esc", "/escape"]),
+            ("/enter", vec!["/ret", "/return"]),
+            ("/ctrlc", vec!["/cancel"]),
+            ("/quiet", vec!["/mute", "/hush", "/ping"]),
+            ("/listen", vec!["/watch", "/unmute"]),
+        ] {
+            for alias in aliases {
+                assert_eq!(
+                    parse(alias, "fixture").unwrap(),
+                    parse(canonical, "fixture").unwrap()
+                );
+                assert_eq!(
+                    parse(
+                        &format!("{}@other", alias.split_whitespace().next().unwrap()),
+                        "fixture"
+                    )
+                    .unwrap(),
+                    None
+                );
+            }
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for (name, description) in BOT_COMMANDS {
+            assert!(names.insert(name));
+            assert!(name.len() <= 32 && name.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'));
+            assert!(!description.is_empty() && description.chars().count() <= 256);
+        }
+        assert!(BOT_COMMANDS.len() <= 100);
+    }
     struct Mock {
         rows: Vec<Terminal>,
         effects: usize,

@@ -41,8 +41,18 @@ Telegram has the same controls through `/goal`.
 | Codex | Native hook response |
 | Cursor | Bounded follow-up message at the end of a generation |
 | Pi | `agent_before_settle`; `agent_settled` marks readiness |
-| Grok 1.0.46 | Matching end-turn reason, prompt ID and stop-hook state; Grok's own continuation cap applies, then the goal becomes Blocked |
+| Grok 1.0.46 or reviewed 1.0.52+ in the 1.0 series | Matching end-turn reason, prompt ID and stop-hook state; Grok's own continuation cap applies, then the goal becomes Blocked |
 | Hermes, OpenCode | Not available |
 
 A Grok Stop event does not prove the agent is idle, because Grok may continue the
-turn. Its readiness stays Unknown.
+turn. It stays Unknown until a verified native idle notification; reviewed
+Grok 1.0.52+ profiles also support exact native event-log bootstrap evidence.
+Idle readiness does not establish task success.
+
+## Legacy goal files
+
+Instance import currently preserves native goal databases, but does not import
+old `goal` / `goal.<window>` text files into active registrations. Those files
+must not silently be counted as migrated. A directive can be reviewed and armed
+through the native command above after its exact registration is configured;
+never infer its target from a window name or automatically start continuation.

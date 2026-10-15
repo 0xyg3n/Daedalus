@@ -90,10 +90,10 @@ sender, chat and route.
 | --- | --- |
 | `/menu`, `/panel`, `/help` | Command menu |
 | `/status`, `/where` | Current route and service state |
-| `/windows`, `/jobs` | Terminals this chat can route to |
+| `/windows`, `/jobs`, `/fleet` | Terminals this chat can route to |
 | `/use [KEY]`, `/pin`, `/unpin` | Select or keep the chat's route |
 | `/sessions`, `/busy`, `/pending` | Conversations, verified busy state, queue counts |
-| `/say TEXT` | Send text to the routed terminal |
+| `/say TEXT`, `/send TEXT` | Send text to the routed terminal |
 | `/capture` | Read recent terminal output; may contain private text |
 | `/interrupt`, `/ctrlc` | Interrupt |
 | `/stop`, `/esc`, `/enter`, `/keys KEYS` | Send keys |
@@ -107,6 +107,11 @@ sender, chat and route.
 | `/session_rename NAME`, `/session_rename_status OP` | Rename the tmux session |
 | `/rename AGENT NEW_BASE`, `/rename_status ar:ID` | Optional Armonia rename |
 | `/model`, `/effort`, `/plan`, `/clear`, `/compact`, `/context`, `/cost`, `/agents`, `/mcp`, `/review`, `/security-review` (`/secreview`), `/export`, `/config`, `/memory`, `/cc` | Claude Code slash commands; require Claude Code 2.1.296 |
+
+Legacy aliases remain accepted without duplicate menu entries: `/wins`, `/tmux`
+(list terminals), `/queue`, `/mute`, `/hush`, `/ping` (quiet), `/watch`, `/unmute`
+(listen), `/escape`, `/ret`, `/return` and `/cancel` (Ctrl+C). They use the same
+route checks, grants and confirmations as their canonical commands.
 
 `/mode`, `/license` (`/lic`) and `/mirror` (`/console`) reply that they are not
 available.
