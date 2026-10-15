@@ -111,3 +111,18 @@ and reject changing or partial files.
 This bootstrap applies only before any hook observations or reservations exist;
 it cannot overwrite busy state, settle a reserved input, or invent a reply.
 Reload the reviewed hooks in Grok before enabling Telegram delivery.
+
+## Telegram reception feedback
+
+Authorized text and file input gets a 👀 reaction after Daedalus has saved it
+to the feeder queue. This confirms receipt, not submission or completion.
+The typing indicator refreshes every four seconds while the exact registered
+conversation's hooks report Busy and the recipient route remains authorized.
+Idle, Unknown, missing registration and revoked routes stop refreshing it;
+Telegram clears the short-lived indicator automatically.
+
+Feedback uses a separate bounded worker and a short network timeout. It is
+best effort: unsupported reactions, rate limits and connectivity errors do not
+block agent input or replies. Expired feedback is dropped and reactions are not
+replayed on restart. See Telegram's [chat actions](https://core.telegram.org/bots/api#sendchataction)
+and [message reactions](https://core.telegram.org/bots/api#setmessagereaction).

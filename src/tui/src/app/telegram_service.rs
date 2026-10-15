@@ -629,6 +629,9 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         Poller::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
     let mut sender =
         Sender::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
+    let mut feedback = super::telegram_feedback::Feedback::spawn(
+        BotApi::feedback(&token).map_err(|e| e.to_string())?,
+    )?;
     drop(token);
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();
@@ -678,6 +681,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                     clock(),
                 )?;
             }
+            feedback.tick(&mut engine, &config, &registrations, clock());
             sender.tick(&mut engine, config.bot_id, clock())?;
             cursors.hooks(&mut engine, &config, &registrations, clock())?;
             progress.tick(
@@ -698,6 +702,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         &config,
         super::telegram_supervisor::Phase::Stopping,
     );
+    feedback.shutdown();
     let send_result = sender.shutdown(&mut engine, clock);
     let poll_result = poller.shutdown();
     let stopped_result = super::telegram_supervisor::record(

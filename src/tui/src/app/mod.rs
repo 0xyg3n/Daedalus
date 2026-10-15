@@ -44,6 +44,7 @@ pub mod telegram_admin;
 pub mod telegram_cli;
 pub mod telegram_commands;
 pub mod telegram_config;
+pub mod telegram_feedback;
 pub mod telegram_feeder;
 pub mod telegram_launch;
 pub mod telegram_menu;

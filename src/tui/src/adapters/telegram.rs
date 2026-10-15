@@ -37,6 +37,12 @@ impl std::error::Error for Error {}
 
 pub trait Api {
     fn get_me(&mut self) -> Result<Value>;
+    fn typing(&mut self, _chat: i64) -> Result<()> {
+        Err(Error::Invalid("Telegram typing adapter unavailable"))
+    }
+    fn acknowledge(&mut self, _chat: i64, _message: i64) -> Result<()> {
+        Err(Error::Invalid("Telegram reaction adapter unavailable"))
+    }
     fn updates(&mut self, offset: i64, timeout: u64) -> Result<Vec<Value>>;
     fn send_text(&mut self, chat: i64, text: &str, reply_to: Option<i64>) -> Result<Value>;
     fn edit_text(&mut self, _chat: i64, _message: i64, _text: &str) -> Result<Value> {
@@ -77,6 +83,18 @@ impl std::fmt::Debug for BotApi {
 impl BotApi {
     pub fn new(token: &str, origin: &str) -> Result<Self> {
         Self::build(token, origin, false)
+    }
+    pub fn feedback(token: &str) -> Result<Self> {
+        let mut api = Self::new(token, "https://api.telegram.org")?;
+        api.client = Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(3))
+            .redirect(redirect::Policy::none())
+            .retry(retry::never())
+            .no_proxy()
+            .build()
+            .map_err(|_| Error::Invalid("Cannot initialize feedback transport"))?;
+        Ok(api)
     }
     fn build(token: &str, origin: &str, local_test: bool) -> Result<Self> {
         let (id, secret) = token
@@ -276,6 +294,21 @@ impl Api for BotApi {
         }
         Ok(updates.clone())
     }
+    fn typing(&mut self, chat: i64) -> Result<()> {
+        valid_chat(chat)?;
+        if self.call("sendChatAction", &json!({"chat_id":chat,"action":"typing"}))? != true {
+            return Err(Error::Uncertain);
+        }
+        Ok(())
+    }
+    fn acknowledge(&mut self, chat: i64, message: i64) -> Result<()> {
+        valid_chat(chat)?;
+        if message <= 0 {
+            return Err(Error::Invalid("Invalid reaction message"));
+        }
+        if self.call("setMessageReaction", &json!({"chat_id":chat,"message_id":message,"reaction":[{"type":"emoji","emoji":"👀"}],"is_big":false}))? != true { return Err(Error::Uncertain); }
+        Ok(())
+    }
     fn send_text(&mut self, chat: i64, text: &str, reply_to: Option<i64>) -> Result<Value> {
         valid_chat(chat)?;
         if text.is_empty()
@@ -443,6 +476,25 @@ mod tests {
             request
         });
         (BotApi::build("123:fixture", &origin, true).unwrap(), join)
+    }
+    #[test]
+    fn feedback_uses_native_actions_without_sending_text() {
+        let (mut api, join) = server("200 OK", json!({"ok":true,"result":true}));
+        api.typing(42).unwrap();
+        let request = join.join().unwrap();
+        assert!(request.contains("/sendChatAction"));
+        let body: Value = serde_json::from_str(request.lines().last().unwrap())
+            .unwrap_or_else(|_| serde_json::from_str(request.lines().last().unwrap()).unwrap());
+        assert_eq!(body, json!({"chat_id":42,"action":"typing"}));
+        let (mut api, join) = server("200 OK", json!({"ok":true,"result":true}));
+        api.acknowledge(42, 7).unwrap();
+        let request = join.join().unwrap();
+        assert!(request.contains("/setMessageReaction"));
+        assert!(request.contains("👀"));
+        assert!(request.contains("\"message_id\":7"));
+        let (mut api, join) = server("200 OK", json!({"ok":true,"result":false}));
+        assert_eq!(api.typing(42), Err(Error::Uncertain));
+        join.join().unwrap();
     }
     #[test]
     fn text_submission_requires_correlated_receipt() {

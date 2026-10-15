@@ -130,6 +130,7 @@ pub struct Engine {
     hook_registrations: Vec<super::hook_runtime::Registration>,
     hook_bindings: Vec<Value>,
     pub listen_chats: BTreeSet<i64>,
+    pub(crate) feedback_acks: Vec<super::telegram_feedback::Receipt>,
 }
 #[derive(Clone, Debug)]
 struct Message {
@@ -167,6 +168,7 @@ impl Engine {
             hook_registrations: vec![],
             hook_bindings: vec![],
             listen_chats: BTreeSet::new(),
+            feedback_acks: vec![],
         })
     }
     /// Call once at service startup. Recovery never retries processing controls.
@@ -797,7 +799,7 @@ impl Engine {
                 .enqueue(
                     "inbound",
                     &destination,
-                    &serde_json::to_value(frame).map_err(|_| "Invalid feeder frame")?,
+                    &serde_json::to_value(&frame).map_err(|_| "Invalid feeder frame")?,
                     &format!("telegram:{}:{}", self.bot, event.event_id),
                     Some(&json!({"channel":"telegram","bot":self.bot,"update_id":event.event_id})),
                     now,
@@ -806,6 +808,9 @@ impl Engine {
             self.journal
                 .event_state(event.id, "handled", None)
                 .map_err(|e| e.to_string())?;
+            if self.feedback_acks.len() < 100 {
+                self.feedback_acks.push(frame.into());
+            }
             count += 1;
         }
         Ok(count)
@@ -1527,6 +1532,33 @@ mod tests {
             self.effects += 1;
             Ok("Action submitted".into())
         }
+    }
+    #[test]
+    fn reaction_ack_follows_durable_authorized_admission_once() {
+        let (mut engine, mut api, mut feeder) = fixture();
+        engine.admit_updates(vec![update(1, "hello")], 1.0).unwrap();
+        engine
+            .stage(&mut api, &mut feeder, &mut MockFiles, 2.0)
+            .unwrap();
+        assert_eq!(engine.feedback_acks.len(), 1);
+        assert_eq!(engine.feedback_acks[0].message_id, 2);
+        assert_eq!(engine.journal.rows().unwrap()[0].direction, "inbound");
+        engine
+            .stage(&mut api, &mut feeder, &mut MockFiles, 3.0)
+            .unwrap();
+        assert_eq!(engine.feedback_acks.len(), 1);
+        engine
+            .routes
+            .set_grant(&engine.scope(42), "42", &[])
+            .unwrap();
+        engine
+            .admit_updates(vec![update(2, "unauthorized")], 4.0)
+            .unwrap();
+        engine
+            .stage(&mut api, &mut feeder, &mut MockFiles, 5.0)
+            .unwrap();
+        assert_eq!(engine.feedback_acks.len(), 1);
+        assert_eq!(feeder.sends, 0);
     }
     #[test]
     fn explicit_say_uses_journal_once_and_obeys_busy_and_revoked_authority() {
