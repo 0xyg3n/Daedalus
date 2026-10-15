@@ -1,6 +1,9 @@
 //! Read-only Grok idle evidence from an exact registered native event log.
 //! Settled is an installer-reviewed 1.0.52+ contract marker, not an independent
 //! runtime version check. This proof is not a hook event or terminal authority.
+//! Native hooks register updates.jsonl; idle evidence uses its exact sibling
+//! events.jsonl. Explicit events.jsonl registrations remain readable for legacy
+//! proofs, but are not the native hook transcript contract.
 use super::hook_runtime::Registration;
 use std::path::Path;
 
@@ -137,15 +140,20 @@ mod unix {
         if r.scope.harness != Harness::Grok || !r.events.contains(&EventKind::Settled) {
             return Ok(None);
         }
-        let (Some(process), Some(path)) = (&r.harness_process, &r.transcript) else {
+        let (Some(process), Some(transcript)) = (&r.harness_process, &r.transcript) else {
             return Ok(None);
         };
-        if path.file_name().and_then(|v| v.to_str()) != Some("events.jsonl")
-            || path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|v| v.to_str())
-                != Some(r.scope.conversation.as_str())
+        let events_path = match transcript.file_name().and_then(|v| v.to_str()) {
+            Some("updates.jsonl") => transcript.with_file_name("events.jsonl"),
+            Some("events.jsonl") => transcript.clone(),
+            _ => return Ok(None),
+        };
+        let path = events_path.as_path();
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|v| v.to_str())
+            != Some(r.scope.conversation.as_str())
         {
             return Ok(None);
         }
@@ -205,8 +213,11 @@ mod unix {
             };
             complete = &complete[boundary + 1..];
         }
-        let mut completed = false;
+        let mut completed = None;
+        let mut cursor = start + tail.len() as u64 - 1;
         for line in complete.rsplit(|b| *b == b'\n') {
+            let offset = cursor - line.len() as u64;
+            cursor = offset.saturating_sub(1);
             let record: serde_json::Value =
                 serde_json::from_slice(line).map_err(|_| "Invalid final native event")?;
             if !record["ts"].as_str().is_some_and(|s| {
@@ -220,12 +231,14 @@ mod unix {
             if record["type"] == "mcp_health_check" {
                 continue;
             }
-            completed = record["type"] == "turn_ended" && record["outcome"] == "completed";
+            if record["type"] == "turn_ended" && record["outcome"] == "completed" {
+                completed = Some((offset, line));
+            }
             break;
         }
-        if !completed {
+        let Some((completed_offset, completed_record)) = completed else {
             return Ok(None);
-        }
+        };
         after_read();
         let event_now = private(path)?
             .metadata()
@@ -242,14 +255,19 @@ mod unix {
         }
         hook_runtime::verify_process(process, proc_root)
             .map_err(|_| "Native process incarnation changed")?;
+        // The proof identifies the completed lifecycle boundary, not mutable
+        // telemetry or summary timestamps. Those files must still be stable
+        // throughout this read, and every trailing event was checked above.
         let encoded = serde_json::to_vec(&(
+            "grok-native-idle-v2",
             r.id.as_str(),
             &r.scope,
             process,
-            stamp(&before),
-            stamp(&summary_before),
-            summary_bytes,
-            tail,
+            before.dev(),
+            before.ino(),
+            completed_offset,
+            completed_record,
+            summary_value["info"]["id"].as_str(),
         ))
         .map_err(|_| "Cannot encode native proof")?;
         Ok(Some(format!("{:x}", Sha256::digest(encoded))))
@@ -327,6 +345,49 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert_eq!(idle_proof(&f.r, &f.proc).unwrap(), Some(first));
         assert!(!f.r.directory.exists());
+    }
+    #[test]
+    fn hook_updates_registration_uses_only_exact_sibling_native_events() {
+        let f = Fixture::new();
+        let expected = idle_proof(&f.r, &f.proc).unwrap().unwrap();
+        let mut registration = f.r.clone();
+        let history =
+            f.r.transcript
+                .as_ref()
+                .unwrap()
+                .with_file_name("updates.jsonl");
+        layouts::write_private(&history, b"{\"text\":\"not lifecycle evidence\"}\n").unwrap();
+        registration.transcript = Some(history);
+        assert_eq!(idle_proof(&registration, &f.proc).unwrap(), Some(expected));
+        registration.transcript = Some(f.root.join("native/other/updates.jsonl"));
+        assert!(idle_proof(&registration, &f.proc).unwrap().is_none());
+        registration.transcript = Some(
+            f.r.transcript
+                .as_ref()
+                .unwrap()
+                .with_file_name("unrecognized.jsonl"),
+        );
+        assert!(idle_proof(&registration, &f.proc).unwrap().is_none());
+        registration.transcript = Some(
+            f.r.transcript
+                .as_ref()
+                .unwrap()
+                .with_file_name("chat_history.jsonl"),
+        );
+        assert!(idle_proof(&registration, &f.proc).unwrap().is_none());
+        registration.transcript = Some(
+            f.r.transcript
+                .as_ref()
+                .unwrap()
+                .with_file_name("updates.jsonl"),
+        );
+        fs::remove_file(f.proc.join("42/fd/3")).unwrap();
+        symlink(
+            registration.transcript.as_ref().unwrap(),
+            f.proc.join("42/fd/3"),
+        )
+        .unwrap();
+        assert!(idle_proof(&registration, &f.proc).unwrap().is_none());
     }
     #[test]
     fn wrong_session_missing_fd_and_unsafe_files_are_rejected() {
@@ -422,6 +483,45 @@ mod tests {
         let mut partial = completed.to_vec();
         partial.extend_from_slice(&health[..health.len() - 1]);
         f.log(&partial);
+        assert!(idle_proof(&f.r, &f.proc).unwrap().is_none());
+    }
+    #[test]
+    fn proof_ignores_health_and_summary_rewrites_but_tracks_lifecycle_boundary() {
+        let f = Fixture::new();
+        let original = idle_proof(&f.r, &f.proc).unwrap().unwrap();
+        let path = f.r.transcript.as_ref().unwrap();
+        let mut events = fs::OpenOptions::new().append(true).open(path).unwrap();
+        events
+            .write_all(b"{\"ts\":\"later\",\"type\":\"mcp_health_check\"}\n")
+            .unwrap();
+        let summary = path.with_file_name("summary.json");
+        let replacement = path.with_file_name("summary-new.json");
+        fs::write(
+            &replacement,
+            br#"{"info":{"id":"session","updated":"later"},"telemetry":17}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::rename(&replacement, &summary).unwrap();
+        assert_eq!(idle_proof(&f.r, &f.proc).unwrap(), Some(original.clone()));
+        events
+            .write_all(b"{\"ts\":\"later\",\"type\":\"turn_started\"}\n")
+            .unwrap();
+        assert!(idle_proof(&f.r, &f.proc).unwrap().is_none());
+        events.write_all(b"{\"ts\":\"2026-10-01T00:00:00Z\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n").unwrap();
+        // Identical completion bytes at a new offset represent another boundary.
+        assert_ne!(idle_proof(&f.r, &f.proc).unwrap(), Some(original));
+    }
+    #[test]
+    fn replaced_event_inode_without_matching_open_descriptor_is_rejected() {
+        let f = Fixture::new();
+        assert!(idle_proof(&f.r, &f.proc).unwrap().is_some());
+        let path = f.r.transcript.as_ref().unwrap();
+        let original = path.with_file_name("original-events.jsonl");
+        fs::rename(path, &original).unwrap();
+        fs::remove_file(f.proc.join("42/fd/3")).unwrap();
+        symlink(&original, f.proc.join("42/fd/3")).unwrap();
+        layouts::write_private(path, &fs::read(&original).unwrap()).unwrap();
         assert!(idle_proof(&f.r, &f.proc).unwrap().is_none());
     }
     #[test]

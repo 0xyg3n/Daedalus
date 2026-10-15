@@ -80,6 +80,10 @@ separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boun
 
 ### Grok idle readiness
 
+Grok's native hook `transcript_path` identifies the session's `updates.jsonl`.
+Use that file when enrolling an existing session; `events.jsonl` is separate
+readiness evidence, and `chat_history.jsonl` is not the hook transcript.
+
 For Grok 1.0.52+ in the 1.0 series, reviewed profiles with Telegram delivery or
 progress enabled also install a native `Notification` matcher for `idle_prompt`.
 Reinstall the reviewed profile to enable this on an existing registration; simply

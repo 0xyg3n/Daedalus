@@ -64,7 +64,7 @@ The feeder connects one Telegram chat to one exact agent conversation. A message
 1. **Admit.** `daedalus telegram serve` polls your bot. Only granted senders are accepted; forwarded commands are refused. In groups the bot reacts after `/listen`, a mention or a reply to it.
 2. **Store.** Photos (largest size) and documents up to 20 MiB are downloaded into the private configuration directory as `attachments/<sha256>.<ext>`. The original file name is never used as a path.
 3. **Queue.** The message joins a durable inbox bound to the chat's route: terminal, conversation and route revision.
-4. **Wait for idle.** It is typed only when the agent's hooks report the conversation idle. While the agent works, the message stays queued (`Agent busy; input remains queued`). A changed or revoked route blocks it instead of sending it elsewhere.
+4. **Wait for idle.** It is typed only when the agent's hooks report the conversation idle. While the agent works, the message stays queued (`Waiting for verified agent readiness; input remains queued`). A changed or revoked route blocks it instead of sending it elsewhere.
 5. **Type.** The agent receives one inert line, `/usr/bin/false -- '{…}'`, holding a JSON envelope with the sender, chat, message text, attachment path, size and SHA-256, and a correlation ID. If that line ever reached a shell it would do nothing.
 6. **Report.** One progress message is edited in place (`Agent started responding`, `Agent activity observed`, `Agent turn finished`). When the turn ends, the agent's final reply is sent as plain text, split at Telegram's 4096-unit limit.
 

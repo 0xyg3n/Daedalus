@@ -173,6 +173,12 @@ impl Engine {
     pub fn start(&mut self, api: &mut impl Api) -> Result<()> {
         self.verified = false;
         let me = api.get_me().map_err(|e| e.to_string())?;
+        self.start_verified(me)
+    }
+    /// Complete startup from a successful read-only getMe response. Transport
+    /// retry policy belongs to the service; identity validation stays here.
+    pub fn start_verified(&mut self, me: Value) -> Result<()> {
+        self.verified = false;
         if me["id"].as_i64() != Some(self.bot) || me["is_bot"] != true {
             return Err("Telegram credential belongs to a different bot".into());
         }
@@ -1069,7 +1075,7 @@ impl Engine {
                 Ok(Submission::Busy) => (
                     "not_sent",
                     None,
-                    Some("Agent busy; input remains queued"),
+                    Some("Waiting for verified agent readiness; input remains queued"),
                     2.0,
                 ),
                 Ok(Submission::Unavailable) => (

@@ -447,6 +447,9 @@ fn main() -> io::Result<()> {
                     end_splash(&mut ui);
                     continue;
                 }
+                if matches!(event, Event::Resize(..)) {
+                    ui.pane_resize = None;
+                }
                 if matches!(event, Event::Resize(..) | Event::FocusGained) {
                     // The screen is redrawn from scratch; so is the picture. A
                     // multiplexer may blank a pane that lost focus, or repaint it
@@ -664,6 +667,7 @@ fn repaint(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
 /// Leave Focus: only the stream client stops; the terminal keeps running.
 fn close_focus(ui: &mut Ui) {
+    ui.pane_resize = None;
     if let Some(mut embed) = ui.embed.take() {
         embed.detach();
         ui.status = "Detached. The terminal keeps running.".into();
@@ -794,6 +798,9 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
         Some(embed) => embed.prefix = false,
         None => return Step::Continue,
     }
+    if let Some(step) = focus_resize_key(ui, key) {
+        return step;
+    }
     match key.code {
         KeyCode::Char('d' | 'D' | 'q' | 'Q') | KeyCode::Esc => {
             close_focus(ui);
@@ -847,6 +854,11 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
 }
 
 fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
+    if ui.pane_resize.is_some() && key.code == KeyCode::Esc {
+        ui.pane_resize = None;
+        ui.status = "Pane resize cancelled".into();
+        return Step::Continue;
+    }
     // An attached terminal gets every key except the Ctrl+] prefix.
     if ui.page == WORKSPACES
         && ui.view == View::Focus
@@ -944,6 +956,9 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
         KeyCode::Char('r') if !ui.busy => return Step::Send(json!({"op":"refresh"})),
         _ => {}
+    }
+    if let Some(step) = focus_resize_key(ui, key) {
+        return step;
     }
     if resize_key(ui, key) {
         return Step::Continue;
@@ -1220,6 +1235,9 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         options_mouse(ui, mouse);
         return Step::Continue;
     }
+    if let Some(step) = focus_resize_mouse(ui, mouse) {
+        return step;
+    }
     if ui.view == View::Focus
         && let Some(embed) = ui.embed.as_mut()
         && embed.mode == Mode::Control
@@ -1260,6 +1278,10 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     }
                     "options" => {
                         open_options(ui);
+                        Step::Continue
+                    }
+                    "focus.resize.hint" => {
+                        ui.status = "Drag a divider, or Alt+arrows to resize. While attached: Ctrl+] then Alt+arrow.".into();
                         Step::Continue
                     }
                     "more" => match ui.selected_terminal() {
@@ -1323,6 +1345,131 @@ fn options_mouse(ui: &mut Ui, mouse: MouseEvent) {
 
 /// Borders move like pane borders in tmux or Herdr: press on one, drag,
 /// release. A double click puts it back. None when the mouse is elsewhere.
+/// Submit a single native mutation. The backend rechecks the captured complete
+/// layout plus both terminal identities; never fake a resized preview locally.
+fn pane_resize_request(
+    ui: &mut Ui,
+    divider: model::PaneDivider,
+    layout: model::Layout,
+    cells: i32,
+) -> Step {
+    let cells = cells.clamp(divider.minimum, divider.maximum);
+    if cells == 0 {
+        ui.status = "Pane size unchanged".into();
+        ui.status_error = false;
+        return Step::Continue;
+    }
+    if ui.action_pending || ui.dialog.is_some() {
+        ui.status = "Finish the current action before resizing panes".into();
+        return Step::Continue;
+    }
+    if ui
+        .tab_layout(&divider.leading)
+        .is_none_or(|current| !current.same_geometry(&layout))
+    {
+        ui.status = "Pane layout changed; refresh and drag the divider again".into();
+        ui.status_error = true;
+        return Step::Continue;
+    }
+    ui.status = "Resizing terminal panes…".into();
+    ui.status_error = false;
+    Step::Send(
+        json!({"op":"action","page":WORKSPACES,"action":"terminal.resize","node":divider.leading,
+        "resize":{"peer":divider.trailing,"axis":if divider.horizontal {"horizontal"} else {"vertical"},"cells":cells,"layout":layout},"view":view_state(ui)}),
+    )
+}
+fn focus_resize_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
+    if ui.page != WORKSPACES || ui.view != View::Focus || !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return None;
+    }
+    let (horizontal, delta, prefer_leading) = match key.code {
+        KeyCode::Left => (true, -2, false),
+        KeyCode::Right => (true, 2, true),
+        KeyCode::Up => (false, -1, false),
+        KeyCode::Down => (false, 1, true),
+        _ => return None,
+    };
+    let current = ui
+        .terminal_node(&ui.focus_target)
+        .map(|node| node.id.clone())
+        .unwrap_or_default();
+    let divider = ui
+        .pane_dividers
+        .iter()
+        .filter(|edge| {
+            edge.horizontal == horizontal && (edge.leading == current || edge.trailing == current)
+        })
+        .min_by_key(|edge| {
+            if prefer_leading {
+                edge.leading != current
+            } else {
+                edge.trailing != current
+            }
+        })
+        .cloned();
+    let Some(divider) = divider.filter(|_| !ui.zoomed) else {
+        ui.status = "Show a split tab to resize its panes".into();
+        return Some(Step::Continue);
+    };
+    let Some(layout) = ui.tab_layout(&current).cloned() else {
+        return Some(Step::Continue);
+    };
+    Some(pane_resize_request(ui, divider, layout, delta))
+}
+fn focus_resize_mouse(ui: &mut Ui, mouse: MouseEvent) -> Option<Step> {
+    if ui.page != WORKSPACES || ui.view != View::Focus || ui.dialog.is_some() {
+        return None;
+    }
+    let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Down(event::MouseButton::Left) => {
+            let divider = ui
+                .pane_dividers
+                .iter()
+                .find(|edge| edge.area.contains(point))?
+                .clone();
+            if ui.action_pending || ui.zoomed {
+                return Some(Step::Continue);
+            }
+            let layout = ui.tab_layout(&divider.leading)?.clone();
+            ui.pane_resize = Some(model::PaneResizeDrag {
+                divider,
+                layout,
+                start: (mouse.column, mouse.row),
+                cells: 0,
+            });
+            ui.status = "Drag to resize real panes · release to apply · Esc cancels".into();
+            ui.status_error = false;
+        }
+        MouseEventKind::Drag(event::MouseButton::Left) => {
+            let drag = ui.pane_resize.as_mut()?;
+            drag.cells = drag.divider.cells(drag.start, (mouse.column, mouse.row));
+            ui.status = format!(
+                "Resize {:+} {} · release to apply · Esc cancels",
+                drag.cells,
+                if drag.divider.horizontal {
+                    "columns"
+                } else {
+                    "rows"
+                }
+            );
+        }
+        MouseEventKind::Up(event::MouseButton::Left) => {
+            let mut drag = ui.pane_resize.take()?;
+            drag.cells = drag.divider.cells(drag.start, (mouse.column, mouse.row));
+            return Some(pane_resize_request(
+                ui,
+                drag.divider,
+                drag.layout,
+                drag.cells,
+            ));
+        }
+        _ => return None,
+    }
+    Some(Step::Continue)
+}
+
 fn border_mouse(ui: &mut Ui, mouse: MouseEvent, p: ratatui::layout::Position) -> Option<Step> {
     let under = ui.handles.iter().find(|h| h.area.contains(p)).copied();
     match mouse.kind {
@@ -2710,5 +2857,132 @@ mod cli_tests {
         assert!(expected_nodes > 0);
         assert!(!snapshot.catalog.is_empty());
         assert!(!snapshot.overview.connections.is_empty());
+    }
+    fn focus_with_divider() -> Ui {
+        let mut ui = workspace();
+        model::tests::split(&mut ui);
+        ui.view = View::Focus;
+        ui.focus_target = "a".into();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|frame| view::draw(frame, &mut ui)).unwrap();
+        assert_eq!(ui.pane_dividers.len(), 1);
+        ui
+    }
+    fn divider_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+    #[test]
+    fn focus_divider_drag_previews_then_submits_one_exact_native_resize() {
+        let mut ui = focus_with_divider();
+        let original = ui.tab_layout("a").unwrap().clone();
+        let edge = ui.pane_dividers[0].clone();
+        let (x, y) = (edge.area.x, edge.area.y + 1);
+        assert!(matches!(
+            mouse_event(
+                &mut ui,
+                divider_event(MouseEventKind::Down(event::MouseButton::Left), x, y)
+            ),
+            Step::Continue
+        ));
+        assert!(matches!(
+            mouse_event(
+                &mut ui,
+                divider_event(MouseEventKind::Drag(event::MouseButton::Left), x + 10, y)
+            ),
+            Step::Continue
+        ));
+        assert_eq!(
+            ui.tab_layout("a"),
+            Some(&original),
+            "drag does not fake a changed backend layout"
+        );
+        assert!(ui.pane_resize.as_ref().unwrap().cells > 0);
+        let step = mouse_event(
+            &mut ui,
+            divider_event(MouseEventKind::Up(event::MouseButton::Left), x + 10, y),
+        );
+        let Step::Send(request) = step else {
+            panic!("release must submit once")
+        };
+        assert_eq!(request["action"], "terminal.resize");
+        assert_eq!(request["node"], "a");
+        assert_eq!(request["resize"]["peer"], "b");
+        assert_eq!(request["resize"]["axis"], "horizontal");
+        assert_eq!(
+            request["resize"]["layout"],
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(request["resize"]["cells"], edge.cells((x, y), (x + 10, y)));
+        assert!(ui.pane_resize.is_none());
+        assert!(matches!(
+            mouse_event(
+                &mut ui,
+                divider_event(MouseEventKind::Up(event::MouseButton::Left), x + 10, y)
+            ),
+            Step::Continue
+        ));
+    }
+    #[test]
+    fn focus_resize_cancellation_and_changed_layout_never_send_mutations() {
+        let mut ui = focus_with_divider();
+        let edge = ui.pane_dividers[0].clone();
+        let (x, y) = (edge.area.x, edge.area.y + 1);
+        mouse_event(
+            &mut ui,
+            divider_event(MouseEventKind::Down(event::MouseButton::Left), x, y),
+        );
+        key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ui.pane_resize.is_none());
+        assert!(matches!(
+            mouse_event(
+                &mut ui,
+                divider_event(MouseEventKind::Up(event::MouseButton::Left), x + 10, y)
+            ),
+            Step::Continue
+        ));
+        mouse_event(
+            &mut ui,
+            divider_event(MouseEventKind::Down(event::MouseButton::Left), x, y),
+        );
+        ui.snapshot.tree[0].layout.as_mut().unwrap().panes[0].w -= 1;
+        assert!(matches!(
+            mouse_event(
+                &mut ui,
+                divider_event(MouseEventKind::Up(event::MouseButton::Left), x + 10, y)
+            ),
+            Step::Continue
+        ));
+        assert!(ui.status.contains("layout changed"));
+    }
+    #[test]
+    fn focus_alt_arrows_resize_real_divider_instead_of_details_panel() {
+        let mut ui = focus_with_divider();
+        let sizes = ui.sizes;
+        let Step::Send(request) =
+            key_event(&mut ui, KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
+        else {
+            panic!("Alt+Right must resize the split")
+        };
+        assert_eq!(request["resize"]["cells"], 2);
+        assert_eq!(ui.sizes, sizes);
+        ui.focus_target = "b".into();
+        let Step::Send(request) =
+            key_event(&mut ui, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+        else {
+            panic!("Alt+Left must use the left divider")
+        };
+        assert_eq!(request["node"], "a");
+        assert_eq!(request["resize"]["cells"], -2);
+        ui.zoomed = true;
+        assert!(matches!(
+            key_event(&mut ui, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
+            Step::Continue
+        ));
     }
 }

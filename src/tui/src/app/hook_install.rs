@@ -198,6 +198,14 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
             "Windows Claude direct-argv hooks require an observed version >=2.1.296".into(),
         );
     }
+    if request.harness == Harness::Grok
+        && request
+            .transcript
+            .as_ref()
+            .is_some_and(|path| path.file_name().is_none_or(|name| name != "updates.jsonl"))
+    {
+        return Err("Grok hook transcripts must point to this session's updates.jsonl, not events.jsonl. Select updates.jsonl or omit the transcript; event evidence is resolved separately.".into());
+    }
     if request.harness == Harness::Pi
         && !request
             .profile
@@ -1639,7 +1647,13 @@ if(disposed!==3)throw new Error('hook cleanup missing');
         let stat = fs::read_to_string(&stat_path).unwrap();
         fs::write(&stat_path, b"malformed").unwrap();
         assert!(launch::cleanup_preview(&path, &f.terminals.proc_root).is_err());
-        fs::write(&stat_path, stat.replace("900", "901")).unwrap();
+        // Change only starttime. A global replacement also corrupts the PID
+        // whenever the test runner's PID happens to contain the digits "900".
+        let (identity, fields) = stat.rsplit_once(')').unwrap();
+        let mut fields = fields.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(fields[19], "900");
+        fields[19] = "901";
+        fs::write(&stat_path, format!("{identity}) {}", fields.join(" "))).unwrap();
         let cleanup = launch::cleanup_preview(&path, &f.terminals.proc_root).unwrap();
         assert_eq!(cleanup.hook_file, target);
         assert!(target.exists());
@@ -1981,9 +1995,31 @@ esac
         assert_eq!(original["hooks"]["stop"].as_array().unwrap().len(), 1);
     }
     #[test]
+    fn grok_profile_rejects_event_log_as_hook_transcript() {
+        let mut f = Fixture::new();
+        f.request.harness = Harness::Grok;
+        f.request.harness_version = "1.0.52".into();
+        f.request.goal_id = None;
+        f.request.transcript = Some(f.dir.join("events.jsonl"));
+        assert!(
+            preview(&f.request, &f.terminals)
+                .err()
+                .unwrap()
+                .contains("updates.jsonl")
+        );
+        assert!(!f.request.profile.exists());
+        f.request.transcript = Some(f.dir.join("chat_history.jsonl"));
+        assert!(preview(&f.request, &f.terminals).is_err());
+        f.request.transcript = Some(f.dir.join("updates.jsonl"));
+        assert!(preview(&f.request, &f.terminals).is_ok());
+        f.request.transcript = None;
+        assert!(preview(&f.request, &f.terminals).is_ok());
+    }
+    #[test]
     fn grok_readiness_installs_native_idle_matcher_only_for_verified_versions() {
         let mut f = Fixture::new();
         f.request.harness = Harness::Grok;
+        f.request.transcript = None;
         f.request.goal_id = None;
         f.request.options.telegram_progress = true;
         f.request.options.notifications = false;
@@ -2021,6 +2057,7 @@ esac
     fn grok_native_profile_is_passive_private_and_idempotent() {
         let mut f = Fixture::new();
         f.request.harness = Harness::Grok;
+        f.request.transcript = None;
         f.request.goal_id = None;
         f.request.harness_version = "1.0.0".into();
         f.request.profile = f.dir.join("grok-hooks.json");

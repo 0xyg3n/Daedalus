@@ -53,6 +53,14 @@ impl Default for Observations {
 }
 
 pub trait Source {
+    fn resize_terminal(
+        &mut self,
+        _config: &ControlConfig,
+        _node: &str,
+        _request: super::terminal_resize::Request,
+    ) -> Result<String> {
+        Err("Pane resizing is unavailable for this source".into())
+    }
     fn prepare_pane_launch(
         &mut self,
         _config: &ControlConfig,
@@ -671,6 +679,19 @@ impl<S: Source> Backend<S> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let selected = topology.find(selected_id);
+        if action == "terminal.resize" {
+            let resize = serde_json::from_value(
+                request
+                    .get("resize")
+                    .cloned()
+                    .ok_or("Missing resize request")?,
+            )
+            .map_err(|_| "Invalid resize request")?;
+            self.message = self
+                .source
+                .resize_terminal(&self.config, selected_id, resize)?;
+            return Ok(vec![self.refresh()?]);
+        }
         let view = session_menu::View {
             snapshot: self.observations.snapshot.clone(),
             health: self.observations.health.clone(),
@@ -1096,6 +1117,15 @@ impl NativeSource {
     }
 }
 impl Source for NativeSource {
+    fn resize_terminal(
+        &mut self,
+        config: &ControlConfig,
+        node: &str,
+        request: super::terminal_resize::Request,
+    ) -> Result<String> {
+        self.require_configuration()?;
+        super::terminal_resize::apply(config, &self.terminals, node, request)
+    }
     fn prepare_pane_launch(
         &mut self,
         config: &ControlConfig,

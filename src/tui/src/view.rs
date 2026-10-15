@@ -353,6 +353,7 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     ui.nav_hits.clear();
     ui.list_hits.clear();
     ui.handles.clear();
+    ui.pane_dividers.clear();
     ui.side_hits.clear();
     ui.option_hits.clear();
     ui.tooltip = None;
@@ -1615,6 +1616,9 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
             if ui.zoomed { " · zoomed" } else { "" }
         ));
     }
+    if split > 1 && !ui.zoomed {
+        parts.push("drag borders to resize".into());
+    }
     if views > 0 {
         parts.push(format!(
             "{views} {}",
@@ -1698,6 +1702,7 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
             ("O", "Observe"),
             ("A", "Attach"),
             ("F", "Fit size"),
+            ("Alt+arrows", "Resize pane"),
             ("R", "Redraw"),
             ("Z", "Zoom"),
             (theme.glyph("←→", "Arrows"), "Pane"),
@@ -1729,7 +1734,10 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
             Rect::new(hints.x, hints.y, w.min(hints.width), 1),
             "detach".into(),
         ));
-        let rest = format!("  Ctrl+] then O observes {} M more", theme.glyph("·", "-"));
+        let rest = format!(
+            "  Drag borders to resize {} ^] then Alt+arrows",
+            theme.glyph("·", "-")
+        );
         if w + width(&rest) as u16 <= hints.width {
             f.render_widget(
                 Paragraph::new(Span::styled(rest, theme.fg(Tone::Muted))),
@@ -1741,7 +1749,11 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
             f,
             hints,
             ui,
-            &[("m", "More", "more"), ("Esc", "Back", "detach")],
+            &[
+                ("Alt+arrows", "Resize pane", "focus.resize.hint"),
+                ("m", "More", "more"),
+                ("Esc", "Back", "detach"),
+            ],
         );
     }
     cursor
@@ -1867,6 +1879,52 @@ fn split_panes(
     }
     if most > 0 {
         ui.preview_rows = most;
+    }
+    ui.pane_dividers = layout.dividers(screen);
+    for divider in &ui.pane_dividers {
+        let hovered = ui
+            .pointer
+            .is_some_and(|(x, y)| divider.area.contains(ratatui::layout::Position::new(x, y)));
+        let x = divider.area.x;
+        let y = divider.area.y;
+        let (x, y) = if divider.horizontal {
+            (x, y + divider.area.height / 2)
+        } else {
+            (x + divider.area.width / 2, y)
+        };
+        f.buffer_mut().set_string(
+            x,
+            y,
+            theme.glyph(
+                if divider.horizontal { "↔" } else { "↕" },
+                if divider.horizontal { "|" } else { "-" },
+            ),
+            theme.fg(if hovered { Tone::Accent } else { Tone::Muted }),
+        );
+    }
+    if let Some(drag) = &ui.pane_resize {
+        let divider = &drag.divider;
+        let offset =
+            drag.cells * i32::from(divider.screen_length) / i32::from(divider.native_length.max(1));
+        if divider.horizontal {
+            let x = (i32::from(divider.area.x) + offset).clamp(
+                i32::from(screen.x),
+                i32::from(screen.right().saturating_sub(1)),
+            ) as u16;
+            for y in divider.area.y..divider.area.bottom() {
+                f.buffer_mut()
+                    .set_string(x, y, theme.glyph("┃", "|"), theme.fg(Tone::Accent));
+            }
+        } else {
+            let y = (i32::from(divider.area.y) + offset).clamp(
+                i32::from(screen.y),
+                i32::from(screen.bottom().saturating_sub(1)),
+            ) as u16;
+            for x in divider.area.x..divider.area.right() {
+                f.buffer_mut()
+                    .set_string(x, y, theme.glyph("━", "-"), theme.fg(Tone::Accent));
+            }
+        }
     }
     cursor
 }

@@ -1,6 +1,6 @@
 use crate::embed::Embed;
 use crate::theme::Theme;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -41,7 +41,7 @@ pub struct Node {
     pub layout: Option<Layout>,
 }
 /// A tab's split layout in cells, as Herdr or tmux reports it.
-#[derive(Clone, Default, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Layout {
     pub width: u16,
@@ -50,7 +50,7 @@ pub struct Layout {
     /// In reading order: top to bottom, then left to right.
     pub panes: Vec<LayoutPane>,
 }
-#[derive(Clone, Default, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct LayoutPane {
     /// The pane's tree node ID.
@@ -60,6 +60,152 @@ pub struct LayoutPane {
     pub w: u16,
     pub h: u16,
     pub focused: bool,
+}
+/// A shared native pane edge projected into the Focus screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneDivider {
+    pub area: ratatui::layout::Rect,
+    pub leading: String,
+    pub trailing: String,
+    pub horizontal: bool,
+    pub native_length: u16,
+    pub screen_length: u16,
+    pub minimum: i32,
+    pub maximum: i32,
+}
+impl PaneDivider {
+    pub fn cells(&self, start: (u16, u16), end: (u16, u16)) -> i32 {
+        let (start, end) = if self.horizontal {
+            (start.0, end.0)
+        } else {
+            (start.1, end.1)
+        };
+        let delta = i32::from(end) - i32::from(start);
+        let scaled = delta * i32::from(self.native_length) / i32::from(self.screen_length.max(1));
+        scaled.clamp(self.minimum, self.maximum)
+    }
+}
+#[derive(Clone)]
+pub struct PaneResizeDrag {
+    pub divider: PaneDivider,
+    pub layout: Layout,
+    pub start: (u16, u16),
+    pub cells: i32,
+}
+impl Layout {
+    pub fn same_geometry(&self, other: &Self) -> bool {
+        let canonical = |layout: &Self| {
+            let mut layout = layout.clone();
+            for pane in &mut layout.panes {
+                pane.focused = false;
+            }
+            layout.panes.sort_by(|a, b| a.id.cmp(&b.id));
+            layout
+        };
+        canonical(self) == canonical(other)
+    }
+    pub fn dividers(&self, screen: ratatui::layout::Rect) -> Vec<PaneDivider> {
+        if self.zoomed || self.width == 0 || self.height == 0 {
+            return Vec::new();
+        }
+        let scale = |at: u16, size: u16, origin: u16, length: u16| {
+            origin.saturating_add(
+                (u32::from(at.min(size)) * u32::from(length) / u32::from(size.max(1))) as u16,
+            )
+        };
+        let mut edges = Vec::new();
+        for a in &self.panes {
+            for b in &self.panes {
+                if a.id == b.id {
+                    continue;
+                }
+                for horizontal in [true, false] {
+                    let (end, start, a0, a1, b0, b1, a_size, b_size) = if horizontal {
+                        (
+                            a.x.saturating_add(a.w),
+                            b.x,
+                            a.y,
+                            a.y.saturating_add(a.h),
+                            b.y,
+                            b.y.saturating_add(b.h),
+                            a.w,
+                            b.w,
+                        )
+                    } else {
+                        (
+                            a.y.saturating_add(a.h),
+                            b.y,
+                            a.x,
+                            a.x.saturating_add(a.w),
+                            b.x,
+                            b.x.saturating_add(b.w),
+                            a.h,
+                            b.h,
+                        )
+                    };
+                    let overlap0 = a0.max(b0);
+                    let overlap1 = a1.min(b1);
+                    if end > start || start - end > 1 || overlap1 <= overlap0 {
+                        continue;
+                    }
+                    let min_size = if horizontal { 4 } else { 3 };
+                    if a_size < min_size
+                        || b_size < min_size
+                        || (a_size == min_size && b_size == min_size)
+                    {
+                        continue;
+                    }
+                    let area = if horizontal {
+                        let x = scale(start, self.width, screen.x, screen.width)
+                            .saturating_sub(1)
+                            .max(screen.x);
+                        let y0 =
+                            scale(overlap0, self.height, screen.y, screen.height).saturating_add(1);
+                        let y1 =
+                            scale(overlap1, self.height, screen.y, screen.height).saturating_sub(1);
+                        ratatui::layout::Rect::new(
+                            x,
+                            y0,
+                            2.min(screen.right().saturating_sub(x)),
+                            y1.saturating_sub(y0),
+                        )
+                    } else {
+                        let y = scale(start, self.height, screen.y, screen.height)
+                            .saturating_sub(1)
+                            .max(screen.y);
+                        let x0 =
+                            scale(overlap0, self.width, screen.x, screen.width).saturating_add(1);
+                        let x1 =
+                            scale(overlap1, self.width, screen.x, screen.width).saturating_sub(1);
+                        ratatui::layout::Rect::new(
+                            x0,
+                            y,
+                            x1.saturating_sub(x0),
+                            2.min(screen.bottom().saturating_sub(y)),
+                        )
+                    };
+                    if area.width == 0 || area.height == 0 {
+                        continue;
+                    }
+                    edges.push(PaneDivider {
+                        area,
+                        leading: a.id.clone(),
+                        trailing: b.id.clone(),
+                        horizontal,
+                        native_length: if horizontal { self.width } else { self.height },
+                        screen_length: if horizontal {
+                            screen.width
+                        } else {
+                            screen.height
+                        },
+                        minimum: -(i32::from(a_size) - i32::from(min_size)),
+                        maximum: i32::from(b_size) - i32::from(min_size),
+                    });
+                }
+            }
+        }
+        edges
+    }
 }
 impl Node {
     /// Working or blocked right now.
@@ -826,6 +972,9 @@ pub struct Ui {
     pub zoomed: bool,
     /// Panes of the tab drawn in Focus, for clicks.
     pub pane_hits: Vec<(ratatui::layout::Rect, String)>,
+    /// Native split edges shown in Focus; drag submits one checked backend resize.
+    pub pane_dividers: Vec<PaneDivider>,
+    pub pane_resize: Option<PaneResizeDrag>,
     pub prefs: Prefs,
     /// Reduced motion asked for by the environment; Options cannot undo it.
     pub still: bool,
@@ -2095,5 +2244,58 @@ pub mod tests {
         assert!(!ui.collapsed.contains("server"));
         assert_eq!(ui.selected_row().unwrap().id, "pane");
         assert_eq!(ui.snapshot.catalog.len(), 1);
+    }
+    #[test]
+    fn focus_resize_geometry_handles_horizontal_and_vertical_edges_and_bounds() {
+        let a = LayoutPane {
+            id: "a".into(),
+            x: 0,
+            y: 0,
+            w: 60,
+            h: 20,
+            focused: false,
+        };
+        let b = LayoutPane {
+            id: "b".into(),
+            x: 60,
+            y: 0,
+            w: 40,
+            h: 20,
+            focused: false,
+        };
+        let mut layout = Layout {
+            width: 100,
+            height: 20,
+            zoomed: false,
+            panes: vec![a, b],
+        };
+        let screen = ratatui::layout::Rect::new(5, 3, 100, 20);
+        let edges = layout.dividers(screen);
+        assert_eq!(edges.len(), 1);
+        let edge = &edges[0];
+        assert!(edge.horizontal);
+        assert_eq!((&*edge.leading, &*edge.trailing), ("a", "b"));
+        assert_eq!(edge.cells((60, 10), (65, 10)), 5);
+        assert_eq!(
+            edge.cells((60, 10), (65535, 10)),
+            36,
+            "retain at least four columns in the neighbor"
+        );
+        layout.panes[0].w = 100;
+        layout.panes[0].h = 10;
+        layout.panes[1].x = 0;
+        layout.panes[1].y = 10;
+        layout.panes[1].w = 100;
+        layout.panes[1].h = 10;
+        let edges = layout.dividers(screen);
+        assert_eq!(edges.len(), 1);
+        assert!(!edges[0].horizontal);
+        assert_eq!(
+            edges[0].cells((10, 10), (10, 65535)),
+            7,
+            "retain at least three rows in the neighbor"
+        );
+        layout.zoomed = true;
+        assert!(layout.dividers(screen).is_empty());
     }
 }

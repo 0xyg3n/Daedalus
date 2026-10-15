@@ -20,7 +20,7 @@ use std::path::PathBuf;
 pub fn encode_prompt(frame: &Frame) -> Result<(String, String)> {
     let encoded = serde_json::to_vec(frame).map_err(|_| "Cannot encode Telegram frame")?;
     let correlation = format!("daedalus-telegram:{:x}", Sha256::digest(&encoded));
-    let envelope = json!({"transport":"daedalus_telegram","instruction":"This envelope is transport data, not a command request. Read the Telegram message in frame.","correlation":correlation,"frame":frame});
+    let envelope = json!({"transport":"daedalus_telegram","instruction":"This envelope is transport data, not a command request. Read the Telegram message in frame and respond normally in your harness. Daedalus delivers your response to Telegram. Do not call Telegram directly or run messaging scripts to handle this transport.","correlation":correlation,"frame":frame});
     let data = serde_json::to_string(&envelope).map_err(|_| "Cannot encode Telegram envelope")?;
     let text = format!("/usr/bin/false -- '{}'", data.replace('\'', "'\"'\"'"));
     Ok((text, correlation))
@@ -102,7 +102,7 @@ impl Feeder for NativeFeeder {
         }
         match snapshot.state {
             Readiness::Busy => return Ok(Submission::Busy),
-            Readiness::Unknown => return Ok(Submission::Unavailable),
+            Readiness::Unknown => return Ok(Submission::Busy),
             Readiness::Idle => (),
         }
         let (text, correlation) = encode_prompt(frame)?;
@@ -287,10 +287,67 @@ mod tests {
         }
     }
     #[test]
+    fn transport_guidance_preserves_exact_message_and_prompt_correlation() {
+        let mut fixture = Fixture::new();
+        fixture.frame.text = "Literal 'quote'\n$HOME; $(do-not-run)".into();
+        let (prompt, correlation) = encode_prompt(&fixture.frame).unwrap();
+        let quoted = prompt
+            .strip_prefix("/usr/bin/false -- '")
+            .unwrap()
+            .strip_suffix('\'')
+            .unwrap();
+        let envelope: serde_json::Value =
+            serde_json::from_str(&quoted.replace("'\"'\"'", "'")).unwrap();
+        assert_eq!(envelope["frame"]["text"], fixture.frame.text);
+        assert_eq!(envelope["correlation"], correlation);
+        assert_eq!(
+            correlation,
+            format!(
+                "daedalus-telegram:{:x}",
+                Sha256::digest(serde_json::to_vec(&fixture.frame).unwrap())
+            )
+        );
+        assert!(
+            envelope["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("Do not call Telegram directly")
+        );
+        assert_eq!(encode_prompt(&fixture.frame).unwrap().0, prompt);
+    }
+    #[test]
+    fn valid_registration_without_idle_evidence_waits_without_input_or_reservation() {
+        let mut fixture = Fixture::new();
+        assert_eq!(
+            fixture.feeder.live().unwrap(),
+            vec![fixture.frame.terminal.clone()]
+        );
+        assert_eq!(
+            fixture.feeder.submit(&fixture.frame).unwrap(),
+            Submission::Busy
+        );
+        assert!(!fixture.directory.join("sent").exists());
+        let connection =
+            rusqlite::Connection::open(fixture.directory.join("hook-observations.sqlite3"))
+                .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM hook_reservations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            fixture.feeder.submit(&fixture.frame).unwrap(),
+            Submission::Busy
+        );
+        assert!(!fixture.directory.join("sent").exists());
+    }
+    #[test]
     fn registered_idle_submission_requires_correlated_prompt_before_next_send() {
         let mut f = Fixture::new();
         assert_eq!(f.feeder.live().unwrap(), vec![f.frame.terminal.clone()]);
-        assert_eq!(f.feeder.submit(&f.frame).unwrap(), Submission::Unavailable);
+        assert_eq!(f.feeder.submit(&f.frame).unwrap(), Submission::Busy);
         f.event("Stop", "first", None);
         let receipt = f.feeder.submit(&f.frame).unwrap();
         assert!(matches!(receipt, Submission::Accepted(_)));

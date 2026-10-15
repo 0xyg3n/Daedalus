@@ -95,3 +95,21 @@ show the start-up splash as a full-resolution image; other terminals get a
 character version. Inside Herdr, enable `kitty_graphics`. A key press, click,
 scroll or paste removes the image. The screensaver is always glitch art in
 character cells: scanlines, a color split, a rolling light and short glitch bursts.
+
+## Resize panes in Focus
+
+When Focus shows a split tab, drag a shared pane border marked with **↔** or
+**↕**. An accent guide previews the new boundary; release applies one resize to
+the actual tmux/Herdr panes. **Esc** cancels. The original layout stays visible
+until the backend reports its updated geometry.
+
+In Observe mode, **Alt+Left/Right** moves the nearest selected vertical divider
+two native columns; **Alt+Up/Down** moves a horizontal divider one native row.
+While attached, use **Ctrl+]**, then **Alt+arrow** so ordinary terminal keys keep
+going to the application. Zoom out with **Z** to expose split dividers.
+
+This changes the backend's shared pane layout, so other views of that tab see the
+same sizes. It does not resize only Daedalus's Details panel. Both exact terminal
+identities and the captured layout are checked again before the native command;
+a changed layout is rejected and an uncertain result is not automatically retried.
+Small-pane limits and backend resize support still apply.

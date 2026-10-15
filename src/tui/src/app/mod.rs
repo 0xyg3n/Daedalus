@@ -52,6 +52,7 @@ pub mod telegram_service;
 pub mod telegram_stream;
 pub mod telegram_supervisor;
 pub mod terminal_cli;
+pub mod terminal_resize;
 pub mod tree;
 pub mod wizard;
 pub mod wizard_menu;

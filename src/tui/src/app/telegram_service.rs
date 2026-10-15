@@ -472,6 +472,42 @@ extern "C" fn stop_signal(_: libc::c_int) {
 
 /// Explicit foreground service entrypoint. No caller starts this as a side
 /// effect of setup, diagnostics or a TUI read operation.
+/// Only getMe is retried here: it is read-only and cannot duplicate a send.
+/// Ownership remains held and the service stays Starting until identity matches.
+fn start_engine(
+    engine: &mut Engine,
+    api: &mut impl Api,
+    mut wait: impl FnMut(std::time::Duration) -> Result<bool>,
+) -> Result<bool> {
+    use std::time::Duration;
+    if !wait(Duration::ZERO)? {
+        return Ok(false);
+    }
+    let mut backoff = 1u64;
+    loop {
+        match api.get_me() {
+            Ok(identity) => {
+                engine.start_verified(identity)?;
+                return Ok(true);
+            }
+            Err(error) => {
+                let delay = match error {
+                    Error::NotSent | Error::Uncertain | Error::Rejected(500..=599) => backoff,
+                    Error::RateLimited(delay) => delay.max(1),
+                    error => return Err(error.to_string()),
+                };
+                backoff = backoff.saturating_mul(2).min(60);
+                eprintln!(
+                    "Telegram identity verification temporarily unavailable; retrying in {delay}s"
+                );
+                if !wait(Duration::from_secs(delay))? {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
 pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     use super::{
         config::ControlConfig,
@@ -544,7 +580,31 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     // an imported cursor after this destination may have contacted Telegram.
     super::cutover::mark_activation(&directory)?;
     engine.streams = Some(super::telegram_stream::Store::open(&directory)?);
-    engine.start(&mut api)?;
+    STOP.store(false, Ordering::Release);
+    let _signals = ServiceSignals::install()?;
+    let started = start_engine(&mut engine, &mut api, |delay| {
+        let began = std::time::Instant::now();
+        loop {
+            if STOP.load(Ordering::Acquire)
+                || super::telegram_supervisor::stop_requested(&directory)?
+            {
+                return Ok(false);
+            }
+            let remaining = delay.saturating_sub(began.elapsed());
+            if remaining.is_zero() {
+                return Ok(true);
+            }
+            thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+        }
+    })?;
+    if !started {
+        super::telegram_supervisor::record(
+            &directory,
+            &config,
+            super::telegram_supervisor::Phase::Stopped,
+        )?;
+        return Ok(());
+    }
     let mut dispatcher = Dispatcher {
         callbacks: CallbackStore::from_connection(telegram_config::private_connection(
             &directory.join("telegram-controls.sqlite3"),
@@ -570,8 +630,6 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     let mut sender =
         Sender::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
     drop(token);
-    STOP.store(false, Ordering::Release);
-    let _signals = ServiceSignals::install()?;
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();
     let mut checked = 0.0;
@@ -605,6 +663,9 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                 config = next;
                 checked = now;
             }
+            // Durable queued input is independent of Telegram connectivity.
+            // Drain it before scheduling network work or processing new updates.
+            cursors.feed(&mut engine, &mut feeder)?;
             poller.tick(&mut engine, now)?;
             engine.stage_controls(&mut dispatcher, &mut operations, &mut api, clock())?;
             engine.stage(&mut api, &mut feeder, &mut files, clock())?;
@@ -626,7 +687,6 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                 &registrations,
                 clock(),
             )?;
-            cursors.feed(&mut engine, &mut feeder)?;
             thread::sleep(std::time::Duration::from_millis(100));
         }
         Ok(())
@@ -1187,6 +1247,98 @@ mod tests {
         ) -> std::result::Result<Value, Error> {
             unreachable!()
         }
+    }
+    struct IdentityApi {
+        replies: std::collections::VecDeque<std::result::Result<Value, Error>>,
+        calls: usize,
+    }
+    impl Api for IdentityApi {
+        fn get_me(&mut self) -> std::result::Result<Value, Error> {
+            self.calls += 1;
+            self.replies.pop_front().expect("unexpected identity retry")
+        }
+        fn updates(&mut self, _: i64, _: u64) -> Batch {
+            panic!("Startup must not poll")
+        }
+        fn send_text(
+            &mut self,
+            _: i64,
+            _: &str,
+            _: Option<i64>,
+        ) -> std::result::Result<Value, Error> {
+            panic!("Startup must not send")
+        }
+        fn download(&mut self, _: &str) -> std::result::Result<Vec<u8>, Error> {
+            panic!("Startup must not download")
+        }
+        fn send_document(
+            &mut self,
+            _: i64,
+            _: &str,
+            _: Vec<u8>,
+            _: &str,
+        ) -> std::result::Result<Value, Error> {
+            panic!("Startup must not send")
+        }
+    }
+    #[test]
+    fn startup_retries_only_transient_identity_failures_and_remains_cancellable() {
+        let new_engine = || {
+            Engine::new(
+                Journal::memory().unwrap(),
+                Registry::memory().unwrap(),
+                "fixture",
+                123,
+            )
+            .unwrap()
+        };
+        let mut engine = new_engine();
+        let identity = json!({"id":123,"is_bot":true,"username":"fixture_bot"});
+        let mut api = IdentityApi {
+            replies: [
+                Err(Error::NotSent),
+                Err(Error::Uncertain),
+                Err(Error::Rejected(503)),
+                Err(Error::RateLimited(17)),
+                Ok(identity.clone()),
+            ]
+            .into(),
+            calls: 0,
+        };
+        let mut waits = Vec::new();
+        assert!(
+            start_engine(&mut engine, &mut api, |duration| {
+                waits.push(duration.as_secs());
+                Ok(true)
+            })
+            .unwrap()
+        );
+        assert_eq!(waits, vec![0, 1, 2, 4, 17]);
+        assert_eq!(api.calls, 5);
+        assert_eq!(engine.cursor().unwrap(), 0);
+        for response in [
+            Err(Error::Rejected(401)),
+            Err(Error::Invalid("invalid configuration")),
+            Ok(json!({"id":999,"is_bot":true,"username":"wrong_bot"})),
+        ] {
+            let mut api = IdentityApi {
+                replies: [response].into(),
+                calls: 0,
+            };
+            assert!(start_engine(&mut new_engine(), &mut api, |_| Ok(true)).is_err());
+            assert_eq!(api.calls, 1);
+        }
+        let mut api = IdentityApi {
+            replies: [Err(Error::NotSent)].into(),
+            calls: 0,
+        };
+        assert!(
+            !start_engine(&mut new_engine(), &mut api, |duration| Ok(
+                duration.is_zero()
+            ))
+            .unwrap()
+        );
+        assert_eq!(api.calls, 1);
     }
     #[test]
     fn polling_is_nonblocking_and_only_acknowledges_durable_admission() {
