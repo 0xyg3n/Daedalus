@@ -526,7 +526,7 @@ impl Menu {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::{
         backend::Observations,
@@ -609,7 +609,7 @@ mod tests {
                 "node", "npm", "sh", "bash", "curl", "git", "tar", "gzip", "unzip",
             ]
             .into_iter()
-            .map(|n| (n.into(), "/usr/bin/true".into()))
+            .map(|n| (n.into(), crate::test_support::path("/usr/bin/true").into()))
             .collect();
             if self.missing_herdr {
                 binaries.remove("herdr");
@@ -618,13 +618,13 @@ mod tests {
                 os: "linux".into(),
                 architecture: "x86_64".into(),
                 home: self.home.clone(),
-                search: vec!["/usr/bin".into()],
+                search: vec![crate::test_support::path("/usr/bin").into()],
                 binaries,
                 root: false,
             };
             Wizard::fresh(
                 &self.home.join("new-config"),
-                Path::new("/tmp/workspace"),
+                Path::new(crate::test_support::path("/tmp/workspace")),
                 env,
                 spec.selection,
             )
@@ -650,7 +650,7 @@ mod tests {
         }
     }
     fn config() -> ControlConfig {
-        ControlConfig::fresh(Path::new("/tmp/workspace")).unwrap()
+        ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/workspace"))).unwrap()
     }
     fn reply(menu: &mut Menu, source: &mut Mock, seq: &mut u64, value: Value) -> Result<Outcome> {
         menu.reply(
@@ -705,7 +705,7 @@ mod tests {
     fn failed_setup_and_staged_import_do_not_select_an_instance() {
         for result in [
             json!({"ready":false}),
-            json!({"ready":true,"instance_import":{"requires_cutover":true,"destination":"/tmp/staged"}}),
+            json!({"ready":true,"instance_import":{"requires_cutover":true,"destination":crate::test_support::path("/tmp/staged")}}),
         ] {
             let (mut menu, mut source, mut seq) = (Menu::default(), Mock::new(), 0);
             source.applied_result = result;
@@ -763,33 +763,33 @@ mod tests {
             if whole {
                 for value in [
                     "instance",
-                    "/tmp/source-private",
-                    "/tmp/new-private",
+                    crate::test_support::path("/tmp/source-private"),
+                    crate::test_support::path("/tmp/new-private"),
                     "no",
                     "tmux",
                 ] {
                     reply(&mut menu, &mut source, &mut seq, json!(value)).unwrap();
                 }
                 assert!(
-                    matches!(&source.specs[0].mode,Mode::Instance{source,credentials:false} if source==Path::new("/tmp/source-private"))
+                    matches!(&source.specs[0].mode,Mode::Instance{source,credentials:false} if source==Path::new(crate::test_support::path("/tmp/source-private")))
                 );
             } else {
                 for value in [
                     "fresh",
-                    "/tmp/new-private",
-                    "/tmp/workspace",
+                    crate::test_support::path("/tmp/new-private"),
+                    crate::test_support::path("/tmp/workspace"),
                     "done",
                     "tmux",
                 ] {
                     reply(&mut menu, &mut source, &mut seq, json!(value)).unwrap();
                 }
                 assert!(
-                    matches!(&source.specs[0].mode,Mode::Fresh{workspace} if workspace==Path::new("/tmp/workspace"))
+                    matches!(&source.specs[0].mode,Mode::Fresh{workspace} if workspace==Path::new(crate::test_support::path("/tmp/workspace")))
                 );
             }
             assert_eq!(
                 source.specs[0].destination.as_deref(),
-                Some(Path::new("/tmp/new-private"))
+                Some(Path::new(crate::test_support::path("/tmp/new-private")))
             );
             reply(&mut menu, &mut source, &mut seq, Value::Null).unwrap();
             assert_eq!(source.applies, 0);
@@ -810,9 +810,10 @@ mod tests {
         let source = Mock::new();
         let directory = source.home.join("config");
         let mut original = config();
-        original
-            .profiles
-            .insert("claude".into(), "/tmp/private-profile".into());
+        original.profiles.insert(
+            "claude".into(),
+            crate::test_support::path("/tmp/private-profile").into(),
+        );
         original.telegram.owner_id = Some("123".into());
         crate::core::layouts::write_private(
             &directory.join("control.json"),
@@ -823,10 +824,16 @@ mod tests {
             os: "linux".into(),
             architecture: "x86_64".into(),
             home: source.home.clone(),
-            search: vec!["/usr/bin".into()],
+            search: vec![crate::test_support::path("/usr/bin").into()],
             binaries: [
-                ("tmux".into(), "/usr/bin/true".into()),
-                ("codex".into(), "/usr/bin/true".into()),
+                (
+                    "tmux".into(),
+                    crate::test_support::path("/usr/bin/true").into(),
+                ),
+                (
+                    "codex".into(),
+                    crate::test_support::path("/usr/bin/true").into(),
+                ),
             ]
             .into_iter()
             .collect(),

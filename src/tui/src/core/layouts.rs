@@ -2,11 +2,14 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
-    path::{Component, Path},
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
+
+#[cfg(unix)]
+use std::{fs::OpenOptions, path::Component};
 
 pub type Result<T> = std::result::Result<T, String>;
 const MAX_FILE: u64 = 8 * 1024 * 1024;
@@ -300,7 +303,10 @@ pub fn validate_name(name: &str) -> Result<String> {
 
 // Reject symlinks in the complete path. The instance directory must be private;
 // this is not a substitute for descriptor-relative operations in a hostile directory.
+#[cfg(unix)]
 pub(crate) fn check_path(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    crate::platform::check_path(path).map_err(|e| e.to_string())?;
     if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err("State path must be absolute without parent traversal".into());
     }
@@ -321,6 +327,7 @@ pub(crate) fn check_path(path: &Path) -> Result<()> {
 pub(crate) fn read_private(path: &Path) -> Result<Option<Vec<u8>>> {
     read_private_limit(path, MAX_FILE)
 }
+#[cfg(unix)]
 pub(crate) fn read_private_limit(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     use std::os::unix::fs::OpenOptionsExt;
     check_path(path)?;
@@ -348,6 +355,7 @@ pub(crate) fn read_private_limit(path: &Path, limit: u64) -> Result<Option<Vec<u
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     write_private_limit(path, bytes, MAX_FILE)
 }
+#[cfg(unix)]
 pub(crate) fn write_private_limit(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     check_path(path)?;
@@ -397,13 +405,59 @@ pub(crate) fn write_private_limit(path: &Path, bytes: &[u8], limit: u64) -> Resu
     result
 }
 
+#[cfg(windows)]
+pub(crate) fn check_path(path: &Path) -> Result<()> {
+    crate::platform::check_path(path).map_err(|e| e.to_string())
+}
+#[cfg(windows)]
+pub(crate) fn read_private_limit(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    let file = match crate::platform::open_private(path, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("State file exceeds size limit".into());
+    }
+    Ok(Some(bytes))
+}
+#[cfg(windows)]
+pub(crate) fn write_private_limit(path: &Path, bytes: &[u8], limit: u64) -> Result<()> {
+    check_path(path)?;
+    if bytes.len() as u64 > limit {
+        return Err("State file exceeds size limit".into());
+    }
+    let parent = path.parent().ok_or("Missing state directory")?;
+    crate::platform::ensure_private_dir(parent).map_err(|e| e.to_string())?;
+    let temp = parent.join(format!(
+        ".daedalus-{}-{}.tmp",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = crate::platform::create_private_new(&temp).map_err(|e| e.to_string())?;
+    let result = (|| {
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        crate::platform::replace_private(&temp, path).map_err(|e| e.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     pub fn reference() -> TerminalRef {
         TerminalRef {
             backend: Backend::Tmux,
-            server: "/tmp/socket".into(),
+            server: crate::test_support::path("/tmp/socket").into(),
             pane_id: "%1".into(),
             terminal_id: "pid:42:start:100".into(),
             generation: String::new(),
@@ -464,6 +518,7 @@ mod tests {
             }
         );
     }
+    #[cfg(unix)]
     #[test]
     fn roundtrip_and_symlink_rejection() {
         let dir = std::env::temp_dir().join(format!(

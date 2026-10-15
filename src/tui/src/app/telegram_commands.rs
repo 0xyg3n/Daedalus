@@ -1576,7 +1576,7 @@ impl NativeOperations {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::core::identity::Backend;
@@ -1619,7 +1619,7 @@ mod tests {
                 generation: "generation".into(),
             },
             label: "workspace".into(),
-            workspace: "/workspace".into(),
+            workspace: crate::test_support::path("/workspace").into(),
             harness: "claude".into(),
             conversation: Some("conversation".into()),
             available: true,
@@ -1686,7 +1686,7 @@ mod tests {
                 assert_eq!(target.terminal, self.terminal.identity);
                 self.prepared += 1;
                 Ok(super::super::telegram_launch::fixture(
-                    serde_json::json!({"backend":"tmux","socket":target.terminal.endpoint,"pane_id":target.terminal.pane,"terminal_id":target.terminal.generation,"cwd":"/tmp/project","agent_session":{"kind":"id","value":target.conversation}}),
+                    serde_json::json!({"backend":"tmux","socket":target.terminal.endpoint,"pane_id":target.terminal.pane,"terminal_id":target.terminal.generation,"cwd":crate::test_support::path("/tmp/project"),"agent_session":{"kind":"id","value":target.conversation}}),
                 ))
             }
             fn execute(&mut self, action: &Action, _: &Target) -> Result<String> {
@@ -1701,9 +1701,12 @@ mod tests {
             prepared: 0,
             applied: 0,
         };
-        let command = parse("/new claude split", &caller.bot_username)
-            .unwrap()
-            .unwrap();
+        let command = parse(
+            crate::test_support::path("/new claude split"),
+            &caller.bot_username,
+        )
+        .unwrap()
+        .unwrap();
         routes
             .set_grant(&caller.scope, &caller.actor, &[Permission::Read])
             .unwrap();
@@ -2316,7 +2319,7 @@ mod tests {
         for text in [
             "/cc /unknown",
             "/compact $(command)",
-            "/config bypass",
+            crate::test_support::path("/config bypass"),
             "/effort extreme",
         ] {
             assert!(parse(text, &caller.bot_username).is_err());

@@ -388,7 +388,7 @@ fn write_json(writer: &mut impl Write, value: &serde_json::Value) -> Result<()> 
     writeln!(writer).map_err(|_| "Cannot write response".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
@@ -397,13 +397,19 @@ mod tests {
             vec![
                 "run",
                 "--registration",
-                "/tmp/example",
+                crate::test_support::path("/tmp/example"),
                 "--registration",
-                "/tmp/other",
+                crate::test_support::path("/tmp/other"),
             ],
             vec!["run", "--unknown", "value"],
             vec!["run", "--registration"],
-            vec!["install", "--from", "/tmp/example", "--event-id", "1"],
+            vec![
+                "install",
+                "--from",
+                crate::test_support::path("/tmp/example"),
+                "--event-id",
+                "1",
+            ],
         ] {
             assert!(
                 run(

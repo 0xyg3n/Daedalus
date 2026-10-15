@@ -451,7 +451,7 @@ mod tests {
             instance: "fixture".into(),
             terminal: TerminalId {
                 backend: Backend::Tmux,
-                endpoint: "/fixture.sock".into(),
+                endpoint: crate::test_support::path("/fixture.sock").into(),
                 pane: "%1".into(),
                 generation: "generation".into(),
             },
@@ -461,7 +461,7 @@ mod tests {
         let registration = Registration {
             version: 1,
             id: "hook".into(),
-            directory: "/tmp/unused-memory-fixture".into(),
+            directory: crate::test_support::path("/tmp/unused-memory-fixture").into(),
             scope: scope.clone(),
             goal_id: None,
             harness_process: None,

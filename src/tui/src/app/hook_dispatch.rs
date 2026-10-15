@@ -193,7 +193,11 @@ fn timestamp(now: f64) -> Result<String> {
     }
     let seconds = now as libc::time_t;
     let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
-    if unsafe { libc::gmtime_r(&seconds, time.as_mut_ptr()) }.is_null() {
+    #[cfg(unix)]
+    let valid = !unsafe { libc::gmtime_r(&seconds, time.as_mut_ptr()) }.is_null();
+    #[cfg(windows)]
+    let valid = unsafe { libc::gmtime_s(time.as_mut_ptr(), &seconds) } == 0;
+    if !valid {
         return Err("Invalid progress timestamp".into());
     }
     let time = unsafe { time.assume_init() };
@@ -234,7 +238,7 @@ mod tests {
         fn new() -> Self {
             let terminal = TerminalId {
                 backend: Backend::Tmux,
-                endpoint: "/fixture.sock".into(),
+                endpoint: crate::test_support::path("/fixture.sock").into(),
                 pane: "%1".into(),
                 generation: "generation".into(),
             };
@@ -247,7 +251,7 @@ mod tests {
             let registration = Registration {
                 version: 1,
                 id: "hook".into(),
-                directory: "/tmp/unused-progress-fixture".into(),
+                directory: crate::test_support::path("/tmp/unused-progress-fixture").into(),
                 scope: scope.clone(),
                 goal_id: None,
                 harness_process: None,
@@ -268,11 +272,11 @@ mod tests {
             routes
                 .inventory(
                     Backend::Tmux,
-                    "/fixture.sock",
+                    crate::test_support::path("/fixture.sock"),
                     &[Terminal {
                         identity: terminal.clone(),
                         label: "Agent".into(),
-                        workspace: "/workspace".into(),
+                        workspace: crate::test_support::path("/workspace").into(),
                         harness: "claude".into(),
                         conversation: Some("session".into()),
                         available: true,
@@ -317,7 +321,7 @@ mod tests {
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 123,
-                token_file: "/tmp/unused-progress-token".into(),
+                token_file: crate::test_support::path("/tmp/unused-progress-token").into(),
                 grants: vec![Grant {
                     chat: 42,
                     actor: 7,

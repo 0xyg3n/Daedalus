@@ -84,9 +84,9 @@ mod tests {
             let (family, options) = translate(&args(&[
                 command,
                 "--target",
-                "/tmp/exact-pane",
+                crate::test_support::path("/tmp/exact-pane"),
                 "--registration",
-                "/tmp/exact-hook",
+                crate::test_support::path("/tmp/exact-hook"),
             ]))
             .unwrap();
             assert_eq!(family, Family::Terminal);
@@ -95,9 +95,9 @@ mod tests {
                 &options[3..],
                 &[
                     "--target",
-                    "/tmp/exact-pane",
+                    crate::test_support::path("/tmp/exact-pane"),
                     "--registration",
-                    "/tmp/exact-hook"
+                    crate::test_support::path("/tmp/exact-hook")
                 ]
             );
         }
@@ -110,11 +110,11 @@ mod tests {
             let (family, options) = translate(&args(&[
                 operation,
                 "--config-dir",
-                "/tmp/control",
+                crate::test_support::path("/tmp/control"),
                 "--key",
                 "checkpoint:key",
                 "--target",
-                "/tmp/exact-pane",
+                crate::test_support::path("/tmp/exact-pane"),
                 "--harness",
                 "claude",
             ]))
@@ -128,9 +128,13 @@ mod tests {
             );
             assert!(
                 super::super::session_cli::parse(
-                    &translate(&args(&[operation, "--config-dir", "/tmp/control"]))
-                        .unwrap()
-                        .1
+                    &translate(&args(&[
+                        operation,
+                        "--config-dir",
+                        crate::test_support::path("/tmp/control")
+                    ]))
+                    .unwrap()
+                    .1
                 )
                 .is_err()
             );
@@ -168,25 +172,42 @@ mod tests {
                 "--text",
                 "$(literal)",
                 "--target",
-                "/tmp/pane"
+                crate::test_support::path("/tmp/pane")
             ]))
             .unwrap(),
             (
                 Family::Terminal,
-                args(&["send", "--text", "$(literal)", "--target", "/tmp/pane"])
+                args(&[
+                    "send",
+                    "--text",
+                    "$(literal)",
+                    "--target",
+                    crate::test_support::path("/tmp/pane")
+                ])
             )
         );
         assert_eq!(
-            translate(&args(&["stop", "--target", "/tmp/pane"]))
-                .unwrap()
-                .1[0],
+            translate(&args(&[
+                "stop",
+                "--target",
+                crate::test_support::path("/tmp/pane")
+            ]))
+            .unwrap()
+            .1[0],
             "interrupt"
         );
         assert_eq!(
             translate(&args(&["use", "--chat", "42"])).unwrap(),
             (Family::Route, args(&["select", "--chat", "42"]))
         );
-        assert!(translate(&args(&["mode", "--target", "/tmp/pane"])).is_err());
+        assert!(
+            translate(&args(&[
+                "mode",
+                "--target",
+                crate::test_support::path("/tmp/pane")
+            ]))
+            .is_err()
+        );
         assert!(
             translate(&args(&["reconcile"]))
                 .unwrap_err()

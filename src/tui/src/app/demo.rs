@@ -8,7 +8,6 @@ use crate::core::layouts::Layouts;
 use serde_json::Value;
 use std::{
     io::{BufRead, Write},
-    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,9 +18,52 @@ pub struct Demo {
 }
 impl Demo {
     fn new() -> Result<Self> {
+        let fixture: Value = serde_json::from_str(include_str!("../../assets/demo.json"))
+            .map_err(|_| "Invalid built-in demonstration")?;
+        #[cfg(windows)]
+        let fixture = {
+            fn native_paths(value: &mut Value, root: &std::path::Path) {
+                match value {
+                    Value::Object(fields) => {
+                        for (key, value) in fields {
+                            if [
+                                "socket",
+                                "cwd",
+                                "directory",
+                                "working_directory",
+                                "path",
+                                "transcript",
+                                "endpoint",
+                            ]
+                            .contains(&key.as_str())
+                                && let Some(path) = value
+                                    .as_str()
+                                    .filter(|path| path.starts_with('/') && !path.starts_with("//"))
+                            {
+                                *value = root
+                                    .join(path.trim_start_matches('/'))
+                                    .to_string_lossy()
+                                    .into_owned()
+                                    .into();
+                            } else {
+                                native_paths(value, root);
+                            }
+                        }
+                    }
+                    Value::Array(items) => {
+                        for item in items {
+                            native_paths(item, root);
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            let mut fixture = fixture;
+            native_paths(&mut fixture, &std::env::temp_dir().join("daedalus-demo"));
+            fixture
+        };
         Ok(Self {
-            fixture: serde_json::from_str(include_str!("../../assets/demo.json"))
-                .map_err(|_| "Invalid built-in demonstration")?,
+            fixture,
             layouts: Layouts::default(),
         })
     }
@@ -65,22 +107,27 @@ impl Source for Demo {
     }
 }
 pub fn run(reader: &mut impl BufRead, writer: &mut impl Write) -> Result<()> {
-    let directory = Path::new("/daedalus-demo");
-    let config = ControlConfig::fresh(directory)?;
+    #[cfg(unix)]
+    let directory = std::path::PathBuf::from("/daedalus-demo");
+    #[cfg(windows)]
+    let directory = std::env::temp_dir().join("daedalus-demo");
+    let config = ControlConfig::fresh(&directory)?;
     backend::run_with(
         reader,
         writer,
-        &mut Backend::new(directory.into(), config, Demo::new()?)?,
+        &mut Backend::new(directory, config, Demo::new()?)?,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     #[test]
     fn demo_preserves_ten_terminal_previews_and_never_uses_native_source() {
         let mut source = Demo::new().unwrap();
-        let config = ControlConfig::fresh(Path::new("/daedalus-demo")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/daedalus-demo"))).unwrap();
         let observations = source.refresh(&config).unwrap();
         let panes = observations.snapshot["panes"].as_array().unwrap();
         assert_eq!(panes.len(), 10);

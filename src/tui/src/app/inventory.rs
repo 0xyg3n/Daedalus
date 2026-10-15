@@ -81,7 +81,11 @@ fn collect_with_socket(
     } else {
         &[]
     };
-    let sockets = terminals::discover_sockets(&sockets, roots, unsafe { libc::geteuid() });
+    #[cfg(unix)]
+    let uid = unsafe { libc::geteuid() };
+    #[cfg(windows)]
+    let uid = 0; // tmux socket discovery is Unix-only.
+    let sockets = terminals::discover_sockets(&sockets, roots, uid);
     let mut jobs: Vec<Endpoint> = sockets
         .into_iter()
         .filter_map(|p| p.to_str().map(|s| Endpoint::Tmux(s.into())))
@@ -183,10 +187,21 @@ mod tests {
     use super::*;
     #[test]
     fn active_custom_socket_is_included_only_with_automatic_discovery() {
-        let mut config = ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap();
+        let mut config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap();
         assert_eq!(
-            socket_candidates(&config, Some("/custom/server.sock,123,0")),
-            [PathBuf::from("/custom/server.sock")]
+            socket_candidates(
+                &config,
+                Some(&format!(
+                    "{},123,0",
+                    crate::test_support::path("/custom/server.sock")
+                ))
+            ),
+            [PathBuf::from(crate::test_support::path(
+                "/custom/server.sock"
+            ))]
         );
         config.discovery.automatic = false;
         assert!(socket_candidates(&config, Some("/custom/server.sock,123,0")).is_empty());
@@ -195,7 +210,10 @@ mod tests {
     }
     #[test]
     fn disabled_discovery_does_not_probe_unconfigured_endpoints() {
-        let mut config = ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap();
+        let mut config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap();
         config.discovery.automatic = false;
         let terminals = Terminals {
             tmux: "/nonexistent/tmux".into(),
@@ -208,7 +226,10 @@ mod tests {
     }
     #[test]
     fn configured_missing_endpoint_is_an_error_not_a_phantom_terminal() {
-        let mut config = ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap();
+        let mut config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap();
         config.discovery.automatic = false;
         config.discovery.herdr_sessions.push("missing".into());
         let terminals = Terminals {

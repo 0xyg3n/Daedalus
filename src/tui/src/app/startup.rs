@@ -12,7 +12,9 @@ pub(crate) fn preference_directory(
     cwd: &Path,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<PathBuf> {
-    let home = env("HOME").map(PathBuf::from);
+    let home = env("HOME")
+        .or_else(|| env("USERPROFILE"))
+        .map(PathBuf::from);
     let mut directory = if let Some(path) = env("DAEDALUS_CONFIG_DIR") {
         PathBuf::from(path)
     } else if let Some(root) = env("XDG_CONFIG_HOME") {
@@ -21,6 +23,12 @@ pub(crate) fn preference_directory(
             return Err("XDG_CONFIG_HOME must be absolute".into());
         }
         root.join("daedalus")
+    } else if cfg!(windows) && env("APPDATA").is_some() {
+        let root = PathBuf::from(env("APPDATA").unwrap());
+        if !root.is_absolute() {
+            return Err("APPDATA must be absolute".into());
+        }
+        root.join("Daedalus")
     } else {
         home.as_ref()
             .ok_or("Set HOME or use --config-dir ABS")?
@@ -77,7 +85,9 @@ impl Launch {
                 workspace: cwd.into(),
             });
         }
-        let home = env("HOME").map(PathBuf::from);
+        let home = env("HOME")
+            .or_else(|| env("USERPROFILE"))
+            .map(PathBuf::from);
         let mut directory = match explicit.as_ref() {
             Some(path) => path.clone(),
             None => preference_directory(cwd, &env)?,
@@ -207,7 +217,7 @@ mod tests {
                 "--config-dir".into(),
                 "/dev/null/private".into(),
             ],
-            Path::new("/"),
+            Path::new(crate::test_support::path("/")),
             |_| None,
         )
         .unwrap();
@@ -224,27 +234,32 @@ mod tests {
         let launch = Launch::resolve(
             &[
                 "--config-dir".into(),
-                "/daedalus-test-missing/instance".into(),
+                crate::test_support::path("/daedalus-test-missing/instance").into(),
             ],
-            Path::new("/"),
+            Path::new(crate::test_support::path("/")),
             |_| None,
         )
         .unwrap();
         assert!(launch.first_run);
         assert!(
             Launch::resolve(
-                &["--config-dir".into(), "/tmp/../private".into()],
-                Path::new("/"),
+                &[
+                    "--config-dir".into(),
+                    crate::test_support::path("/tmp/../private").into()
+                ],
+                Path::new(crate::test_support::path("/")),
                 |_| None
             )
             .is_err()
         );
-        assert!(Launch::resolve(&[], Path::new("/"), |_| None).is_err());
-        let configured_env = Launch::resolve(&[], Path::new("/"), |name| {
-            (name == "DAEDALUS_CONFIG_DIR")
-                .then(|| OsString::from("/daedalus-test-missing/instance"))
-        })
-        .unwrap();
+        assert!(Launch::resolve(&[], Path::new(crate::test_support::path("/")), |_| None).is_err());
+        let configured_env =
+            Launch::resolve(&[], Path::new(crate::test_support::path("/")), |name| {
+                (name == "DAEDALUS_CONFIG_DIR").then(|| {
+                    OsString::from(crate::test_support::path("/daedalus-test-missing/instance"))
+                })
+            })
+            .unwrap();
         assert_eq!(configured_env.directory, launch.directory);
     }
     #[test]

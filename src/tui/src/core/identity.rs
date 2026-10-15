@@ -72,7 +72,7 @@ mod tests {
     fn terminal() -> TerminalId {
         TerminalId {
             backend: Backend::Tmux,
-            endpoint: "/tmp/example.sock".into(),
+            endpoint: crate::test_support::path("/tmp/example.sock").into(),
             pane: "%1".into(),
             generation: "v2:10:100:20:200".into(),
         }
@@ -84,7 +84,7 @@ mod tests {
         changed.generation = "v2:10:101:20:201".into();
         assert!(target.resolve(&[changed]).is_err());
         let mut changed = target.clone();
-        changed.endpoint = "/tmp/other.sock".into();
+        changed.endpoint = crate::test_support::path("/tmp/other.sock").into();
         assert!(target.resolve(&[changed]).is_err());
         assert!(target.resolve(&[target.clone(), target.clone()]).is_err());
         assert!(target.resolve(std::slice::from_ref(&target)).is_ok());

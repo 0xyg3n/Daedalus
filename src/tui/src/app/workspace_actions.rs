@@ -148,7 +148,7 @@ pub fn launch_plan(
     environment: &BTreeMap<String, String>,
 ) -> Result<LaunchPlan> {
     let (binary, args, environment) = if tool == "shell" {
-        let environment = environment
+        let environment: BTreeMap<String, String> = environment
             .iter()
             .filter(|(key, _)| {
                 [
@@ -162,13 +162,33 @@ pub fn launch_plan(
                     "USER",
                     "LOGNAME",
                     "XDG_RUNTIME_DIR",
+                    "SystemRoot",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "USERPROFILE",
+                    "APPDATA",
+                    "LOCALAPPDATA",
+                    "HOMEDRIVE",
+                    "HOMEPATH",
+                    "TEMP",
+                    "TMP",
+                    "PATHEXT",
+                    "COMSPEC",
                 ]
                 .contains(&key.as_str())
                     || key.starts_with("LC_")
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        ("/bin/sh".into(), vec!["-i".into()], environment)
+        #[cfg(unix)]
+        let shell = ("/bin/sh".into(), vec!["-i".into()], environment);
+        #[cfg(windows)]
+        let shell = (
+            windows_shell(&environment)?,
+            vec!["-NoLogo".into(), "-NoProfile".into()],
+            environment,
+        );
+        shell
     } else {
         let adapter = harnesses::tool(tool).ok_or("Unknown harness")?;
         let executable = harnesses::executable(&adapter, environment)
@@ -304,40 +324,65 @@ pub fn create(
         "-F".into(),
         "#{socket_path}\t#{pane_id}".into(),
         "--".into(),
-        "/usr/bin/env".into(),
-        "-i".into(),
     ]);
-    for (key, value) in &launch.environment {
-        args.push(format!("{key}={value}"));
+    #[cfg(windows)]
+    args.extend(crate::adapters::windows_launch::argv(launch)?);
+    #[cfg(unix)]
+    {
+        args.extend(["/usr/bin/env".into(), "-i".into()]);
+        for (key, value) in &launch.environment {
+            args.push(format!("{key}={value}"));
+        }
+        args.push(launch.binary.to_string_lossy().into_owned());
+        args.extend(launch.args.clone());
     }
-    args.push(launch.binary.to_string_lossy().into_owned());
-    args.extend(launch.args.clone());
     let mut process = Command::new(&adapter.tmux);
     process.args(&args).env_clear();
     for (key, value) in &launch.environment {
-        if ["HOME", "PATH", "TERM", "LANG", "XDG_RUNTIME_DIR"].contains(&key.as_str()) {
+        if [
+            "HOME",
+            "PATH",
+            "TERM",
+            "LANG",
+            "XDG_RUNTIME_DIR",
+            "SystemRoot",
+            "SYSTEMROOT",
+            "WINDIR",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+            "COMSPEC",
+        ]
+        .contains(&key.as_str())
+        {
             process.env(key, value);
         }
     }
-    let output = match crate::adapters::process::run(&mut process, adapter.timeout, 8_000_000) {
-        Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
-            Ok(value) => value,
-            Err(_) => {
+    let output =
+        match crate::adapters::process::run_terminal(&mut process, adapter.timeout, 8_000_000) {
+            Ok(output) if output.status.success() => match String::from_utf8(output.stdout) {
+                Ok(value) => value,
+                Err(_) => {
+                    return Ok(receipt(
+                        ReceiptState::Unconfirmed,
+                        "Project creation returned invalid terminal identity output",
+                        None,
+                    ));
+                }
+            },
+            _ => {
                 return Ok(receipt(
                     ReceiptState::Unconfirmed,
-                    "Project creation returned invalid terminal identity output",
+                    "Project creation is unconfirmed; inspect before retrying",
                     None,
                 ));
             }
-        },
-        _ => {
-            return Ok(receipt(
-                ReceiptState::Unconfirmed,
-                "Project creation is unconfirmed; inspect before retrying",
-                None,
-            ));
-        }
-    };
+        };
     let Some((socket, pane_id)) = output.trim().split_once('\t') else {
         return Ok(receipt(
             ReceiptState::Unconfirmed,
@@ -565,7 +610,52 @@ impl WorkspaceRequest {
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn windows_shell(environment: &BTreeMap<String, String>) -> Result<std::path::PathBuf> {
+    let mut candidates =
+        std::env::split_paths(environment.get("PATH").map(String::as_str).unwrap_or(""))
+            .filter(|path| path.is_absolute())
+            .flat_map(|directory| [directory.join("pwsh.exe"), directory.join("powershell.exe")])
+            .collect::<Vec<_>>();
+    if let Some(root) = environment
+        .get("SystemRoot")
+        .or_else(|| environment.get("SYSTEMROOT"))
+    {
+        let root = Path::new(root);
+        if root.is_absolute() {
+            candidates.push(root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        }
+    }
+    candidates.into_iter().find(|path| crate::platform::open_regular(path).is_ok())
+        .ok_or("Native Windows shell is unavailable; install PowerShell or provide its absolute PATH directory".into())
+}
+#[cfg(all(test, windows))]
+mod windows_launch_tests {
+    use super::*;
+    #[test]
+    fn shell_launch_preserves_required_windows_environment_without_importing_secrets() {
+        let cwd = std::env::temp_dir();
+        let config = ControlConfig::fresh(&cwd).unwrap();
+        let mut environment = crate::platform::environment();
+        environment.insert("TELEGRAM_BOT_TOKEN".into(), "private-fixture".into());
+        environment.insert("UNRELATED_SECRET".into(), "private-fixture".into());
+        let plan = launch_plan("shell", &cwd, &config, &environment).unwrap();
+        assert!(plan.binary.is_absolute());
+        assert!(plan.binary.extension().unwrap().eq_ignore_ascii_case("exe"));
+        assert_eq!(plan.args, ["-NoLogo", "-NoProfile"]);
+        assert!(!plan.environment.contains_key("TELEGRAM_BOT_TOKEN"));
+        assert!(!plan.environment.contains_key("UNRELATED_SECRET"));
+        assert!(
+            plan.environment.contains_key("SystemRoot")
+                || plan.environment.contains_key("SYSTEMROOT")
+        );
+        let command = crate::adapters::windows_launch::command(&plan).unwrap();
+        assert!(command.contains("-EncodedCommand"));
+        assert!(!command.contains("private-fixture"));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -597,8 +687,11 @@ mod tests {
         };
         let pane = json!({"backend":"herdr","session":"fixture","pane_id":"pane","terminal_id":"generation"});
         let environment = [
-            ("HOME".into(), "/tmp/fixture".into()),
-            ("PATH".into(), "/usr/bin".into()),
+            (
+                "HOME".into(),
+                crate::test_support::path("/tmp/fixture").into(),
+            ),
+            ("PATH".into(), crate::test_support::path("/usr/bin").into()),
             ("BOT_TOKEN".into(), "private".into()),
             ("TMUX".into(), "private".into()),
         ]
@@ -689,7 +782,10 @@ mod tests {
         assert!(!directory.join("never-created").exists());
         let environment = [
             ("HOME".into(), directory.to_string_lossy().into_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "PATH".into(),
+                crate::test_support::path("/usr/bin:/bin").into(),
+            ),
             ("BOT_TOKEN".into(), "private-secret".into()),
         ]
         .into_iter()
@@ -746,7 +842,7 @@ mod tests {
             "17",
             "sh",
             "1",
-            "/tmp",
+            crate::test_support::path("/tmp"),
             "18",
             "shell",
             "/dev/pts/1",
@@ -772,7 +868,10 @@ mod tests {
         };
         let environment = [
             ("HOME".into(), directory.to_string_lossy().into_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "PATH".into(),
+                crate::test_support::path("/usr/bin:/bin").into(),
+            ),
             ("BOT_TOKEN".into(), "private-secret".into()),
         ]
         .into_iter()
@@ -789,7 +888,7 @@ mod tests {
         assert_eq!(result.state, ReceiptState::Submitted);
         assert_eq!(result.terminal.unwrap()["pane_id"], "%1");
         let args = fs::read_to_string(directory.join("args")).unwrap();
-        assert!(args.contains("/usr/bin/env\n-i\n"));
+        assert!(args.contains(crate::test_support::path("/usr/bin/env\n-i\n")));
         assert!(args.contains(&launch.args[0]));
         assert!(
             !fs::read_to_string(directory.join("environment"))

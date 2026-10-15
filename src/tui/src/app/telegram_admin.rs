@@ -346,7 +346,7 @@ fn live_terminals(directory: &Path) -> Result<Vec<crate::core::routes::Terminal>
         directory: directory.into(),
         config,
         terminals: crate::adapters::terminals::Terminals::default(),
-        environment: std::env::vars().collect(),
+        environment: crate::platform::environment(),
     }
     .inventory()
 }
@@ -808,12 +808,12 @@ mod tests {
         let terminal = crate::core::routes::Terminal {
             identity: crate::core::identity::TerminalId {
                 backend: crate::core::identity::Backend::Tmux,
-                endpoint: "/fixture.sock".into(),
+                endpoint: crate::test_support::path("/fixture.sock").into(),
                 pane: "%1".into(),
                 generation: "generation".into(),
             },
             label: "Workspace".into(),
-            workspace: "/workspace".into(),
+            workspace: crate::test_support::path("/workspace").into(),
             harness: "claude".into(),
             conversation: Some("conversation".into()),
             available: true,

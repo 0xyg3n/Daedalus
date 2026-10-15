@@ -203,7 +203,7 @@ mod tests {
     fn fixture(state: OperationState) -> (memory::Config, Journal, Delivery, Mock) {
         let config:memory::Config=serde_json::from_value(json!({
             "version":1,"enabled":true,"endpoint":"http://127.0.0.1:8888","credential_file":null,
-            "bindings":[{"registration_id":"fixture","bank":"bank","scope":{"instance":"instance","terminal":{"backend":"tmux","endpoint":"/tmp/synthetic.sock","pane":"%1","generation":"generation"},"conversation":"session","harness":"claude"}}],
+            "bindings":[{"registration_id":"fixture","bank":"bank","scope":{"instance":"instance","terminal":{"backend":"tmux","endpoint":crate::test_support::path("/tmp/synthetic.sock"),"pane":"%1","generation":"generation"},"conversation":"session","harness":"claude"}}],
             "recall_query":"project","timeout_ms":1000
         })).unwrap();
         config.validate().unwrap();
@@ -304,9 +304,25 @@ mod tests {
     #[test]
     fn cli_requires_exact_memory_keys_and_explicit_refresh() {
         for command in [
-            vec!["status", "--config-dir", "/tmp/unused", "--key", "other"],
-            vec!["list", "--config-dir", "/tmp/unused", "--key", "memory:abc"],
-            vec!["refresh", "--config-dir", "/tmp/unused"],
+            vec![
+                "status",
+                "--config-dir",
+                crate::test_support::path("/tmp/unused"),
+                "--key",
+                "other",
+            ],
+            vec![
+                "list",
+                "--config-dir",
+                crate::test_support::path("/tmp/unused"),
+                "--key",
+                "memory:abc",
+            ],
+            vec![
+                "refresh",
+                "--config-dir",
+                crate::test_support::path("/tmp/unused"),
+            ],
         ] {
             assert!(
                 run(

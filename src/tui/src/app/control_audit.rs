@@ -3,15 +3,20 @@
 use crate::core::layouts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{MetadataExt, OpenOptionsExt},
+};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Read,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    fs::File,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
+};
+#[cfg(unix)]
+use std::{
+    fs::{self, OpenOptions},
+    io::Read,
 };
 type Result<T> = std::result::Result<T, String>;
 const MAX: u64 = 1024 * 1024;
@@ -63,6 +68,7 @@ struct Entry {
     state: State,
     time: f64,
 }
+#[cfg(unix)]
 fn directory(path: &Path) -> Result<()> {
     layouts::check_path(path).map_err(|_| "Unsafe audit directory")?;
     let meta = fs::symlink_metadata(path).map_err(|_| "Audit directory is unavailable")?;
@@ -71,6 +77,7 @@ fn directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn read(path: &Path) -> Result<Vec<Entry>> {
     layouts::check_path(path).map_err(|_| "Unsafe audit path")?;
     let file = match OpenOptions::new()
@@ -122,9 +129,12 @@ fn read(path: &Path) -> Result<Vec<Entry>> {
 struct Lock(File);
 impl Drop for Lock {
     fn drop(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
     }
 }
 fn operation_id() -> Result<String> {
@@ -145,26 +155,38 @@ pub fn record(path: &Path, action: Action, state: State) -> Result<()> {
 }
 fn record_operation(path: &Path, action: Action, state: State, operation: &str) -> Result<()> {
     directory(path)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path.join("control-audit.lock"))
-        .map_err(|_| "Cannot lock control audit")?;
-    let meta = lock.metadata().map_err(|_| "Cannot inspect audit lock")?;
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-        || meta.nlink() != 1
-    {
-        return Err("Unsafe audit lock".into());
-    }
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("Control audit is busy; action was not retried".into());
-    }
+    #[cfg(unix)]
+    let lock = {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path.join("control-audit.lock"))
+            .map_err(|_| "Cannot lock control audit")?;
+        let meta = lock.metadata().map_err(|_| "Cannot inspect audit lock")?;
+        if !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+        {
+            return Err("Unsafe audit lock".into());
+        }
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("Control audit is busy; action was not retried".into());
+        }
+        lock
+    };
+    #[cfg(windows)]
+    let lock = {
+        let file = crate::platform::open_private(&path.join("control-audit.lock"), true, true)
+            .map_err(|_| "Cannot open audit lock")?;
+        crate::platform::lock_exclusive(&file, true)
+            .map_err(|_| "Another audit update is active")?;
+        file
+    };
     let _lock = Lock(lock);
     let file = path.join("control-audit.json");
     let mut entries = read(&file)?;
@@ -221,7 +243,7 @@ pub fn perform<T>(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{
@@ -342,4 +364,34 @@ mod tests {
         .unwrap();
         assert!(recent(&f.0).is_err());
     }
+}
+
+#[cfg(windows)]
+fn directory(path: &Path) -> Result<()> {
+    crate::platform::validate_private_dir(path).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn read(path: &Path) -> Result<Vec<Entry>> {
+    let Some(bytes) = layouts::read_private_limit(path, MAX)? else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<Entry> =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid audit history")?;
+    if entries.len() > KEEP
+        || entries.iter().any(|e| {
+            e.version != 1
+                || !e.time.is_finite()
+                || e.time < 0.0
+                || e.operation.is_empty()
+                || e.operation.len() > 96
+                || !e
+                    .operation
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() || b == b'-')
+        })
+    {
+        return Err("Invalid audit history".into());
+    }
+    Ok(entries)
 }

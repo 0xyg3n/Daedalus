@@ -4,13 +4,16 @@ use crate::core::{layouts, routes::Permission};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::{
     fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     io::AsRawFd,
 };
 use std::{
     collections::BTreeSet,
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -230,6 +233,7 @@ pub(crate) fn validate_token(bot_id: i64, bytes: &[u8]) -> Result<String> {
     }
     Ok(token.into())
 }
+#[cfg(unix)]
 pub(crate) fn read_private(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     valid_path(path)?;
     let file = match OpenOptions::new()
@@ -339,6 +343,7 @@ impl ServicePlan {
     }
 }
 pub(crate) struct ConfigurationLock(fs::File);
+#[cfg(unix)]
 impl Drop for ConfigurationLock {
     fn drop(&mut self) {
         // A concurrent fork can inherit the open file description before exec.
@@ -348,6 +353,7 @@ impl Drop for ConfigurationLock {
         }
     }
 }
+#[cfg(unix)]
 pub(crate) fn configuration_lock(directory: &Path) -> Result<ConfigurationLock> {
     valid_path(directory)?;
     fs::DirBuilder::new()
@@ -495,6 +501,7 @@ pub fn run(args: &[String], writer: &mut impl Write) -> Result<()> {
 
 /// Open only an owned private database under an owned private directory.
 /// Call at service start, never from read-only configuration checks.
+#[cfg(unix)]
 pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
     valid_path(path)?;
     let parent = path.parent().ok_or("Missing database directory")?;
@@ -567,7 +574,144 @@ pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
         .map_err(|_| "Cannot configure database")?;
     Ok(connection)
 }
-#[cfg(test)]
+#[cfg(windows)]
+pub(crate) fn read_private(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    valid_path(path)?;
+    let file = match crate::platform::open_private(path, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read owned private configuration file".into()),
+    };
+    crate::platform::validate_private_file(&file)
+        .map_err(|_| "Configuration and token files must have private owner-scoped access")?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read private file")?;
+    if bytes.len() as u64 > limit {
+        return Err("Private file exceeds supported size".into());
+    }
+    Ok(Some(bytes))
+}
+#[cfg(windows)]
+impl Drop for ConfigurationLock {
+    fn drop(&mut self) {
+        let _ = crate::platform::unlock(&self.0);
+    }
+}
+#[cfg(windows)]
+pub(crate) fn configuration_lock(directory: &Path) -> Result<ConfigurationLock> {
+    valid_path(directory)?;
+    crate::platform::ensure_private_dir(directory)
+        .map_err(|_| "Cannot create private service directory")?;
+    crate::platform::validate_private_dir(directory)
+        .map_err(|_| "Service directory is not private and owned")?;
+    let lock = crate::platform::open_private(&directory.join(".telegram-config.lock"), true, true)
+        .map_err(|_| "Cannot open service configuration lock")?;
+    crate::platform::validate_private_file(&lock)
+        .map_err(|_| "Unsafe service configuration lock")?;
+    crate::platform::lock_exclusive(&lock, true).map_err(|_| "Service configuration is busy")?;
+    Ok(ConfigurationLock(lock))
+}
+#[cfg(windows)]
+pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
+    valid_path(path)?;
+    let parent = path.parent().ok_or("Missing database directory")?;
+    crate::platform::ensure_private_dir(parent)
+        .map_err(|_| "Cannot create private database directory")?;
+    crate::platform::validate_private_dir(parent)
+        .map_err(|_| "Database directory is not private and owned")?;
+    let file = crate::platform::prepare_sqlite(path)
+        .map_err(|_| "Cannot prepare private database and rollback journal")?;
+    crate::platform::validate_private_file(&file)
+        .map_err(|_| "Database is not a private owned regular file")?;
+    let identity =
+        crate::platform::file_identity(&file).map_err(|_| "Cannot inspect database identity")?;
+    file.sync_all()
+        .map_err(|_| "Cannot sync private database")?;
+    let named = crate::platform::open_private(path, false, false)
+        .map_err(|_| "Cannot recheck database identity")?;
+    if crate::platform::file_identity(&named).map_err(|_| "Cannot recheck database identity")?
+        != identity
+    {
+        return Err("Database identity changed".into());
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "Cannot open database connection")?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "Cannot configure database")?;
+    connection
+        .execute_batch("PRAGMA temp_store=MEMORY;")
+        .map_err(|_| "Cannot configure private database temporary storage")?;
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=TRUNCATE", [], |row| row.get(0))
+        .map_err(|_| "Cannot select private rollback journal mode")?;
+    if !mode.eq_ignore_ascii_case("truncate") {
+        return Err(
+            "Database requires private TRUNCATE journaling; existing state was not removed".into(),
+        );
+    }
+    connection
+        .execute_batch("PRAGMA synchronous=FULL;")
+        .map_err(|_| "Cannot configure database durability")?;
+    Ok(connection)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn private_database_and_configuration_locks_require_owner_scoped_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-config-win-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::platform::ensure_private_dir(&directory).unwrap();
+        {
+            let lock = configuration_lock(&directory).unwrap();
+            assert!(configuration_lock(&directory).is_err());
+            drop(lock);
+            let _next = configuration_lock(&directory).unwrap();
+            let database = directory.join("state.sqlite3");
+            let connection = private_connection(&database).unwrap();
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode.to_ascii_lowercase(), "truncate");
+            connection
+                .execute_batch("CREATE TABLE retained(id INTEGER PRIMARY KEY);")
+                .unwrap();
+            drop(connection);
+            let journal = std::path::PathBuf::from(format!("{}-journal", database.display()));
+            crate::platform::validate_private_file(
+                &crate::platform::open_private(&journal, false, false).unwrap(),
+            )
+            .unwrap();
+            assert!(!std::path::PathBuf::from(format!("{}-wal", database.display())).exists());
+            assert!(!std::path::PathBuf::from(format!("{}-shm", database.display())).exists());
+            crate::platform::validate_private_file(
+                &crate::platform::open_private(&database, false, false).unwrap(),
+            )
+            .unwrap();
+            let alias = directory.join("alias.sqlite3");
+            std::fs::hard_link(&database, &alias).unwrap();
+            assert!(private_connection(&database).is_err());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

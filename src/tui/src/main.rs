@@ -4,6 +4,8 @@ mod graphics;
 mod model;
 mod neon;
 mod options;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod view;
 use crossterm::{
@@ -2371,6 +2373,7 @@ mod cli_tests {
         assert_eq!(ui.view, View::Tiles);
         assert!(ui.embed.is_none());
     }
+    #[cfg(unix)]
     #[test]
     fn attach_response_releases_action_and_loads_neighbor_without_state_reply() {
         let mut ui = workspace();
@@ -2378,7 +2381,7 @@ mod cli_tests {
         ui.action_pending = true;
         let plan = json!({
             "adapter":"herdr-session", "mode":"observe", "node":"a",
-            "argv":["/bin/sh", "-c", "printf '%s\n' '{\"type\":\"terminal.frame\",\"width\":80,\"height\":24,\"full\":true,\"bytes\":\"bmVpZ2hib3I=\"}'; read line"]
+            "argv":[crate::test_support::path("/bin/sh"), "-c", "printf '%s\n' '{\"type\":\"terminal.frame\",\"width\":80,\"height\":24,\"full\":true,\"bytes\":\"bmVpZ2hib3I=\"}'; read line"]
         });
         open_embed(&mut ui, &plan);
         assert!(
@@ -2457,17 +2460,41 @@ mod cli_tests {
         ui.last_preview = None;
         assert!(!previews_due(&ui));
     }
+    #[cfg(windows)]
+    #[test]
+    fn quit_fixture_worker() {
+        let Ok(mode) = std::env::var("DAEDALUS_TEST_WORKER") else {
+            return;
+        };
+        if mode == "hang" {
+            std::thread::sleep(Duration::from_secs(30));
+            return;
+        }
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(std::env::var_os("DAEDALUS_TEST_SAVED").unwrap(), line).unwrap();
+    }
     #[test]
     fn quitting_lets_the_backend_save_before_it_stops() {
         let folder = std::env::temp_dir().join(format!("daedalus-quit-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let saved = folder.join("saved");
         // A stand-in backend: reads the quit request, takes a moment, saves.
+        #[cfg(unix)]
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("read line; sleep 0.2; printf '%s' \"$line\" > \"$1\"")
             .arg("sh")
             .arg(&saved)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli_tests::quit_fixture_worker", "--nocapture"])
+            .env("DAEDALUS_TEST_WORKER", "save")
+            .env("DAEDALUS_TEST_SAVED", &saved)
             .stdin(Stdio::piped())
             .spawn()
             .unwrap();
@@ -2481,8 +2508,16 @@ mod cli_tests {
         assert!(line.contains("\"mode\":\"tiles\""), "{line}");
         std::fs::remove_dir_all(&folder).unwrap();
         // A backend that never exits is stopped after the wait.
+        #[cfg(unix)]
         let mut child = Command::new("sleep")
             .arg("30")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cli_tests::quit_fixture_worker", "--nocapture"])
+            .env("DAEDALUS_TEST_WORKER", "hang")
             .stdin(Stdio::piped())
             .spawn()
             .unwrap();
@@ -2631,11 +2666,14 @@ mod cli_tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../tests/fixtures/tree-projection.json"))
                 .unwrap();
-        let config = ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap();
+        let config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap();
         let local = json!({});
         let context = Context {
             config: &config,
-            config_dir: std::path::Path::new("/tmp/example"),
+            config_dir: std::path::Path::new(crate::test_support::path("/tmp/example")),
             home: None,
             snapshot: &fixture["snapshot"],
             health: &fixture["health"],
@@ -2651,7 +2689,7 @@ mod cli_tests {
         };
         let projection = ProjectionContext {
             hostname: "fixture-host".into(),
-            home: "/home/example".into(),
+            home: crate::test_support::path("/home/example").into(),
             now: 1120.0,
             pins: fixture["context"]["pins"].as_array().unwrap().clone(),
         };

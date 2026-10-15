@@ -1,14 +1,18 @@
 //! Read-only organizer observations. No environment, title credentials, or controller writes.
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 type Result<T> = std::result::Result<T, String>;
+#[cfg(unix)]
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    io::Read,
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::Path,
 };
+#[cfg(unix)]
+use std::{fs, io::Read};
 
 fn document(path: &Path) -> Result<Option<Value>> {
     super::telegram_config::read_private(path, 1024 * 1024)?
@@ -103,12 +107,14 @@ fn journal(directory: &Path) -> Value {
     }
     json!({"events":events,"verified":verified.len(),"open_plans":started.difference(&verified).count(),"unresolved":operations.values().filter(|state|matches!(state.as_str(),"intent"|"unknown")).count()})
 }
+#[cfg(unix)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Observer {
     executable: PathBuf,
     script: Option<PathBuf>,
 }
+#[cfg(unix)]
 fn bounded(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     fs::File::open(path)
@@ -121,6 +127,7 @@ fn bounded(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+#[cfg(unix)]
 fn incarnation(bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let fields = text
@@ -133,6 +140,7 @@ fn incarnation(bytes: &[u8]) -> Option<String> {
     }
     Some(fields.get(19)?.to_string())
 }
+#[cfg(unix)]
 fn services(directory: &Path, proc_root: &Path) -> Result<Value> {
     let Some(value) = document(&directory.join("armonia-observer.json"))? else {
         return Ok(Value::Null);
@@ -294,7 +302,7 @@ pub fn inspect(directory: &Path, proc_root: &Path, now: f64) -> Value {
     json!({"registry":registry,"agents":agents,"services":services,"service_error":error,"policy":policy(directory),"cycle":cycle,"journal":log,"pending_renames":pending_renames(directory),"observation":"Read-only; registry availability is unverified; no environment or credentials read"})
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::core::layouts::write_private;
@@ -427,4 +435,9 @@ mod tests {
         symlink(&script, process.join("exe")).unwrap();
         assert_eq!(f.view()["services"], json!([]));
     }
+}
+
+#[cfg(windows)]
+fn services(_directory: &Path, _proc_root: &Path) -> Result<Value> {
+    Err("Optional Armonia service process observation is unavailable on Windows".into())
 }

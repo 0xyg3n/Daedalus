@@ -240,12 +240,20 @@ mod tests {
     }
     #[test]
     fn parser_rejects_ambiguous_and_inapplicable_options() {
-        assert!(parse(&args(&["list", "--config-dir", "/tmp/example", "--apply"])).is_err());
+        assert!(
+            parse(&args(&[
+                "list",
+                "--config-dir",
+                crate::test_support::path("/tmp/example"),
+                "--apply"
+            ]))
+            .is_err()
+        );
         assert!(
             parse(&args(&[
                 "save",
                 "--config-dir",
-                "/tmp/example",
+                crate::test_support::path("/tmp/example"),
                 "--target",
                 "relative",
                 "--name",
@@ -257,7 +265,7 @@ mod tests {
             parse(&args(&[
                 "show",
                 "--config-dir",
-                "/tmp/example",
+                crate::test_support::path("/tmp/example"),
                 "--key",
                 "one",
                 "--key",
@@ -269,11 +277,11 @@ mod tests {
             parse(&args(&[
                 "spawn",
                 "--config-dir",
-                "/tmp/example",
+                crate::test_support::path("/tmp/example"),
                 "--key",
                 "k",
                 "--target",
-                "/tmp/private/pane",
+                crate::test_support::path("/tmp/private/pane"),
                 "--operation",
                 "shell",
                 "--harness",
@@ -285,9 +293,9 @@ mod tests {
             parse(&args(&[
                 "save",
                 "--config-dir",
-                "/tmp/example",
+                crate::test_support::path("/tmp/example"),
                 "--target",
-                "/tmp/private/pane",
+                crate::test_support::path("/tmp/private/pane"),
                 "--name",
                 "a",
                 "--include-output"
@@ -332,7 +340,7 @@ mod tests {
         ));
         super::super::setup::SetupPlan::fresh(
             &directory,
-            ControlConfig::fresh(std::path::Path::new("/tmp")).unwrap(),
+            ControlConfig::fresh(std::path::Path::new(crate::test_support::path("/tmp"))).unwrap(),
         )
         .unwrap()
         .apply()
@@ -364,7 +372,7 @@ mod tests {
             name: "fixture".into(),
             harness: "claude".into(),
             sid: "sid".into(),
-            cwd: "/tmp".into(),
+            cwd: crate::test_support::path("/tmp").into(),
             profile: String::new(),
             origin: "fixture".into(),
             created_at: String::new(),

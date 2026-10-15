@@ -2,18 +2,26 @@
 //! The selected Herdr executable is trusted code, not a sandboxed installer.
 //! File snapshots catch stale review; same-user concurrent external edits cannot
 //! be serialized by Daedalus's private writer lock. No running agent is changed.
-use crate::{adapters::process, core::layouts};
+use crate::adapters::process;
+#[cfg(unix)]
+use crate::core::layouts;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::{
     fs::{self, OpenOptions},
     io::Read,
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 type Result<T> = std::result::Result<T, String>;
+#[cfg(unix)]
 const LIMIT: u64 = 8 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +74,7 @@ pub struct Receipt {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+#[cfg(unix)]
 fn files(r: &Request) -> Result<Vec<PathBuf>> {
     let names = match r.harness.as_str() {
         "claude" => vec!["hooks/herdr-agent-state.sh", "settings.json"],
@@ -112,6 +121,12 @@ fn files(r: &Request) -> Result<Vec<PathBuf>> {
     }
     Ok(paths)
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn files(r: &Request) -> Result<Vec<PathBuf>> {
+    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
+}
+#[cfg(unix)]
 fn snapshot(path: &Path) -> Result<Snapshot> {
     layouts::check_path(path)?;
     let file = OpenOptions::new()
@@ -154,6 +169,12 @@ fn snapshot(path: &Path) -> Result<Snapshot> {
         mode: Some(m.mode() & 0o777),
     })
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn snapshot(path: &Path) -> Result<Snapshot> {
+    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
+}
+#[cfg(unix)]
 fn binary_sha(r: &Request) -> Result<String> {
     let m = fs::metadata(&r.binary).map_err(|_| "Herdr executable is missing")?;
     if !m.is_file()
@@ -190,6 +211,11 @@ fn binary_sha(r: &Request) -> Result<String> {
         h.update(&buffer[..n]);
     }
     Ok(format!("{:x}", h.finalize()))
+}
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn binary_sha(r: &Request) -> Result<String> {
+    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
 }
 fn command(r: &Request, args: &[&str], timeout: Duration) -> Result<process::Output> {
     let mut c = Command::new(&r.binary);
@@ -270,6 +296,7 @@ pub fn prepare(r: &Request) -> Result<Plan> {
         before,
     })
 }
+#[cfg(unix)]
 pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
     if plan.fingerprint()? != approved {
         return Err("Integration approval does not match review".into());
@@ -326,8 +353,13 @@ pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
     )?;
     Ok(receipt)
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
+    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
+}
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{

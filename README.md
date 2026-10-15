@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/daedalus.png" alt="Daedalus" width="440"></p>
 <p align="center"><b>Daedalus</b> is a terminal control panel for AI coding agents running in tmux and Herdr, with a Telegram bridge.</p>
 <p align="center">
-<img src="assets/badges/platform.svg" alt="Linux">
+<img src="assets/badges/platform.svg" alt="Linux and Windows preview">
 <img src="assets/badges/interface.svg" alt="Rust · Ratatui">
 <a href="LICENSE"><img src="assets/badges/license.svg" alt="Apache-2.0"></a>
 </p>
@@ -112,7 +112,11 @@ Requirements and limits: the agent must run in a Herdr pane with Herdr's agent i
 
 ## Install
 
-Linux only. Prebuilt binaries are attached to each [GitHub release](https://github.com/0xyg3n/Daedalus/releases):
+Linux and native Windows x64 use the same Rust application. Windows defaults to Herdr and supports explicitly configured compatible native multiplexers;
+its native console/backend paths still require real Windows validation. See the
+[Windows installation and local checks](docs/INSTALL.md#native-windows-install).
+
+Linux prebuilt binaries are attached to each [GitHub release](https://github.com/0xyg3n/Daedalus/releases):
 
 ```bash
 base=https://github.com/0xyg3n/Daedalus/releases/download/v0.1.0
@@ -131,7 +135,18 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-Setup chooses tmux, Herdr or both, and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) compares your version with the latest release and installs nothing. Details are in the [install guide](docs/INSTALL.md).
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.1) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+
+```powershell
+$exe = 'daedalus-0.2.0-beta.1-x86_64-windows.exe'
+$expected = (Get-Content "$exe.sha256").Split(' ')[0]
+if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
+& ".\$exe" setup
+```
+
+For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
+
+Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) compares your version with the latest release and installs nothing. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

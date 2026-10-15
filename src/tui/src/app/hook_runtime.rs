@@ -15,13 +15,16 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    },
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -202,6 +205,7 @@ impl Registration {
             .join(format!("{}.json", self.id))
     }
 }
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<()> {
     layouts::check_path(path).map_err(|_| Error::PrivateState)?;
     let meta = fs::metadata(path).map_err(|_| Error::PrivateState)?;
@@ -209,6 +213,11 @@ fn private_directory(path: &Path) -> Result<()> {
         return Err(Error::PrivateState);
     }
     Ok(())
+}
+#[cfg(windows)]
+#[allow(unused_variables)]
+fn private_directory(path: &Path) -> Result<()> {
+    crate::platform::validate_private_dir(path).map_err(|_| Error::PrivateState)
 }
 fn active_directory(directory: &Path) -> Result<()> {
     match fs::symlink_metadata(directory.join("cutover-retired.json")) {
@@ -221,6 +230,19 @@ fn active_directory(directory: &Path) -> Result<()> {
 pub(crate) struct ActiveGuard {
     _file: File,
 }
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        // A concurrent fork can briefly inherit this descriptor before exec.
+        // Release the lock explicitly instead of waiting for every copy to close.
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self._file);
+    }
+}
+#[cfg(unix)]
 pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
     private_directory(directory)?;
     let file = OpenOptions::new()
@@ -247,7 +269,20 @@ pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
     active_directory(directory)?;
     Ok(guard)
 }
+#[cfg(windows)]
+#[allow(unused_variables)]
+pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
+    private_directory(directory)?;
+    let file = crate::platform::open_private(&directory.join(".cutover.lock"), true, true)
+        .map_err(|_| Error::PrivateState)?;
+    crate::platform::lock_shared(&file, true)
+        .map_err(|_| Error::Invalid("Instance cutover is in progress"))?;
+    let guard = ActiveGuard { _file: file };
+    active_directory(directory)?;
+    Ok(guard)
+}
 
+#[cfg(unix)]
 fn private_file(path: &Path) -> Result<File> {
     layouts::check_path(path).map_err(|_| Error::PrivateState)?;
     let file = OpenOptions::new()
@@ -265,7 +300,23 @@ fn private_file(path: &Path) -> Result<File> {
     }
     Ok(file)
 }
+#[cfg(windows)]
+#[allow(unused_variables)]
+fn private_file(path: &Path) -> Result<File> {
+    crate::platform::open_private(path, false, false).map_err(|_| Error::PrivateState)
+}
+fn native_transcript(path: &Path) -> Result<File> {
+    #[cfg(unix)]
+    {
+        private_file(path)
+    }
+    #[cfg(windows)]
+    {
+        crate::platform::open_native_profile(path, false, false).map_err(|_| Error::PrivateState)
+    }
+}
 /// Explicit local setup action; never called by receiving a hook event.
+#[cfg(unix)]
 pub fn install(registration: &Registration) -> Result<PathBuf> {
     registration.validate()?;
     let _active = active_guard(&registration.directory)?;
@@ -303,6 +354,29 @@ pub fn install(registration: &Registration) -> Result<PathBuf> {
         .map_err(|_| Error::PrivateState)?;
     Ok(path)
 }
+#[cfg(windows)]
+#[allow(unused_variables)]
+pub fn install(registration: &Registration) -> Result<PathBuf> {
+    registration.validate()?;
+    let _active = active_guard(&registration.directory)?;
+    let path = registration.path();
+    let bytes = serde_json::to_vec_pretty(registration).map_err(|_| Error::Input)?;
+    if path.exists() {
+        if serde_json::to_value(inspect(&path)?).ok() != serde_json::to_value(registration).ok() {
+            return Err(Error::Invalid(
+                "Hook registration already exists with different policy",
+            ));
+        }
+        return Ok(path);
+    }
+    let parent = path.parent().ok_or(Error::PrivateState)?;
+    crate::platform::ensure_private_dir(parent).map_err(|_| Error::PrivateState)?;
+    let mut file = crate::platform::create_new_private(&path).map_err(|_| Error::PrivateState)?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| Error::PrivateState)?;
+    Ok(path)
+}
 pub fn inspect(path: &Path) -> Result<Registration> {
     let file = private_file(path)?;
     if file.metadata().map_err(|_| Error::PrivateState)?.len() > 64 * 1024 {
@@ -328,6 +402,7 @@ pub fn inspect(path: &Path) -> Result<Registration> {
     active_directory(&registration.directory)?;
     Ok(registration)
 }
+#[cfg(unix)]
 fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
     private_directory(directory)?;
     let path = directory.join(filename);
@@ -359,6 +434,26 @@ fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
         .map_err(|_| Error::Persistence)?;
     Ok(connection)
 }
+#[cfg(windows)]
+#[allow(unused_variables)]
+fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
+    private_directory(directory)?;
+    let path = directory.join(filename);
+    let file = crate::platform::open_private(&path, true, true).map_err(|_| Error::PrivateState)?;
+    file.sync_all().map_err(|_| Error::PrivateState)?;
+    let connection = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| Error::Persistence)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|_| Error::Persistence)?;
+    connection
+        .execute_batch("PRAGMA synchronous=FULL;")
+        .map_err(|_| Error::Persistence)?;
+    Ok(connection)
+}
 fn open_store(directory: &Path) -> Result<Store> {
     Store::attach_connection(private_connection(directory, "goals.sqlite3")?)
         .map_err(|_| Error::Persistence)
@@ -375,6 +470,7 @@ pub trait Verifier {
 pub struct NativeVerifier {
     pub terminals: Terminals,
 }
+#[cfg(unix)]
 impl Verifier for NativeVerifier {
     fn verify(&mut self, registration: &Registration) -> Result<()> {
         let actual = verify_live_session(registration, &self.terminals)?;
@@ -504,7 +600,7 @@ fn transcript_boundary_for(registration: &Registration, expected: Option<&str>) 
         .transcript
         .as_ref()
         .ok_or(Error::EventIdentity)?;
-    let mut file = private_file(path)?;
+    let mut file = native_transcript(path)?;
     let before = file.metadata().map_err(|_| Error::PrivateState)?;
     let start = before.len().saturating_sub(8 * 1024 * 1024);
     file.seek(SeekFrom::Start(start))
@@ -602,7 +698,7 @@ fn claude_stream_turn(
     kind: EventKind,
     payload: &Value,
 ) -> Option<String> {
-    let mut file = private_file(registration.transcript.as_deref()?).ok()?;
+    let mut file = native_transcript(registration.transcript.as_deref()?).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(1024 * 1024);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -1243,7 +1339,7 @@ pub fn control(registration_path: &Path, action: Control, now: u64) -> Result<()
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::core::{
@@ -3000,6 +3096,7 @@ pub struct ServerEmitter {
     pub device: u64,
     pub inode: u64,
 }
+#[cfg(unix)]
 pub fn capture_server_emitter(
     process: ProcessIdentity,
     executable: &Path,
@@ -3016,6 +3113,24 @@ pub fn capture_server_emitter(
     verify_server_emitter(&pin, proc_root)?;
     Ok(pin)
 }
+#[cfg(windows)]
+pub fn capture_server_emitter(
+    process: ProcessIdentity,
+    executable: &Path,
+    proc_root: &Path,
+) -> Result<ServerEmitter> {
+    let file = crate::platform::open_regular(executable).map_err(|_| Error::Identity)?;
+    let (device, inode) = crate::platform::file_identity(&file).map_err(|_| Error::Identity)?;
+    let pin = ServerEmitter {
+        process,
+        executable: executable.to_path_buf(),
+        device,
+        inode,
+    };
+    verify_server_emitter(&pin, proc_root)?;
+    Ok(pin)
+}
+#[cfg(unix)]
 pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
     if server.process.pid == 0 || server.process.start_ticks == 0 {
         return Err(Error::Identity);
@@ -3082,7 +3197,32 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     }
     Ok(())
 }
+#[cfg(windows)]
+pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    verify_process(&server.process, proc_root)?;
+    let observed =
+        crate::platform::process_identity(server.process.pid).map_err(|_| Error::Identity)?;
+    let mut pinned =
+        crate::platform::open_regular(&server.executable).map_err(|_| Error::Identity)?;
+    let running =
+        crate::platform::open_regular(&observed.executable).map_err(|_| Error::Identity)?;
+    let expected = (server.device, server.inode);
+    if crate::platform::file_identity(&pinned).map_err(|_| Error::Identity)? != expected
+        || crate::platform::file_identity(&running).map_err(|_| Error::Identity)? != expected
+    {
+        return Err(Error::Identity);
+    }
+    let mut magic = [0; 2];
+    pinned.read_exact(&mut magic).map_err(|_| Error::Identity)?;
+    if magic != *b"MZ" {
+        return Err(Error::Invalid(
+            "OpenCode server requires a pinned native executable",
+        ));
+    }
+    verify_process(&server.process, proc_root)
+}
 /// Linux process incarnation, supplied by trusted setup after launch/discovery.
+#[cfg(unix)]
 pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
     if process.pid == 0 || process.start_ticks == 0 {
         return Err(Error::Identity);
@@ -3116,6 +3256,18 @@ pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()>
                 group > 0 && fields.get(5).and_then(|s| s.parse::<i64>().ok()) == Some(group)
             })
         || fields.get(19).and_then(|s| s.parse::<u64>().ok()) != Some(process.start_ticks)
+    {
+        return Err(Error::Identity);
+    }
+    Ok(())
+}
+#[cfg(windows)]
+#[allow(unused_variables)]
+pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
+    let observed = crate::platform::process_identity(process.pid).map_err(|_| Error::Identity)?;
+    if process.start_ticks == 0
+        || observed.creation_time != process.start_ticks
+        || observed.owner != crate::platform::current_identity().map_err(|_| Error::Identity)?
     {
         return Err(Error::Identity);
     }
@@ -3251,13 +3403,39 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
             })
             .and_then(|n| u32::try_from(n).ok())
             .ok_or(Error::Identity)?;
-        let tty = process_tty(process.pid, &terminals.proc_root)?;
-        if tty == 0 || tty != process_tty(terminal_pid, &terminals.proc_root)? {
-            return Err(Error::Identity);
+        #[cfg(unix)]
+        {
+            let tty = process_tty(process.pid, &terminals.proc_root)?;
+            if tty == 0 || tty != process_tty(terminal_pid, &terminals.proc_root)? {
+                return Err(Error::Identity);
+            }
+        }
+        #[cfg(windows)]
+        {
+            windows_descendant(process.pid, terminal_pid)?;
+            if id.backend != crate::core::identity::Backend::Herdr {
+                return Err(Error::Invalid(
+                    "Native tmux foreground process verification is not available",
+                ));
+            }
+            let info = terminals
+                .herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])
+                .map_err(|_| Error::Identity)?;
+            let foreground = info["process_info"]["foreground_processes"]
+                .as_array()
+                .ok_or(Error::Identity)?;
+            if !foreground
+                .iter()
+                .any(|p| p["pid"].as_u64() == Some(u64::from(process.pid)))
+            {
+                return Err(Error::Identity);
+            }
+            verify_process(process, &terminals.proc_root)?;
         }
     }
     Ok(actual)
 }
+#[cfg(unix)]
 fn process_tty(pid: u32, proc_root: &Path) -> Result<i64> {
     let file = OpenOptions::new()
         .read(true)
@@ -3295,7 +3473,7 @@ fn transcript_proves_reply(
     let Some(path) = &r.transcript else {
         return Ok(false);
     };
-    let mut file = private_file(path)?;
+    let mut file = native_transcript(path)?;
     let length = file.metadata().map_err(|_| Error::PrivateState)?.len();
     let offset = length.saturating_sub(8 * 1024 * 1024);
     file.seek(SeekFrom::Start(offset))
@@ -3392,4 +3570,109 @@ fn transcript_proves_reply(
         cursor = parent.clone();
     }
     Ok(false)
+}
+
+#[cfg(windows)]
+fn windows_descendant(mut child: u32, ancestor: u32) -> Result<()> {
+    let owner = crate::platform::current_identity().map_err(|_| Error::Identity)?;
+    let mut youngest = u64::MAX;
+    for _ in 0..128 {
+        let process = crate::platform::process_identity(child).map_err(|_| Error::Identity)?;
+        if process.owner != owner || process.creation_time > youngest {
+            return Err(Error::Identity);
+        }
+        if child == ancestor {
+            return Ok(());
+        }
+        if process.parent_pid == 0 || process.parent_pid == child {
+            return Err(Error::Identity);
+        }
+        youngest = process.creation_time;
+        child = process.parent_pid;
+    }
+    Err(Error::Identity)
+}
+#[cfg(windows)]
+impl Verifier for NativeVerifier {
+    fn verify(&mut self, registration: &Registration) -> Result<()> {
+        verify_live_session(registration, &self.terminals)?;
+        let process = registration
+            .harness_process
+            .as_ref()
+            .ok_or(Error::Identity)?;
+        let emitter = registration
+            .server_emitter
+            .as_ref()
+            .map(|server| &server.process)
+            .unwrap_or(process);
+        windows_descendant(std::process::id(), emitter.pid)?;
+        verify_process(emitter, &self.terminals.proc_root)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::core::identity::{Backend, TerminalId};
+    #[test]
+    fn windows_registration_storage_and_incarnation_are_verified() {
+        let directory =
+            std::env::temp_dir().join(format!("daedalus-hooks-windows-{}", std::process::id()));
+        crate::platform::ensure_private_dir(&directory).unwrap();
+        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let process = ProcessIdentity {
+            pid: observed.pid,
+            start_ticks: observed.creation_time,
+        };
+        verify_process(&process, Path::new("unused")).unwrap();
+        assert!(
+            verify_process(
+                &ProcessIdentity {
+                    pid: process.pid,
+                    start_ticks: process.start_ticks + 1
+                },
+                Path::new("unused")
+            )
+            .is_err()
+        );
+        let registration = Registration {
+            version: 1,
+            id: "fixture".into(),
+            directory: directory.clone(),
+            scope: Scope {
+                instance: "fixture".into(),
+                terminal: TerminalId {
+                    backend: Backend::Herdr,
+                    endpoint: "fixture".into(),
+                    pane: "pane".into(),
+                    generation: "generation".into(),
+                },
+                harness: Harness::Claude,
+                conversation: "session".into(),
+            },
+            goal_id: None,
+            harness_process: Some(process),
+            server_emitter: None,
+            transcript: None,
+            events: vec![EventKind::SessionStart, EventKind::Stop],
+            options: Options::default(),
+            activity_lease_ms: 60_000,
+            pending_timeout_ms: 30_000,
+            hook_timeout_ms: 10_000,
+        };
+        let path = install(&registration).unwrap();
+        assert_eq!(inspect(&path).unwrap().id, "fixture");
+        let lock =
+            crate::platform::open_private(&directory.join(".cutover.lock"), true, false).unwrap();
+        crate::platform::lock_exclusive(&lock, true).unwrap();
+        assert!(active_guard(&directory).is_err());
+        crate::platform::unlock(&lock).unwrap();
+        drop(lock);
+        let connection = private_connection(&directory, "fixture.sqlite3").unwrap();
+        connection
+            .execute_batch("CREATE TABLE fixture(id INTEGER);")
+            .unwrap();
+        drop(connection);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

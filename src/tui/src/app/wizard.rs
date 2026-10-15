@@ -220,11 +220,14 @@ pub fn run(
     {
         return Err("Choose a workspace for fresh setup or an import source; credentials require full instance import".into());
     }
-    let home = std::env::var_os("HOME")
+    let runtime = crate::platform::environment();
+    let home = runtime
+        .get("HOME")
         .map(PathBuf::from)
-        .ok_or("HOME is not configured")?;
-    let search = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect())
+        .ok_or("Home directory is not configured")?;
+    let search = runtime
+        .get("PATH")
+        .map(|path| std::env::split_paths(path).collect())
         .unwrap_or_default();
     let environment = Environment::detect(&home, search)?;
     prompt(writer, "Terminal backends: tmux, herdr, or both [tmux]: ")?;
@@ -372,7 +375,7 @@ pub fn run_with(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{
@@ -423,11 +426,20 @@ mod tests {
             os: "linux".into(),
             architecture: "aarch64".into(),
             home: home.into(),
-            search: vec!["/fake/bin".into()],
+            search: vec![crate::test_support::path("/fake/bin").into()],
             binaries: BTreeMap::from([
-                ("tmux".into(), "/fake/bin/tmux".into()),
-                ("npm".into(), "/fake/bin/npm".into()),
-                ("node".into(), "/fake/bin/node".into()),
+                (
+                    "tmux".into(),
+                    crate::test_support::path("/fake/bin/tmux").into(),
+                ),
+                (
+                    "npm".into(),
+                    crate::test_support::path("/fake/bin/npm").into(),
+                ),
+                (
+                    "node".into(),
+                    crate::test_support::path("/fake/bin/node").into(),
+                ),
             ]),
             root: false,
         }
@@ -485,7 +497,7 @@ mod tests {
         let dest = temp.0.join("instance");
         let mut config = ControlConfig::fresh(&temp.0).unwrap();
         config.subscriptions = vec!["codex".into()];
-        config.tmux_sockets = vec!["/private/custom.sock".into()];
+        config.tmux_sockets = vec![crate::test_support::path("/private/custom.sock").into()];
         config.discovery.herdr_sessions = vec!["project".into()];
         let original = config.encode().unwrap();
         std::fs::write(&source, &original).unwrap();
@@ -652,5 +664,86 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("script_sha256"));
         assert!(output.contains("Setup cancelled"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::{collections::BTreeMap, path::PathBuf};
+    struct ExistingTools;
+    impl Executor for ExistingTools {
+        fn installed(&mut self, _: &str, _: &Environment) -> bool {
+            true
+        }
+        fn execute(&mut self, _: &dependencies::Operation, _: &Environment) -> Result<()> {
+            Err("No dependency installation is permitted in this fixture".into())
+        }
+    }
+    fn environment(home: &Path) -> Environment {
+        Environment {
+            os: "windows".into(),
+            architecture: "x86_64".into(),
+            home: home.into(),
+            search: vec![],
+            binaries: BTreeMap::from([("herdr".into(), home.join("herdr.exe"))]),
+            root: false,
+        }
+    }
+    #[test]
+    fn fresh_and_imported_wizard_configuration_remain_private_and_require_approval() {
+        let home: PathBuf = std::env::temp_dir().join(format!(
+            "daedalus-wizard-win-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::platform::ensure_private_dir(&home).unwrap();
+        let source = home.join("fresh");
+        let wizard = Wizard::fresh(
+            &source,
+            &home,
+            environment(&home),
+            Selection {
+                tmux: false,
+                herdr: true,
+                harnesses: vec![],
+            },
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert!(wizard.apply("unreviewed", &mut ExistingTools).is_err());
+        assert!(!source.exists());
+        let wizard = Wizard::fresh(
+            &source,
+            &home,
+            environment(&home),
+            Selection {
+                tmux: false,
+                herdr: true,
+                harnesses: vec![],
+            },
+        )
+        .unwrap();
+        let approval = wizard.approval_token().to_owned();
+        assert!(wizard.apply(&approval, &mut ExistingTools).unwrap().ready);
+        crate::platform::validate_private_dir(&source).unwrap();
+        let destination = home.join("imported");
+        let wizard = Wizard::import_settings(
+            &destination,
+            &source.join("control.json"),
+            environment(&home),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!destination.exists());
+        let approval = wizard.approval_token().to_owned();
+        assert!(wizard.apply(&approval, &mut ExistingTools).unwrap().ready);
+        crate::platform::validate_private_dir(&destination).unwrap();
+        assert!(source.join("control.json").exists());
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

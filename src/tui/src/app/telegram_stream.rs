@@ -490,7 +490,7 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{
@@ -535,7 +535,7 @@ mod tests {
             let registration = Registration {
                 version: 1,
                 id: "hook".into(),
-                directory: "/tmp/unused-stream-instance".into(),
+                directory: crate::test_support::path("/tmp/unused-stream-instance").into(),
                 scope: goal.clone(),
                 goal_id: None,
                 harness_process: None,
@@ -560,7 +560,7 @@ mod tests {
                     &[Terminal {
                         identity: terminal.clone(),
                         label: "fixture".into(),
-                        workspace: "/tmp".into(),
+                        workspace: crate::test_support::path("/tmp").into(),
                         harness: "pi".into(),
                         conversation: Some("conversation".into()),
                         available: true,
@@ -600,7 +600,7 @@ mod tests {
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 1,
-                token_file: "/tmp/unused-token".into(),
+                token_file: crate::test_support::path("/tmp/unused-token").into(),
                 grants: vec![],
                 listen_chats: Default::default(),
                 registrations: vec![],
@@ -688,7 +688,10 @@ mod tests {
                     &mut self.journal,
                     &self.routes,
                     &self.config,
-                    &[("/tmp/unused".into(), self.registration.clone())],
+                    &[(
+                        crate::test_support::path("/tmp/unused").into(),
+                        self.registration.clone(),
+                    )],
                     2.0,
                 )
                 .unwrap();
@@ -980,7 +983,8 @@ mod tests {
                 &mut api,
                 &mut feeder,
                 &mut PrivateFiles {
-                    directory: "/tmp/never-created-stream-fixture".into(),
+                    directory: crate::test_support::path("/tmp/never-created-stream-fixture")
+                        .into(),
                 },
                 2.0,
             )
@@ -1012,7 +1016,10 @@ mod tests {
                 &mut engine.journal,
                 &engine.routes,
                 &config,
-                &[("/tmp/unused".into(), registration.clone())],
+                &[(
+                    crate::test_support::path("/tmp/unused").into(),
+                    registration.clone(),
+                )],
                 5.0,
             )
             .unwrap();

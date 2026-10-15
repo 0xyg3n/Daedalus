@@ -9,19 +9,21 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::{
+        fs::{MetadataExt, OpenOptionsExt},
+        process::CommandExt,
+    },
+};
 use std::{
     collections::BTreeMap,
-    fs::{File, OpenOptions},
-    io::Read,
-    os::{
-        fd::AsRawFd,
-        unix::{
-            fs::{MetadataExt, OpenOptionsExt},
-            process::CommandExt,
-        },
-    },
+    fs::File,
     path::{Path, PathBuf},
 };
+#[cfg(unix)]
+use std::{fs::OpenOptions, io::Read};
 type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +79,7 @@ impl Config {
         Ok(())
     }
 }
+#[cfg(unix)]
 fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     layouts::check_path(path).map_err(|_| "Unsafe gateway path")?;
     let file = match OpenOptions::new()
@@ -141,40 +144,56 @@ fn credential(config: &Config) -> Result<String> {
 struct Lock(File);
 impl Drop for Lock {
     fn drop(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
     }
 }
 pub fn save(directory: &Path, expected: &Option<Config>, updated: &Config) -> Result<()> {
     updated.validate()?;
-    let meta = std::fs::symlink_metadata(directory)
-        .map_err(|_| "Gateway instance directory is missing")?;
-    layouts::check_path(directory)?;
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-        return Err("Gateway requires a private owned instance directory".into());
-    }
-    let path = directory.join("gateway.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| "Cannot lock gateway configuration")?;
-    let meta = file.metadata().map_err(|_| "Cannot inspect gateway lock")?;
-    if !meta.is_file()
-        || meta.nlink() != 1
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-    {
-        return Err("Unsafe gateway lock".into());
-    }
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("Another gateway update is active".into());
-    }
+    #[cfg(unix)]
+    let file = {
+        let meta = std::fs::symlink_metadata(directory)
+            .map_err(|_| "Gateway instance directory is missing")?;
+        layouts::check_path(directory)?;
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+            return Err("Gateway requires a private owned instance directory".into());
+        }
+        let path = directory.join("gateway.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| "Cannot lock gateway configuration")?;
+        let meta = file.metadata().map_err(|_| "Cannot inspect gateway lock")?;
+        if !meta.is_file()
+            || meta.nlink() != 1
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+        {
+            return Err("Unsafe gateway lock".into());
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("Another gateway update is active".into());
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = {
+        crate::platform::validate_private_dir(directory).map_err(|e| e.to_string())?;
+        let file = crate::platform::open_private(&directory.join("gateway.lock"), true, true)
+            .map_err(|e| e.to_string())?;
+        crate::platform::lock_exclusive(&file, true)
+            .map_err(|_| "Another gateway update is active")?;
+        file
+    };
     let _lock = Lock(file);
     if &load(directory)? != expected {
         return Err("Gateway configuration changed; review it again".into());
@@ -295,7 +314,7 @@ pub fn run(args: &[String]) -> Result<()> {
         &layouts::read_private(&directory.join("control.json"))?
             .ok_or("Control configuration is missing")?,
     )?;
-    let environment: BTreeMap<String, String> = std::env::vars().collect();
+    let environment: BTreeMap<String, String> = crate::platform::environment();
     let tool = harnesses::tool(&gateway.harness).ok_or("Unknown gateway harness")?;
     let found =
         harnesses::executable(&tool, &environment).ok_or("Gateway harness is not installed")?;
@@ -306,11 +325,24 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut plan = harnesses::launch_plan(&tool, &found, &cwd, &environment, &BTreeMap::new())?;
     plan.args = rest;
     apply(&mut plan, &gateway)?;
+    #[cfg(unix)]
     let _error = plan.command().exec();
+    #[cfg(windows)]
+    {
+        let status = plan
+            .command()
+            .status()
+            .map_err(|_| "Cannot launch native provider")?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(format!("Native provider exited with {status}"))
+    }
+    #[cfg(unix)]
     Err("Gateway harness did not start".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{
@@ -385,7 +417,10 @@ mod tests {
         save(&f.0, &None, &config).unwrap();
         let environment = [
             ("HOME".into(), f.0.to_string_lossy().into_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "PATH".into(),
+                crate::test_support::path("/usr/bin:/bin").into(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -445,4 +480,9 @@ mod tests {
         config.credential_file = f.0.clone();
         assert!(credential(&config).is_err());
     }
+}
+
+#[cfg(windows)]
+fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    layouts::read_private_limit(path, limit)
 }

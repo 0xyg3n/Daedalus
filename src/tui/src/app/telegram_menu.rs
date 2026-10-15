@@ -432,7 +432,10 @@ mod tests {
         }
     }
     fn config() -> ControlConfig {
-        ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap()
+        ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap()
     }
     fn answer(menu: &mut Menu, local: &mut Local, seq: &mut u64, value: Value) -> Outcome {
         menu.answer(

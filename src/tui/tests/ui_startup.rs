@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The installed executable starts its own backend with Python absent from PATH.
 //! PTYs and private state are synthetic; no live terminal server is contacted.
 use std::{

@@ -999,7 +999,7 @@ impl NativeSource {
         if !["claude", "codex", "grok"].contains(&harness) {
             return Err("No verified Herdr hook installer for this harness".into());
         }
-        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let environment = crate::platform::environment();
         let home = PathBuf::from(
             environment
                 .get("HOME")
@@ -1045,20 +1045,37 @@ impl NativeSource {
             if !ancestors.insert(pid.to_string()) {
                 break;
             }
-            let Ok(stat) = std::fs::read_to_string(
-                self.terminals.proc_root.join(pid.to_string()).join("stat"),
-            ) else {
-                break;
+            #[cfg(unix)]
+            let parent = {
+                let Ok(stat) = std::fs::read_to_string(
+                    self.terminals.proc_root.join(pid.to_string()).join("stat"),
+                ) else {
+                    break;
+                };
+                let Some((_, tail)) = stat.rsplit_once(')') else {
+                    break;
+                };
+                let Some(parent) = tail
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|p| p.parse::<u32>().ok())
+                else {
+                    break;
+                };
+                parent
             };
-            let Some((_, tail)) = stat.rsplit_once(')') else {
-                break;
-            };
-            let Some(parent) = tail
-                .split_whitespace()
-                .nth(1)
-                .and_then(|p| p.parse::<u32>().ok())
-            else {
-                break;
+            #[cfg(windows)]
+            let parent = {
+                let Ok(process) = crate::platform::process_identity(pid) else {
+                    break;
+                };
+                let Ok(parent) = crate::platform::process_identity(process.parent_pid) else {
+                    break;
+                };
+                if parent.owner != process.owner || parent.creation_time > process.creation_time {
+                    break;
+                }
+                parent.pid
             };
             if parent == 0 {
                 break;
@@ -1093,7 +1110,7 @@ impl Source for NativeSource {
             config,
             &self.directory,
             &self.terminals,
-            &std::env::vars().collect(),
+            &crate::platform::environment(),
             request,
             now,
         )
@@ -1282,7 +1299,7 @@ impl Source for NativeSource {
     ) -> Result<super::hook_install::Preview> {
         use crate::adapters::harnesses;
         use sha2::{Digest, Sha256};
-        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let environment: BTreeMap<String, String> = crate::platform::environment();
         let store = super::session_actions::SessionStore {
             directory: self.directory.clone(),
         };
@@ -1293,6 +1310,7 @@ impl Source for NativeSource {
             .ok_or("Harness executable is not installed")?;
         let exact_native = matches!(checkpoint.harness.as_str(), "claude" | "codex");
         let verify_version_binary = || -> Result<()> {
+            #[cfg(unix)]
             use std::os::unix::fs::MetadataExt;
             if !exact_native {
                 return Ok(());
@@ -1300,11 +1318,30 @@ impl Source for NativeSource {
             let pid = frozen["_daedalus_handoff_process"]["pid"]
                 .as_str()
                 .ok_or("Native process evidence missing")?;
-            let running=std::fs::metadata(self.terminals.proc_root.join(pid).join("exe")).map_err(|_|"Cannot verify running native executable; restart the harness before hook installation")?;
-            let installed =
-                std::fs::metadata(&binary).map_err(|_| "Native executable disappeared")?;
-            if running.dev() != installed.dev() || running.ino() != installed.ino() {
-                return Err("Running harness differs from the version-probed executable; restart with the selected native build before installing hooks".into());
+            #[cfg(unix)]
+            {
+                let running=std::fs::metadata(self.terminals.proc_root.join(pid).join("exe")).map_err(|_|"Cannot verify running native executable; restart the harness before hook installation")?;
+                let installed =
+                    std::fs::metadata(&binary).map_err(|_| "Native executable disappeared")?;
+                if running.dev() != installed.dev() || running.ino() != installed.ino() {
+                    return Err("Running harness differs from the version-probed executable; restart with the selected native build before installing hooks".into());
+                }
+            }
+            #[cfg(windows)]
+            {
+                let identity = crate::platform::process_identity(
+                    pid.parse().map_err(|_| "Invalid native process identity")?,
+                )
+                .map_err(|_| "Cannot verify running native process")?;
+                let running = crate::platform::open_regular(&identity.executable)
+                    .map_err(|e| e.to_string())?;
+                let installed =
+                    crate::platform::open_regular(&binary).map_err(|e| e.to_string())?;
+                if crate::platform::file_identity(&running).map_err(|e| e.to_string())?
+                    != crate::platform::file_identity(&installed).map_err(|e| e.to_string())?
+                {
+                    return Err("Running harness differs from selected executable".into());
+                }
             }
             Ok(())
         };
@@ -1411,11 +1448,9 @@ impl Source for NativeSource {
             directory: destination.into(),
             config,
             terminals: self.terminals.clone(),
-            environment: std::env::vars().collect(),
+            environment: crate::platform::environment(),
         };
-        let global = PathBuf::from(format!("/tmp/daedalus-service-{}", unsafe {
-            libc::geteuid()
-        }));
+        let global = super::telegram_service::global_directory()?;
         let plan = super::cutover::Plan::prepare(destination, &global, || operations.inventory())?;
         let mut review =
             serde_json::to_value(&plan.preview).map_err(|_| "Cannot encode cutover review")?;
@@ -1434,9 +1469,7 @@ impl Source for NativeSource {
         Ok(review)
     }
     fn rollback_cutover(&mut self, source: &Path, approval: &str) -> Result<Value> {
-        let global = PathBuf::from(format!("/tmp/daedalus-service-{}", unsafe {
-            libc::geteuid()
-        }));
+        let global = super::telegram_service::global_directory()?;
         super::cutover::rollback(source, &global, approval)?;
         Ok(json!({"state":"rolled_back","activated":false}))
     }
@@ -1447,6 +1480,7 @@ impl Source for NativeSource {
     ) -> Result<super::wizard::Wizard> {
         use super::{dependencies::Environment, wizard::Wizard, wizard_menu::Mode};
         let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .ok_or("HOME is not configured")?;
         let search = std::env::var_os("PATH")
@@ -1551,7 +1585,7 @@ impl Source for NativeSource {
         let store = SessionStore {
             directory: self.directory.clone(),
         };
-        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let environment: BTreeMap<String, String> = crate::platform::environment();
         use super::control_audit::{Action as AuditAction, State as AuditState};
         let audit = match &request {
             Request::HookSwitch { .. } | Request::ReleaseGoal { .. } => {
@@ -1989,7 +2023,8 @@ impl Source for NativeSource {
             if let Some(parent) = preferences.parent() {
                 roots.push(parent.to_path_buf());
             }
-            if let Some(home) = std::env::var_os("HOME") {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            {
                 let legacy = PathBuf::from(home).join(".config");
                 if !roots.contains(&legacy) {
                     roots.push(legacy);
@@ -2040,7 +2075,9 @@ impl Source for NativeSource {
             local,
             layouts,
             now,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from),
             hostname: std::env::var("HOSTNAME").unwrap_or_default(),
             telegram_token_saved,
         })
@@ -2161,7 +2198,7 @@ pub fn run(reader: &mut impl BufRead, writer: &mut impl Write, config_dir: &Path
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Cursor;
@@ -2206,13 +2243,13 @@ mod tests {
     fn backend() -> Backend<Mock> {
         let observation = Observations {
             now: 10.0,
-            snapshot: json!({"panes":[{"backend":"tmux","socket":"/tmp/example.sock","server":"/tmp/example.sock","session":"project","session_id":"$1","window":"main","window_id":"@1","pane_id":"%1","terminal_id":"generation-1","agent":"bash","pid":"1"}],"clients":[],"errors":[]}),
+            snapshot: json!({"panes":[{"backend":"tmux","socket":crate::test_support::path("/tmp/example.sock"),"server":crate::test_support::path("/tmp/example.sock"),"session":"project","session_id":"$1","window":"main","window_id":"@1","pane_id":"%1","terminal_id":"generation-1","agent":"bash","pid":"1"}],"clients":[],"errors":[]}),
             health: json!({"checkpoints":[],"errors":[]}),
             ..Observations::default()
         };
         Backend::new(
-            "/tmp/isolated-instance".into(),
-            ControlConfig::fresh(Path::new("/tmp/project")).unwrap(),
+            crate::test_support::path("/tmp/isolated-instance").into(),
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap(),
             Mock {
                 observation,
                 saves: 0,
@@ -2240,14 +2277,15 @@ mod tests {
             }
             fn switch_instance(&mut self, directory: &Path) -> Result<ControlConfig> {
                 self.directory = directory.to_owned();
-                ControlConfig::fresh(Path::new("/tmp/new-workspace"))
+                ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/new-workspace")))
             }
         }
-        let original = PathBuf::from("/tmp/original-first-run");
-        let selected = PathBuf::from("/tmp/reviewed-setup-destination");
+        let original = PathBuf::from(crate::test_support::path("/tmp/original-first-run"));
+        let selected = PathBuf::from(crate::test_support::path("/tmp/reviewed-setup-destination"));
         let mut backend = Backend::new(
             original.clone(),
-            ControlConfig::fresh(Path::new("/tmp/old-workspace")).unwrap(),
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/old-workspace")))
+                .unwrap(),
             SwitchingSource {
                 directory: original,
             },
@@ -2265,7 +2303,10 @@ mod tests {
         assert_eq!(frames[0]["title"], "Setup result");
         assert_eq!(backend.directory, selected);
         assert_eq!(backend.source.directory, selected);
-        assert_eq!(backend.config.agent_home, "/tmp/new-workspace");
+        assert_eq!(
+            backend.config.agent_home,
+            crate::test_support::path("/tmp/new-workspace")
+        );
         assert_eq!(
             backend.observations.snapshot,
             Observations::default().snapshot
@@ -2576,7 +2617,7 @@ mod tests {
         let con = rusqlite::Connection::open(&db).unwrap();
         fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
         con.execute_batch("CREATE TABLE chat_routes(instance TEXT,bot TEXT,chat TEXT,identity TEXT,pinned INTEGER,revision INTEGER);").unwrap();
-        let terminal = json!({"backend":"tmux","endpoint":"/tmp/fixture.sock","pane":"%1","generation":"generation"});
+        let terminal = json!({"backend":"tmux","endpoint":crate::test_support::path("/tmp/fixture.sock"),"pane":"%1","generation":"generation"});
         for (instance, bot, chat) in [
             ("fixture", "123", "42"),
             ("other", "123", "42"),
@@ -2676,7 +2717,8 @@ mod tests {
             last_snapshot: json!({}),
         };
         source.save_layouts(&Layouts::default()).unwrap();
-        let config = ControlConfig::fresh(Path::new("/tmp/project")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
         assert!(
             source
                 .session(&config, session_menu::Request::Remove("checkpoint".into()))
@@ -2701,7 +2743,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let config = ControlConfig::fresh(Path::new("/tmp/project")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
         layouts::write_private(
             &directory.join("control.json"),
             &serde_json::to_vec(&config).unwrap(),

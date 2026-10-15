@@ -12,12 +12,15 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{MetadataExt, OpenOptionsExt},
+};
 use std::{
-    fs::{self, OpenOptions},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    fs::{self},
     path::{Path, PathBuf},
 };
 pub type Result<T> = std::result::Result<T, String>;
@@ -135,6 +138,19 @@ fn hash(bytes: &[u8]) -> String {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
+/// Claude's documented command+args form invokes the native executable directly.
+/// Keep registration paths as argv even when they contain shell metacharacters.
+fn direct_hook_command(handler: &mut Value, binary: &str, registration: &str, event: &str) {
+    handler["command"] = binary.into();
+    handler["args"] = json!([
+        "hook",
+        "run",
+        "--registration",
+        registration,
+        "--event-kind",
+        event
+    ]);
+}
 fn default_harness() -> Harness {
     Harness::Claude
 }
@@ -163,6 +179,21 @@ fn supported(version: &str) -> bool {
 /// Explicit terminal/process/conversation supplied by trusted discovery. Neither
 /// labels nor a profile name can grant authority to another running session.
 pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
+    #[cfg(windows)]
+    if !matches!(
+        request.harness,
+        Harness::Claude | Harness::Pi | Harness::Opencode | Harness::Hermes
+    ) {
+        return Err("Native Windows hook enrollment currently supports direct-argv Claude, Pi, OpenCode and Hermes bridges; this provider's Windows shell hook contract is not verified".into());
+    }
+    #[cfg(windows)]
+    if request.harness == Harness::Claude
+        && version_triple(&request.harness_version).is_none_or(|v| v < (2, 1, 296))
+    {
+        return Err(
+            "Windows Claude direct-argv hooks require an observed version >=2.1.296".into(),
+        );
+    }
     if request.harness == Harness::Pi
         && !request
             .profile
@@ -233,9 +264,29 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     if request.profile == request.binary || request.transcript.as_ref() == Some(&request.profile) {
         return Err("Profile path conflicts with a runtime input".into());
     }
-    let meta = fs::metadata(&request.binary).map_err(|_| "Native binary does not exist")?;
-    if !meta.is_file() || meta.mode() & 0o111 == 0 || meta.mode() & 0o022 != 0 {
-        return Err("Native binary must be a non-writable executable".into());
+    #[cfg(unix)]
+    {
+        let meta = fs::metadata(&request.binary).map_err(|_| "Native binary does not exist")?;
+        if !meta.is_file() || meta.mode() & 0o111 == 0 || meta.mode() & 0o022 != 0 {
+            return Err("Native binary must be a non-writable executable".into());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        let mut file = crate::platform::open_regular(&request.binary)
+            .map_err(|_| "Native binary does not exist or has an unsafe path")?;
+        let mut magic = [0; 2];
+        file.read_exact(&mut magic)
+            .map_err(|_| "Cannot read native binary")?;
+        if magic != *b"MZ"
+            || !request
+                .binary
+                .extension()
+                .is_some_and(|s| s.eq_ignore_ascii_case("exe"))
+        {
+            return Err("Windows hook handlers require the native Daedalus .exe".into());
+        }
     }
     let mut registration = Registration {
         version: 1,
@@ -290,15 +341,21 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     hook_runtime::verify_live_session(&registration, terminals)
         .map_err(|_| "Selected session/process is not live in the foreground")?;
     let parent = request.profile.parent().ok_or("Profile has no parent")?;
-    let parent_meta =
-        fs::metadata(parent).map_err(|_| "Create the private profile directory before preview")?;
-    if !parent_meta.is_dir()
-        || parent_meta.uid() != unsafe { libc::geteuid() }
-        || parent_meta.mode() & 0o077 != 0
+    #[cfg(unix)]
     {
-        return Err("Profile directory must be private and owned".into());
+        let parent_meta = fs::metadata(parent)
+            .map_err(|_| "Create the private profile directory before preview")?;
+        if !parent_meta.is_dir()
+            || parent_meta.uid() != unsafe { libc::geteuid() }
+            || parent_meta.mode() & 0o077 != 0
+        {
+            return Err("Profile directory must be private and owned".into());
+        }
     }
-    let before = layouts::read_private(&request.profile)?;
+    #[cfg(windows)]
+    crate::platform::validate_native_profile_dir(parent)
+        .map_err(|_| "Profile directory must be private and owned")?;
+    let before = read_profile(&request.profile)?;
     let after = merge(before.as_deref(), &registration, &request.binary)?;
     Ok(Preview {
         profile: request.profile.clone(),
@@ -310,6 +367,7 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
         after,
     })
 }
+
 /// Build a dedicated additive Claude plugin without inventing a live process.
 pub(crate) fn launch_hooks(
     registration: &Registration,
@@ -439,6 +497,9 @@ fn merge(before: Option<&[u8]>, registration: &Registration, binary: &Path) -> R
             };
         let mut handler =
             json!({"type":"command","command":command,"timeout":timeout,"statusMessage":marker});
+        if cfg!(windows) && registration.scope.harness == Harness::Claude {
+            direct_hook_command(&mut handler, binary, path, &name);
+        }
         if registration.scope.harness == Harness::Grok {
             // Grok documents command/type/timeout, not statusMessage. A shell
             // comment identifies managed commands without an unknown JSON key.
@@ -597,12 +658,16 @@ fn merge_cursor(
 pub(crate) struct InstallationLock(std::fs::File);
 impl Drop for InstallationLock {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
         // Explicit release also releases inherited duplicate descriptors.
+        #[cfg(unix)]
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
+#[cfg(unix)]
 pub(crate) fn lock(directory: &Path) -> Result<InstallationLock> {
     layouts::check_path(directory)?;
     let meta = fs::metadata(directory).map_err(|_| "Private installation directory is missing")?;
@@ -646,6 +711,97 @@ pub(crate) fn lock(directory: &Path) -> Result<InstallationLock> {
     }
     Ok(InstallationLock(file))
 }
+#[cfg(windows)]
+pub(crate) fn lock(directory: &Path) -> Result<InstallationLock> {
+    crate::platform::validate_private_dir(directory)
+        .map_err(|_| "Installation directory must be private and owned")?;
+    let file = crate::platform::open_private(&directory.join("hook-install.lock"), true, true)
+        .map_err(|_| "Cannot open installation lock")?;
+    crate::platform::lock_exclusive(&file, true)
+        .map_err(|_| "Another hook installation is active")?;
+    Ok(InstallationLock(file))
+}
+// Native provider files may also grant access to Windows SYSTEM and
+// Administrators. This boundary never applies to Daedalus registrations,
+// credentials, receipts or backups, which remain strictly owner-only.
+#[cfg(unix)]
+pub(crate) fn lock_profile(directory: &Path) -> Result<InstallationLock> {
+    lock(directory)
+}
+#[cfg(windows)]
+pub(crate) fn lock_profile(directory: &Path) -> Result<InstallationLock> {
+    crate::platform::validate_native_profile_dir(directory)
+        .map_err(|_| "Unsafe native profile directory")?;
+    let file =
+        crate::platform::open_native_profile(&directory.join("hook-install.lock"), true, true)
+            .map_err(|_| "Cannot open profile lock")?;
+    crate::platform::lock_exclusive(&file, true)
+        .map_err(|_| "Another hook installation is active")?;
+    Ok(InstallationLock(file))
+}
+#[cfg(unix)]
+pub(crate) fn read_profile(path: &Path) -> Result<Option<Vec<u8>>> {
+    layouts::read_private(path)
+}
+#[cfg(windows)]
+pub(crate) fn read_profile(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let file =
+        match crate::platform::open_native_profile(path, false, false) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(
+                "Native profile must belong to the current user and exclude ordinary shared access"
+                    .into(),
+            ),
+        };
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read native profile")?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Native profile exceeds size limit".into());
+    }
+    Ok(Some(bytes))
+}
+#[cfg(unix)]
+pub(crate) fn write_profile(path: &Path, bytes: &[u8]) -> Result<()> {
+    layouts::write_private(path, bytes)
+}
+#[cfg(windows)]
+pub(crate) fn write_profile(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::{
+        io::Write,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("Native profile exceeds size limit".into());
+    }
+    let parent = path.parent().ok_or("Profile has no parent")?;
+    crate::platform::validate_native_profile_dir(parent)
+        .map_err(|_| "Unsafe native profile directory")?;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let temporary = parent.join(format!(
+        ".daedalus-hook-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = crate::platform::create_native_profile_new(&temporary)
+        .map_err(|_| "Cannot create native profile replacement")?;
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err("Cannot save native profile replacement".into());
+    }
+    let result = crate::platform::replace_native_profile(&temporary, path)
+        .map_err(|_| "Cannot replace native profile".into());
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 /// Apply the reviewed bytes only if the profile and exact live session still
 /// match. Backup precedes mutation. A provider may reload the written profile
 /// immediately; only registration creation by itself is inert.
@@ -657,11 +813,11 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
         .map_err(|_| "Session changed since preview")?;
     let parent = plan.profile.parent().ok_or("Profile has no parent")?;
     let _profile_lock = if parent != plan.registration.directory {
-        Some(lock(parent)?)
+        Some(lock_profile(parent)?)
     } else {
         None
     };
-    let current = layouts::read_private(&plan.profile)?;
+    let current = read_profile(&plan.profile)?;
     let already_applied = current.as_deref() == Some(plan.after.as_slice());
     if current != plan.before && !already_applied {
         return Err("Profile changed since preview; review again".into());
@@ -697,7 +853,7 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
         layouts::write_private(&backup, &bytes)?;
     }
     let registration = hook_runtime::install(&plan.registration).map_err(|e| e.to_string())?;
-    layouts::write_private(&plan.profile, &plan.after)?;
+    write_profile(&plan.profile, &plan.after)?;
     let receipt = Receipt {
         profile: plan.profile.clone(),
         backup,
@@ -721,7 +877,7 @@ pub fn rollback(receipt: &Receipt) -> Result<()> {
     let _lock = lock(&registration.directory)?;
     let parent = receipt.profile.parent().ok_or("Profile has no parent")?;
     let _profile_lock = if parent != registration.directory {
-        Some(lock(parent)?)
+        Some(lock_profile(parent)?)
     } else {
         None
     };
@@ -738,20 +894,20 @@ pub fn rollback(receipt: &Receipt) -> Result<()> {
     if backup["profile"] != json!(receipt.profile) || backup["after_sha"] != receipt.after_sha {
         return Err("Backup does not match installed profile".into());
     }
-    let current = layouts::read_private(&receipt.profile)?.ok_or("Installed profile is missing")?;
+    let current = read_profile(&receipt.profile)?.ok_or("Installed profile is missing")?;
     if hash(&current) != receipt.after_sha {
         return Err("Profile changed after install; preserve edits and review manually".into());
     }
     let before: Option<Vec<u8>> =
         serde_json::from_value(backup["before"].clone()).map_err(|_| "Invalid saved profile")?;
     match before {
-        Some(bytes) => layouts::write_private(&receipt.profile, &bytes)?,
+        Some(bytes) => write_profile(&receipt.profile, &bytes)?,
         None => fs::remove_file(&receipt.profile).map_err(|_| "Cannot remove managed profile")?,
     };
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::core::identity::Backend;
@@ -829,6 +985,18 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
         }
+    }
+    #[test]
+    fn direct_windows_hook_preserves_paths_as_argv() {
+        let mut handler = json!({"type":"command","timeout":15,"statusMessage":"managed"});
+        let binary = r"C:\Program Files\Daedalus\daedalus.exe";
+        let registration = r"C:\Users\A & B\%private%\hooks.json";
+        direct_hook_command(&mut handler, binary, registration, "Stop");
+        assert_eq!(handler["command"], binary);
+        assert_eq!(handler["args"][3], registration);
+        assert_eq!(handler["args"].as_array().unwrap().len(), 6);
+        assert!(handler.get("shell").is_none());
+        assert_eq!(handler["timeout"], 15);
     }
     #[test]
     fn preview_preserves_existing_hooks_apply_backups_and_rollback_restores_exact_bytes() {
@@ -1106,6 +1274,7 @@ handlers.session_start({{}},{{sessionManager:{{getSessionId:()=> 'other'}}}});
         }
         assert!(rollback(&receipt).is_err());
         assert_eq!(fs::read(&receipt.profile).unwrap(), plan.after);
+        #[cfg(unix)]
         unsafe {
             libc::flock(cutover.as_raw_fd(), libc::LOCK_UN);
         }
@@ -1411,13 +1580,13 @@ if(disposed!==3)throw new Error('hook cleanup missing');
             .unwrap();
         // The selected fixture executable is deliberately not executable ELF:
         // other sessions must return before ever reaching it.
-        let status = std::process::Command::new("/bin/sh")
+        let status = std::process::Command::new(crate::test_support::path("/bin/sh"))
             .args(["-c", command])
             .env("GROK_SESSION_ID", "unrelated")
             .status()
             .unwrap();
         assert!(status.success());
-        let selected = std::process::Command::new("/bin/sh")
+        let selected = std::process::Command::new(crate::test_support::path("/bin/sh"))
             .args(["-c", command])
             .env("GROK_SESSION_ID", &registered.scope.conversation)
             .output()
@@ -1637,7 +1806,7 @@ if(disposed!==3)throw new Error('hook cleanup missing');
         )
         .unwrap();
         let parent = json!({"backend":"herdr","session":"example","pane_id":"pane","terminal_id":"terminal","cwd":f.dir,"debug_secret":"PRIVATE-DISCOVERY"});
-        let plan:pane_launch::Plan=serde_json::from_value(json!({"request":{"harness":"claude","parent":parent,"cwd":f.dir,"model":null},"configuration":config,"hook":hook,"environment":{"HOME":f.dir,"PATH":"/usr/bin:/bin"},"profile":f.dir})).unwrap();
+        let plan:pane_launch::Plan=serde_json::from_value(json!({"request":{"harness":"claude","parent":parent,"cwd":f.dir,"model":null},"configuration":config,"hook":hook,"environment":{"HOME":f.dir,"PATH":crate::test_support::path("/usr/bin:/bin")},"profile":f.dir})).unwrap();
         fs::write(&f.terminals.herdr,r#"#!/bin/sh
 case "$*" in
  *'pane split'*) printf '%s\n' '{"result":{"pane":{"pane_id":"child","terminal_id":"child-generation","pid":42}}}';;

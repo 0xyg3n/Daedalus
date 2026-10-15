@@ -69,7 +69,7 @@ pub struct Terminals {
 impl Default for Terminals {
     fn default() -> Self {
         Self {
-            tmux: "tmux".into(),
+            tmux: default_mux_binary(),
             herdr: "herdr".into(),
             proc_root: "/proc".into(),
             timeout: Duration::from_secs(5),
@@ -78,8 +78,9 @@ impl Default for Terminals {
 }
 impl Terminals {
     pub(crate) fn query(&self, executable: &Path, args: &[&str]) -> Result<String> {
-        let output = process::run(Command::new(executable).args(args), self.timeout, LIMIT)
-            .map_err(|e| format!("Terminal query failed ({:?})", e.kind()))?;
+        let output =
+            process::run_terminal(Command::new(executable).args(args), self.timeout, LIMIT)
+                .map_err(|e| format!("Terminal query failed ({:?})", e.kind()))?;
         if !output.status.success() {
             return Err("Terminal server rejected discovery query".into());
         }
@@ -100,6 +101,8 @@ impl Terminals {
             &["-S", socket, "list-panes", "-a", "-F", &format],
         )?;
         let panes = parse_tmux(&output, socket, |pid| process_start(&self.proc_root, pid))?;
+        #[cfg(windows)]
+        let panes = windows_harness_labels(panes);
         let format = "#{client_name}\t#{client_pid}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{client_tty}\t#{client_flags}";
         let output = self.query(&self.tmux, &["-S", socket, "list-clients", "-F", format])?;
         let keys = [
@@ -257,6 +260,7 @@ pub fn identity(row: &Value) -> Result<TerminalId> {
     id.validate().map_err(str::to_owned)?;
     Ok(id)
 }
+#[cfg(unix)]
 pub fn process_start(proc_root: &Path, pid: &str) -> Option<String> {
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -320,6 +324,8 @@ pub fn parse_tmux(
             name => name,
         }
         .to_owned();
+        #[cfg(windows)]
+        let agent = agent.strip_suffix(".exe").unwrap_or(&agent).to_owned();
         row.insert("agent".into(), agent.into());
         row.insert("backend".into(), "tmux".into());
         row.insert("socket".into(), socket.into());
@@ -361,6 +367,7 @@ pub fn normalize_herdr(data: Value, session: &str) -> Result<Value> {
 }
 /// Only owned Unix sockets are discovered automatically. Explicit endpoints
 /// remain the operator's configuration and are validated by the adapter.
+#[cfg(unix)]
 pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], uid: u32) -> Vec<PathBuf> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let mut found: BTreeSet<PathBuf> = configured
@@ -382,7 +389,53 @@ pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], uid: u32) -> 
     }
     found.into_iter().collect()
 }
-#[cfg(test)]
+/// Native Windows uses Herdr; tmux endpoints belong to WSL instances.
+#[cfg(windows)]
+pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], _uid: u32) -> Vec<PathBuf> {
+    let mut endpoints: BTreeSet<PathBuf> = configured
+        .iter()
+        .filter(|p| p.is_absolute())
+        .cloned()
+        .collect();
+    if !roots.is_empty()
+        && default_mux_binary()
+            .file_stem()
+            .is_some_and(|n| n.eq_ignore_ascii_case("psmux"))
+    {
+        let root = std::env::var_os("PSMUX_DATA_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".psmux")));
+        if let Some(root) =
+            root.filter(|p| p.is_absolute() && crate::platform::check_path(p).is_ok())
+            && let Ok(entries) = fs::read_dir(&root)
+        {
+            for entry in entries.take(256).flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(stem) = name.strip_suffix(".port") else {
+                    continue;
+                };
+                let namespace = stem.split_once("__").map(|(ns, _)| ns).unwrap_or("default");
+                if !namespace.is_empty()
+                    && namespace.len() <= 80
+                    && namespace
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                {
+                    endpoints.insert(root.join(namespace));
+                }
+            }
+        }
+    }
+    endpoints.into_iter().collect()
+}
+#[cfg(windows)]
+pub fn process_start(_proc_root: &Path, pid: &str) -> Option<String> {
+    let process = crate::platform::process_identity(pid.parse().ok()?).ok()?;
+    (process.owner == crate::platform::current_identity().ok()?)
+        .then(|| process.creation_time.to_string())
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
@@ -434,7 +487,7 @@ mod tests {
             "22",
             "cursor-agent",
             "1",
-            "/tmp",
+            crate::test_support::path("/tmp"),
             "11",
             "Title",
             "/dev/pts/1",
@@ -452,19 +505,35 @@ mod tests {
     }
     #[test]
     fn tmux_generations_are_exact() {
-        let rows = parse_tmux(&fixture(), "/tmp/test.sock", |pid| Some(format!("{pid}0"))).unwrap();
+        let rows = parse_tmux(
+            &fixture(),
+            crate::test_support::path("/tmp/test.sock"),
+            |pid| Some(format!("{pid}0")),
+        )
+        .unwrap();
         assert_eq!(rows[0]["terminal_id"], "v2:11:110:22:220");
         assert_eq!(rows[0]["agent"], "cursor");
         assert_eq!(rows[0]["server"], "tmux@%2Ftmp%2Ftest.sock");
         assert!(
-            parse_tmux(&fixture(), "/tmp/test.sock", |_| None)
-                .unwrap()
-                .is_empty()
+            parse_tmux(
+                &fixture(),
+                crate::test_support::path("/tmp/test.sock"),
+                |_| None
+            )
+            .unwrap()
+            .is_empty()
         );
     }
     #[test]
     fn malformed_tmux_is_rejected() {
-        assert!(parse_tmux("wrong\trow", "/tmp/socket", |_| Some("1".into())).is_err());
+        assert!(
+            parse_tmux(
+                "wrong\trow",
+                crate::test_support::path("/tmp/socket"),
+                |_| Some("1".into())
+            )
+            .is_err()
+        );
     }
     #[test]
     fn herdr_retains_layouts_and_focus() {
@@ -481,6 +550,74 @@ mod tests {
     }
     #[test]
     fn traversal_pid_is_rejected() {
-        assert!(process_start(Path::new("/tmp"), "../etc").is_none());
+        assert!(process_start(Path::new(crate::test_support::path("/tmp")), "../etc").is_none());
     }
+}
+
+fn default_mux_binary() -> PathBuf {
+    if let Some(binary) = std::env::var_os("DAEDALUS_TMUX_BIN")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return binary;
+    }
+    #[cfg(windows)]
+    {
+        for name in ["tmux.exe", "psmux.exe"] {
+            if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .filter(|p| p.is_absolute())
+                    .map(|p| p.join(name))
+                    .find(|p| p.is_file())
+            }) {
+                return path;
+            }
+        }
+    }
+    "tmux".into()
+}
+
+/// Display-only enrichment for native mux wrappers. Routing retains the exact
+/// pane/root incarnation; a friendly harness label never grants hook authority.
+#[cfg(windows)]
+fn windows_harness_labels(mut panes: Vec<Value>) -> Vec<Value> {
+    for pane in &mut panes {
+        let coarse = pane["agent"].as_str().unwrap_or("").to_ascii_lowercase();
+        if !["powershell", "pwsh", "cmd", "node", "bash", "sh"].contains(&coarse.as_str()) {
+            continue;
+        }
+        let Some(pid) = pane["pid"].as_str().and_then(|p| p.parse().ok()) else {
+            continue;
+        };
+        let Ok(children) = crate::platform::descendant_processes(pid) else {
+            continue;
+        };
+        let candidates = children
+            .iter()
+            .filter_map(|p| {
+                let name = p.executable.file_stem()?.to_str()?.to_ascii_lowercase();
+                [
+                    "claude",
+                    "codex",
+                    "grok",
+                    "hermes",
+                    "opencode",
+                    "cursor-agent",
+                    "pi",
+                    "agy",
+                ]
+                .contains(&name.as_str())
+                .then_some(name)
+            })
+            .collect::<Vec<_>>();
+        if let [name] = candidates.as_slice() {
+            pane["agent"] = if name == "cursor-agent" {
+                "cursor".into()
+            } else {
+                name.clone().into()
+            };
+            pane["agent_detection"] = "windows_process_tree".into();
+        }
+    }
+    panes
 }

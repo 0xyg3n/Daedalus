@@ -2,6 +2,7 @@
 use crate::adapters::{harnesses, process};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -46,22 +47,44 @@ impl Environment {
         for tool in harnesses::tools() {
             names.extend(tool.executables);
         }
-        let binaries = names
+        #[allow(unused_mut)]
+        let mut binaries: BTreeMap<String, PathBuf> = names
             .into_iter()
             .filter_map(|name| find(&search, name).map(|path| (name.into(), path)))
             .collect();
+        #[cfg(windows)]
+        if !binaries.contains_key("tmux") {
+            let selected = std::env::var_os("DAEDALUS_TMUX_BIN")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute() && p.is_file())
+                .or_else(|| find(&search, "psmux"));
+            if let Some(path) = selected {
+                binaries.insert("tmux".into(), path);
+            }
+        }
         Ok(Self {
             os: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
             home: home.into(),
             search,
             binaries,
-            root: unsafe { libc::geteuid() } == 0,
+            root: {
+                #[cfg(unix)]
+                {
+                    (unsafe { libc::geteuid() }) == 0
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            },
         })
     }
     pub fn validate(&self) -> Result<()> {
-        if self.os != "linux" || !["x86_64", "aarch64"].contains(&self.architecture.as_str()) {
-            return Err("Native installation supports Linux x86_64 and aarch64".into());
+        if !matches!(self.os.as_str(), "linux" | "windows")
+            || !["x86_64", "aarch64"].contains(&self.architecture.as_str())
+        {
+            return Err("Native installation supports Linux and Windows x86_64 and aarch64".into());
         }
         valid_path(&self.home)?;
         for path in self.search.iter().chain(self.binaries.values()) {
@@ -84,9 +107,21 @@ fn valid_path(path: &Path) -> Result<()> {
     Ok(())
 }
 fn find(paths: &[PathBuf], name: &str) -> Option<PathBuf> {
-    paths.iter().map(|p| p.join(name)).find(|p| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
+    paths
+        .iter()
+        .flat_map(|p| harnesses::executable_candidates(p, name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| {
+                #[cfg(unix)]
+                {
+                    m.is_file() && m.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    m.is_file()
+                }
+            })
+        })
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Selection {
@@ -132,6 +167,42 @@ impl Plan {
             }
         }
         let mut review = Review { environment, selection, installed: vec![], operations: vec![], blockers: vec![], notices: vec!["Account sign-in remains with each harness; Daedalus does not inspect credentials or launch agents. Publisher installers may access existing native profiles.".into(), "Package installation can execute publisher package scripts. Completed installs are not rolled back if a later step fails. Script digests bind the bootstrap script only; publisher downloads and package versions follow the official current distribution.".into(), "The CLI asks sudo to authenticate through its terminal only after approval; noninteractive callers must prepare sudo credentials separately.".into(), "No Python runtime is required by Daedalus; a selected third-party harness may have its own runtime requirements.".into()] };
+        if review.environment.os == "windows" {
+            let mut selected = review.selection.harnesses.clone();
+            if review.selection.herdr {
+                selected.push("herdr".into());
+            }
+            if review.selection.tmux {
+                selected.push("tmux".into());
+            }
+            for id in selected {
+                let installed = harnesses::tool(&id)
+                    .map(|tool| {
+                        tool.executables
+                            .iter()
+                            .any(|name| review.environment.binaries.contains_key(*name))
+                    })
+                    .unwrap_or_else(|| review.environment.binaries.contains_key(&id));
+                if installed {
+                    review.installed.push(id);
+                } else {
+                    review.blockers.push(format!(
+                        "Install {id} with its official Windows installer, then refresh setup."
+                    ));
+                }
+            }
+            let token = format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&review).map_err(|_| "Cannot encode dependency review")?
+                )
+            );
+            return Ok(Self {
+                review,
+                token,
+                scripts: BTreeMap::new(),
+            });
+        }
         let mut packages = Vec::new();
         if review.selection.tmux {
             if review.environment.binaries.contains_key("tmux") {
@@ -660,6 +731,7 @@ impl Fetcher for HttpsFetcher {
 }
 struct ScriptStage(PathBuf);
 impl ScriptStage {
+    #[cfg(unix)]
     fn create(bytes: &[u8]) -> Result<Self> {
         use std::{
             io::Write,
@@ -688,6 +760,10 @@ impl ScriptStage {
             .map_err(|_| "Cannot save reviewed installer")?;
         Ok(stage)
     }
+    #[cfg(not(unix))]
+    fn create(_bytes: &[u8]) -> Result<Self> {
+        Err("Script installation is unavailable on this platform; use the official native installer".into())
+    }
 }
 impl Drop for ScriptStage {
     fn drop(&mut self) {
@@ -695,21 +771,76 @@ impl Drop for ScriptStage {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn env() -> Environment {
         Environment {
             os: "linux".into(),
             architecture: "x86_64".into(),
-            home: "/private/user".into(),
-            search: vec!["/usr/bin".into()],
+            home: crate::test_support::path("/private/user").into(),
+            search: vec![crate::test_support::path("/usr/bin").into()],
             binaries: BTreeMap::from([
-                ("apt-get".into(), "/usr/bin/apt-get".into()),
-                ("sudo".into(), "/usr/bin/sudo".into()),
+                (
+                    "apt-get".into(),
+                    crate::test_support::path("/usr/bin/apt-get").into(),
+                ),
+                (
+                    "sudo".into(),
+                    crate::test_support::path("/usr/bin/sudo").into(),
+                ),
             ]),
             root: false,
         }
+    }
+    #[test]
+    fn windows_review_never_offers_posix_installers() {
+        let mut windows = env();
+        windows.os = "windows".into();
+        windows.binaries.clear();
+        windows.binaries.insert(
+            "herdr".into(),
+            crate::test_support::path("/tmp/herdr.exe").into(),
+        );
+        windows.binaries.insert(
+            "claude".into(),
+            crate::test_support::path("/tmp/claude.exe").into(),
+        );
+        let plan = Plan::prepare(
+            windows.clone(),
+            Selection {
+                tmux: false,
+                herdr: true,
+                harnesses: vec!["claude".into()],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.operations.is_empty());
+        assert!(plan.review.blockers.is_empty());
+        let missing = Plan::prepare(
+            windows,
+            Selection {
+                tmux: true,
+                herdr: true,
+                harnesses: vec!["grok".into()],
+            },
+        )
+        .unwrap();
+        assert!(missing.review.operations.is_empty());
+        assert!(
+            missing
+                .review
+                .blockers
+                .iter()
+                .any(|message| message.contains("tmux"))
+        );
+        assert!(
+            missing
+                .review
+                .blockers
+                .iter()
+                .any(|message| message.contains("grok"))
+        );
     }
     #[test]
     fn architecture_and_selection_fail_closed() {
@@ -760,10 +891,19 @@ mod tests {
         )
         .unwrap();
         let operation = &plan.review().operations[1];
-        assert_eq!(operation.executable, PathBuf::from("/usr/bin/sudo"));
+        assert_eq!(
+            operation.executable,
+            PathBuf::from(crate::test_support::path("/usr/bin/sudo"))
+        );
         assert_eq!(
             operation.arguments,
-            vec!["-n", "/usr/bin/apt-get", "install", "-y", "tmux"]
+            vec![
+                "-n",
+                crate::test_support::path("/usr/bin/apt-get"),
+                "install",
+                "-y",
+                "tmux"
+            ]
         );
         assert!(plan.review().blockers.is_empty());
         let mut e = env();
@@ -838,7 +978,7 @@ mod tests {
         assert!(executor.execute(&op, &e).is_err());
         let bytes = b"#!/bin/sh\n[ \"$1\" = '$(do-not-execute)' ]\n";
         op.arguments = vec!["$(do-not-execute)".into()];
-        op.executable = "/bin/sh".into();
+        op.executable = crate::test_support::path("/bin/sh").into();
         op.script_sha256 = Some(format!("{:x}", Sha256::digest(bytes)));
         assert!(executor.execute_reviewed(&op, &e, Some(bytes)).is_ok());
         assert!(!executor.installed("nonexistent-daedalus-fixture", &e));
@@ -900,7 +1040,10 @@ mod tests {
         )
         .unwrap();
         let command = sudo_authentication(plan.review()).unwrap();
-        assert_eq!(command.get_program(), "/usr/bin/sudo");
+        assert_eq!(
+            command.get_program(),
+            crate::test_support::path("/usr/bin/sudo")
+        );
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec!["-v"]);
         struct Denied {
             auth: usize,

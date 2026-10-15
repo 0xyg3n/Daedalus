@@ -329,8 +329,9 @@ dependencies = [
 
 [[package]]
 name = "daedalus-tui"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 dependencies = [
+ "base64 0.22.1",
  "crossterm",
  "libc",
  "ratatui",
@@ -341,6 +342,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "vt100",
+ "windows-sys 0.61.2",
  "yaml_serde",
 ]
 

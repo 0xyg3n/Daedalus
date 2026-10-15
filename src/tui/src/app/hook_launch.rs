@@ -2,23 +2,30 @@
 //! registration exists before the provider can emit its first lifecycle hook.
 //! Claude uses an additive local plugin. Pi uses its explicit session UUID,
 //! isolated session directory, and additive native-runtime extension.
+#[cfg(unix)]
+use super::hook_runtime::{NativeVerifier, Verifier};
 use super::{
     hook_install,
-    hook_runtime::{self, NativeVerifier, ProcessIdentity, Registration, Verifier},
+    hook_runtime::{self, ProcessIdentity, Registration},
     hooks::Harness,
 };
 use crate::{adapters::terminals::Terminals, core::layouts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    process::CommandExt,
+};
+#[cfg(unix)]
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::OpenOptions,
     io::{Read, Write},
-    os::unix::{
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-        process::CommandExt,
-    },
-    path::{Path, PathBuf},
     process::Command,
+};
+use std::{
+    fs::{self, File},
+    path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +139,7 @@ impl Plan {
 pub(crate) fn validate_executable(path: &Path, native: bool) -> Result<()> {
     executable(path, native).map(|_| ())
 }
+#[cfg(unix)]
 fn executable(path: &Path, native: bool) -> Result<Executable> {
     layouts::check_path(path)?;
     let mut file = OpenOptions::new()
@@ -167,6 +175,12 @@ fn executable(path: &Path, native: bool) -> Result<Executable> {
         changed_ns: meta.ctime_nsec(),
     })
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn executable(path: &Path, native: bool) -> Result<Executable> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
+}
+#[cfg(unix)]
 fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, b)| {
@@ -178,6 +192,7 @@ fn uuid(value: &str) -> bool {
         })
 }
 /// Read-only preparation. The template contains no process and is never installed.
+#[cfg(unix)]
 pub fn prepare(spec: Spec, now_ms: u64) -> Result<Plan> {
     let r = &spec.registration;
     r.validate().map_err(|e| e.to_string())?;
@@ -286,6 +301,12 @@ pub fn prepare(spec: Spec, now_ms: u64) -> Result<Plan> {
         hooks,
     })
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+pub fn prepare(spec: Spec, now_ms: u64) -> Result<Plan> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
+}
+#[cfg(unix)]
 fn create_private(path: &Path, bytes: &[u8]) -> Result<()> {
     layouts::check_path(path)?;
     let mut file = OpenOptions::new()
@@ -302,6 +323,12 @@ fn create_private(path: &Path, bytes: &[u8]) -> Result<()> {
         .and_then(|f| f.sync_all())
         .map_err(|_| "Cannot sync launch directory".into())
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn create_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
+}
+#[cfg(unix)]
 fn private_dir(path: &Path) -> Result<()> {
     layouts::check_path(path)?;
     match fs::DirBuilder::new().mode(0o700).create(path) {
@@ -314,6 +341,11 @@ fn private_dir(path: &Path) -> Result<()> {
         return Err("Launch directory must be private and owned".into());
     }
     Ok(())
+}
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn private_dir(path: &Path) -> Result<()> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
 }
 /// Persist only a reviewed plan. No provider is launched and no live registration
 /// is created here. The same plan cannot later be consumed twice.
@@ -345,6 +377,7 @@ pub struct Activated {
 }
 /// Bind to the actual wrapper process, verify its terminal/ancestry, then persist
 /// before exec. Isolated fixtures call this function without executing a provider.
+#[cfg(unix)]
 pub fn activate(path: &Path, terminals: &Terminals, now_ms: u64) -> Result<Activated> {
     let bytes = layouts::read_private(path)?.ok_or("Launch plan does not exist")?;
     let plan: Plan = serde_json::from_slice(&bytes).map_err(|_| "Invalid launch plan")?;
@@ -419,8 +452,14 @@ pub fn activate(path: &Path, terminals: &Terminals, now_ms: u64) -> Result<Activ
         working_directory: plan.spec.working_directory,
     })
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+pub fn activate(path: &Path, terminals: &Terminals, now_ms: u64) -> Result<Activated> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
+}
 /// Only explicit CLI launch calls exec. Provider authentication and trust prompts
 /// remain with the provider. An exec failure leaves the one-shot claim for audit.
+#[cfg(unix)]
 pub fn launch(path: &Path, now_ms: u64) -> Result<()> {
     let activation = activate(path, &Terminals::default(), now_ms)?;
     // This process is the explicit one-shot launcher, never the TUI parent.
@@ -445,6 +484,11 @@ pub fn launch(path: &Path, now_ms: u64) -> Result<()> {
     let _ = error;
     Err("Native harness exec failed; launch was not retried".into())
 }
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+pub fn launch(path: &Path, now_ms: u64) -> Result<()> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
+}
 
 /// Frozen cleanup review; no session, registration or launch evidence is removed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -464,6 +508,7 @@ impl Cleanup {
         ))
     }
 }
+#[cfg(unix)]
 fn process_start(root: &Path, pid: u32) -> Result<u64> {
     let file = OpenOptions::new()
         .read(true)
@@ -483,6 +528,11 @@ fn process_start(root: &Path, pid: u32) -> Result<u64> {
         .and_then(|v| v.parse().ok())
         .filter(|v| *v > 0)
         .ok_or("Invalid process generation".into())
+}
+#[cfg(not(unix))]
+#[allow(unused_variables)]
+fn process_start(root: &Path, pid: u32) -> Result<u64> {
+    Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
 }
 fn require_exited(root: &Path, process: &ProcessIdentity) -> Result<()> {
     if process.pid == 0 || process.start_ticks == 0 {

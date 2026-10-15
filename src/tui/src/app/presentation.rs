@@ -1019,8 +1019,8 @@ mod tests {
     ) -> Context<'a> {
         Context {
             config,
-            config_dir: Path::new("/tmp/current"),
-            home: Some(Path::new("/tmp/home")),
+            config_dir: Path::new(crate::test_support::path("/tmp/current")),
+            home: Some(Path::new(crate::test_support::path("/tmp/home"))),
             snapshot,
             health,
             local,
@@ -1036,7 +1036,8 @@ mod tests {
     }
     #[test]
     fn absent_observations_never_claim_running_or_connected() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
         let context = context(&config, &empty, &empty, &empty);
         let view = project(&context);
@@ -1050,12 +1051,13 @@ mod tests {
     }
     #[test]
     fn telegram_processes_are_scoped_to_the_selected_instance() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
-        let local = json!({"instances":[{"directory":"/tmp/other","services":[{"kind":"Telegram feeder","state":"Running","pid":123,"start":"42"}]},{"directory":"/tmp/current","services":[]}]});
+        let local = json!({"instances":[{"directory":crate::test_support::path("/tmp/other"),"services":[{"kind":"Telegram feeder","state":"Running","pid":123,"start":"42"}]},{"directory":crate::test_support::path("/tmp/current"),"services":[]}]});
         let context = context(&config, &empty, &empty, &local);
         assert_eq!(overview(&context).connections[0].state, "absent");
-        let local = json!({"instances":[{"directory":"/tmp/current","services":[{"kind":"Telegram feeder","state":"Running","pid":123,"start":"42"}]}]});
+        let local = json!({"instances":[{"directory":crate::test_support::path("/tmp/current"),"services":[{"kind":"Telegram feeder","state":"Running","pid":123,"start":"42"}]}]});
         let mut context = Context {
             local: &local,
             ..context
@@ -1066,7 +1068,8 @@ mod tests {
     }
     #[test]
     fn saved_credentials_are_settings_not_connection_proof() {
-        let mut config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let mut config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         config.telegram.owner_id = Some("1".into());
         config.telegram.bot_id = Some("2".into());
         let empty = json!({});
@@ -1079,7 +1082,8 @@ mod tests {
     }
     #[test]
     fn goal_status_uses_observed_state_without_calling_armed_running() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
         let mut context = context(&config, &empty, &empty, &empty);
         for (state, label) in [
@@ -1108,7 +1112,8 @@ mod tests {
     }
     #[test]
     fn checkpoint_controls_precede_saved_records_and_freshness_is_explicit() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
         let health = json!({"checkpoints":[{"key":"dashboard-checkpoints.json:0","name":"Saved","harness":"claude","sid":"session-a","created_at":"today"}]});
         let mut context = context(&config, &empty, &health, &empty);
@@ -1127,13 +1132,17 @@ mod tests {
     }
     #[test]
     fn saved_instances_hidden_until_requested_and_stale_agents_not_live() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
-        let local = json!({"instances":[{"directory":"/tmp/saved","name":"Saved","services":[],"files":["control.json"]}]});
+        let local = json!({"instances":[{"directory":crate::test_support::path("/tmp/saved"),"name":"Saved","services":[],"files":["control.json"]}]});
         let mut context = context(&config, &empty, &empty, &local);
         assert!(instance_rows(&context).is_empty());
         context.show_saved = true;
-        assert_eq!(instance_rows(&context)[0].id, "instance:/tmp/saved");
+        assert_eq!(
+            instance_rows(&context)[0].id,
+            format!("instance:{}", crate::test_support::path("/tmp/saved"))
+        );
         let armonia = json!({"agents":[{"id":7,"availability":"live","display":"Test"}]});
         let rows = armonia_rows(&armonia, false);
         assert!(!rows.iter().any(|row| row.id == "armonia:agent:7"));
@@ -1142,9 +1151,10 @@ mod tests {
 
     #[test]
     fn stopped_and_unverified_processes_are_not_running_instances() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
-        let local = json!({"instances":[{"directory":"/tmp/current","name":"Current","files":["control.json"],"services":[{"kind":"Telegram feeder","state":"Stopped","pid":123,"start":"42"},{"kind":"Telegram feeder","state":"Running","pid":124}]}]});
+        let local = json!({"instances":[{"directory":crate::test_support::path("/tmp/current"),"name":"Current","files":["control.json"],"services":[{"kind":"Telegram feeder","state":"Stopped","pid":123,"start":"42"},{"kind":"Telegram feeder","state":"Running","pid":124}]}]});
         let mut context = context(&config, &empty, &empty, &local);
         assert!(instance_rows(&context).is_empty());
         context.show_saved = true;
@@ -1154,14 +1164,15 @@ mod tests {
             saved[0].note,
             "Saved configuration · no running process detected"
         );
-        let local = json!({"instances":[{"directory":"/tmp/current","name":"Current","services":[{"state":"Stopped","pid":123,"start":"42"},{"state":"Running","pid":124,"start":"43"},{"state":"Running","pid":125}]}]});
+        let local = json!({"instances":[{"directory":crate::test_support::path("/tmp/current"),"name":"Current","services":[{"state":"Stopped","pid":123,"start":"42"},{"state":"Running","pid":124,"start":"43"},{"state":"Running","pid":125}]}]});
         context.local = &local;
         assert_eq!(instance_rows(&context)[0].note, "1 processes running");
     }
 
     #[test]
     fn failed_checkpoint_observation_is_unknown_and_health_errors_are_partial() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
         let health = json!({"errors":["Saved checkpoints could not be read"]});
         let mut context = context(&config, &empty, &health, &empty);
@@ -1189,7 +1200,8 @@ mod tests {
 
     #[test]
     fn absent_goal_observations_never_claim_the_loop_is_off_or_armed() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         let empty = json!({});
         let context = context(&config, &empty, &empty, &empty);
         for view in [

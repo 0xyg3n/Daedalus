@@ -297,7 +297,7 @@ impl Menu {
                         Stage::Method(text.into()),
                     );
                 }
-                if matches!(text, "claude" | "pi" | "grok") {
+                if cfg!(unix) && matches!(text, "claude" | "pi" | "grok") {
                     let snapshot = source.refresh(config)?.snapshot;
                     let panes = snapshot
                         .get("panes")
@@ -494,7 +494,7 @@ mod tests {
     impl Source for Mock {
         fn refresh(&mut self, _: &ControlConfig) -> Result<Observations> {
             Ok(Observations {
-                snapshot: json!({"panes":[{"backend":"herdr","session":"fixture","pane_id":"pane","terminal_id":"generation","cwd":"/tmp/project"}]}),
+                snapshot: json!({"panes":[{"backend":"herdr","session":"fixture","pane_id":"pane","terminal_id":"generation","cwd":crate::test_support::path("/tmp/project")}]}),
                 ..Observations::default()
             })
         }
@@ -504,7 +504,7 @@ mod tests {
             request: super::super::pane_launch::Request,
         ) -> Result<super::super::pane_launch::Plan> {
             let executable = json!({"device":1,"inode":1,"size":1,"modified":1,"modified_ns":1,"changed":1,"changed_ns":1});
-            serde_json::from_value(json!({"request":request,"configuration":config,"environment":{},"profile":"/tmp/profile","hook":{"spec":{"registration":{"version":1,"id":"fixture","directory":"/tmp/state","scope":{"instance":"agent","terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"},"harness":"claude","conversation":"12345678-abcd-4000-8000-123456789abc"},"goal_id":null,"harness_process":null,"transcript":null,"events":["SessionStart"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":60000,"pending_timeout_ms":30000,"hook_timeout_ms":10000},"native_binary":"/tmp/provider","daedalus_binary":"/tmp/daedalus","working_directory":"/tmp/project","observed_version":"2.1.295","expires_ms":1,"model":null},"native":executable,"daemon":executable,"hooks":[]}})).map_err(|e|e.to_string())
+            serde_json::from_value(json!({"request":request,"configuration":config,"environment":{},"profile":crate::test_support::path("/tmp/profile"),"hook":{"spec":{"registration":{"version":1,"id":"fixture","directory":crate::test_support::path("/tmp/state"),"scope":{"instance":"agent","terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"},"harness":"claude","conversation":"12345678-abcd-4000-8000-123456789abc"},"goal_id":null,"harness_process":null,"transcript":null,"events":["SessionStart"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":60000,"pending_timeout_ms":30000,"hook_timeout_ms":10000},"native_binary":crate::test_support::path("/tmp/provider"),"daedalus_binary":crate::test_support::path("/tmp/daedalus"),"working_directory":crate::test_support::path("/tmp/project"),"observed_version":"2.1.295","expires_ms":1,"model":null},"native":executable,"daemon":executable,"hooks":[]}})).map_err(|e|e.to_string())
         }
         fn apply_pane_launch(
             &mut self,
@@ -558,7 +558,10 @@ mod tests {
         }
     }
     fn config() -> ControlConfig {
-        ControlConfig::fresh(std::path::Path::new("/tmp/project")).unwrap()
+        ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap()
     }
     fn reply(menu: &mut Menu, mock: &mut Mock, seq: &mut u64, value: Value) -> Outcome {
         menu.reply(
@@ -600,6 +603,7 @@ mod tests {
         );
         assert_eq!(mock.calls, 1);
     }
+    #[cfg(unix)]
     #[test]
     fn guided_launch_reviews_parent_and_cancellation_or_replay_never_spawns_twice() {
         for final_reply in ["cancel", "launch"] {
@@ -679,7 +683,7 @@ mod tests {
                 &mut menu,
                 &mut mock,
                 &mut seq,
-                json!("/tmp/private-gateway-token"),
+                json!(crate::test_support::path("/tmp/private-gateway-token")),
             );
             assert!(
                 review.frames[0]["description"]
@@ -699,8 +703,14 @@ mod tests {
     }
     #[test]
     fn profile_selection_updates_only_selected_harness_without_touching_profile() {
-        let path =
-            std::env::temp_dir().join(format!("daedalus-native-profile-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "daedalus-native-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("native-account"), b"fixture-unchanged").unwrap();
         let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::default(), 0);

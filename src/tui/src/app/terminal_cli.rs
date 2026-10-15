@@ -236,7 +236,7 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
         let identity = terminals::identity(&pane)?;
         if command.verb == "control" {
             let terminals = Terminals::default();
-            let environment = std::env::vars().collect();
+            let environment = crate::platform::environment();
             let request = super::harness_control::Request {
                 directory: command.directory.clone(),
                 registration: command.options["--registration"].clone().into(),
@@ -429,9 +429,9 @@ mod tests {
             parse(&args(&[
                 "send",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--target",
-                "/tmp/pane"
+                crate::test_support::path("/tmp/pane")
             ]))
             .is_err()
         );
@@ -439,9 +439,9 @@ mod tests {
             parse(&args(&[
                 "capture",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--target",
-                "/tmp/pane",
+                crate::test_support::path("/tmp/pane"),
                 "--lines",
                 "2001"
             ]))
@@ -451,9 +451,9 @@ mod tests {
             parse(&args(&[
                 "launch",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--target",
-                "/tmp/pane",
+                crate::test_support::path("/tmp/pane"),
                 "--harness",
                 "unknown"
             ]))
@@ -463,9 +463,9 @@ mod tests {
             parse(&args(&[
                 "close",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--target",
-                "/tmp/pane",
+                crate::test_support::path("/tmp/pane"),
                 "--text",
                 "no"
             ]))
@@ -475,7 +475,7 @@ mod tests {
             parse(&args(&[
                 "attach",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--target",
                 "relative"
             ]))
@@ -487,11 +487,11 @@ mod tests {
         let base = args(&[
             "control",
             "--config-dir",
-            "/tmp/fixture",
+            crate::test_support::path("/tmp/fixture"),
             "--target",
-            "/tmp/pane",
+            crate::test_support::path("/tmp/pane"),
             "--registration",
-            "/tmp/hook",
+            crate::test_support::path("/tmp/hook"),
             "--command",
             "model",
             "--arguments",
@@ -612,7 +612,7 @@ mod tests {
         ));
         super::super::setup::SetupPlan::fresh(
             &directory,
-            ControlConfig::fresh(std::path::Path::new("/tmp")).unwrap(),
+            ControlConfig::fresh(std::path::Path::new(crate::test_support::path("/tmp"))).unwrap(),
         )
         .unwrap()
         .apply()

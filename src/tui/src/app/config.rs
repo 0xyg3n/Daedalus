@@ -192,7 +192,8 @@ mod tests {
     use super::*;
     #[test]
     fn fresh_round_trip() {
-        let config = ControlConfig::fresh(Path::new("/tmp/work space")).unwrap();
+        let config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work space"))).unwrap();
         assert_eq!(
             config,
             ControlConfig::parse(&config.encode().unwrap()).unwrap()
@@ -200,15 +201,16 @@ mod tests {
     }
     #[test]
     fn discovery_endpoints_are_preserved_and_validated() {
-        let mut config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let mut config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         assert!(config.discovery.automatic);
         config.discovery.automatic = false;
         config.discovery.herdr_sessions = vec!["work-one".into(), "work_two".into()];
-        config.tmux_sockets = vec!["/tmp/tmux-example/work".into()];
-        config
-            .discovery
-            .herdr_sockets
-            .insert("work-one".into(), "/tmp/example/herdr.sock".into());
+        config.tmux_sockets = vec![crate::test_support::path("/tmp/tmux-example/work").into()];
+        config.discovery.herdr_sockets.insert(
+            "work-one".into(),
+            crate::test_support::path("/tmp/example/herdr.sock").into(),
+        );
         assert_eq!(
             config,
             ControlConfig::parse(&config.encode().unwrap()).unwrap()
@@ -218,17 +220,18 @@ mod tests {
     }
     #[test]
     fn metadata_socket_mappings_reject_relative_paths_and_ambiguous_sessions() {
-        let mut config = ControlConfig::fresh(Path::new("/tmp/work")).unwrap();
+        let mut config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
         config
             .discovery
             .herdr_sockets
             .insert("work".into(), "relative".into());
         assert!(config.validate().is_err());
         config.discovery.herdr_sockets.clear();
-        config
-            .discovery
-            .herdr_sockets
-            .insert("../other".into(), "/tmp/socket".into());
+        config.discovery.herdr_sockets.insert(
+            "../other".into(),
+            crate::test_support::path("/tmp/socket").into(),
+        );
         assert!(config.validate().is_err());
         config.discovery.herdr_sockets.clear();
         config
@@ -240,7 +243,8 @@ mod tests {
     #[test]
     fn rejects_unsafe_or_unknown_configuration() {
         assert!(ControlConfig::fresh(Path::new("relative")).is_err());
-        let mut config = ControlConfig::fresh(Path::new("/tmp/workspace")).unwrap();
+        let mut config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/workspace"))).unwrap();
         config.subscriptions = vec!["claude".into(), "claude".into()];
         assert!(config.validate().is_err());
         config.subscriptions.clear();

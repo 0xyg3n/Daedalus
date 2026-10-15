@@ -5,10 +5,13 @@ use crate::{
     core::{identity::TerminalId, layouts},
 };
 use serde_json::Value;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{BufRead, BufReader, Read},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
@@ -31,19 +34,33 @@ fn bytes(path: &Path) -> Result<Vec<u8>> {
 }
 fn header(path: &Path) -> Result<(Vec<u8>, u64, u64)> {
     layouts::check_path(path)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|_| "Cannot open Pi session header")?;
-    let metadata = file.metadata().map_err(|_| "Cannot inspect Pi session")?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err("Pi session must be a private regular file".into());
-    }
+    #[cfg(unix)]
+    let (file, device, inode) = {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| "Cannot open Pi session header")?;
+        let metadata = file.metadata().map_err(|_| "Cannot inspect Pi session")?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
+            return Err("Pi session must be a private regular file".into());
+        }
+        let device = metadata.dev();
+        let inode = metadata.ino();
+        (file, device, inode)
+    };
+    #[cfg(windows)]
+    let (file, device, inode) = {
+        let file = crate::platform::open_private(path, false, false)
+            .map_err(|_| "Cannot open private Pi session")?;
+        let (device, inode) =
+            crate::platform::file_identity(&file).map_err(|_| "Cannot identify Pi session")?;
+        (file, device, inode)
+    };
     let mut line = Vec::new();
     BufReader::new(file.take(16385))
         .read_until(b'\n', &mut line)
@@ -51,7 +68,7 @@ fn header(path: &Path) -> Result<(Vec<u8>, u64, u64)> {
     if line.len() > 16384 || !line.ends_with(b"\n") {
         return Err("Pi session header is incomplete or oversized".into());
     }
-    Ok((line, metadata.dev(), metadata.ino()))
+    Ok((line, device, inode))
 }
 struct Evidence {
     plan_path: PathBuf,
@@ -224,7 +241,7 @@ impl Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{

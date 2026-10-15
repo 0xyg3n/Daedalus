@@ -5,7 +5,9 @@
 //! that accepts the picture but cannot show it still shows the splash.
 use ratatui::layout::Rect;
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 /// Original 1254 by 1254 RGB artwork; no palette reduction or runtime image processor.
 static PNG: &[u8] = include_bytes!("../../../assets/daedalus.png");
@@ -16,6 +18,7 @@ const ID: u32 = 7183;
 const CHUNK: usize = 4096;
 /// The query: a one-pixel test picture, a cell size request and, last,
 /// device attributes, which every terminal answers.
+#[cfg(unix)]
 const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +46,7 @@ pub fn wanted(get: impl Fn(&str) -> Option<String>) -> bool {
 
 /// Ask the terminal, already in raw mode and before anything else reads
 /// its input, whether it shows kitty graphics and how large a cell is.
+#[cfg(unix)]
 pub fn probe(timeout: Duration) -> Option<Kitty> {
     let mut out = io::stdout();
     out.write_all(QUERY).ok()?;
@@ -53,7 +57,14 @@ pub fn probe(timeout: Duration) -> Option<Kitty> {
     })
 }
 
+// Windows Terminal does not expose Kitty images; keep the themed cell renderer.
+#[cfg(windows)]
+pub fn probe(_timeout: Duration) -> Option<Kitty> {
+    None
+}
+
 /// Cell size from the window's size in pixels, when the terminal reports it.
+#[cfg(unix)]
 fn window_cell() -> Option<(f32, f32)> {
     let size = crossterm::terminal::window_size().ok()?;
     (size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0).then(|| {
@@ -65,6 +76,7 @@ fn window_cell() -> Option<(f32, f32)> {
 }
 
 /// Read the terminal's replies until device attributes arrive or time runs out.
+#[cfg(unix)]
 fn read_replies(timeout: Duration) -> Vec<u8> {
     use std::os::fd::AsRawFd;
     let fd = io::stdin().as_raw_fd();
@@ -96,12 +108,14 @@ fn read_replies(timeout: Duration) -> Vec<u8> {
 }
 
 #[derive(Debug, Default, PartialEq)]
+#[cfg(any(unix, test))]
 struct Replies {
     kitty: bool,
     cell: Option<(f32, f32)>,
     attributes: bool,
 }
 
+#[cfg(any(unix, test))]
 fn parse(bytes: &[u8]) -> Replies {
     let text = String::from_utf8_lossy(bytes);
     // CSI 6 ; height ; width t

@@ -1423,10 +1423,12 @@ mod tests {
     }
 
     /// A tmux server on a private socket running `cat`; removed on drop.
+    #[cfg(unix)]
     struct Tmux {
         dir: std::path::PathBuf,
         socket: String,
     }
+    #[cfg(unix)]
     impl Tmux {
         fn start() -> Option<Self> {
             Command::new("tmux").arg("-V").output().ok()?;
@@ -1493,6 +1495,7 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
     impl Drop for Tmux {
         fn drop(&mut self) {
             self.run(&["kill-server"]);
@@ -1500,6 +1503,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn tmux_view_watches_then_types_and_detach_leaves_terminal_running() {
         let Some(fx) = Tmux::start() else {
@@ -1547,6 +1551,7 @@ mod tests {
         assert_eq!(fx.get("#{pane_pid}"), pid);
     }
 
+    #[cfg(unix)]
     #[test]
     fn tmux_view_ends_when_the_process_identity_differs() {
         let Some(fx) = Tmux::start() else {
@@ -1584,7 +1589,16 @@ mod tests {
     /// A native JSON-lines stand-in for `herdr terminal session`.
     /// Compile in the fixture directory so no Python runtime or skipped test is needed.
     fn fake_herdr(dir: &std::path::Path) -> String {
-        let executable = dir.join("fake-herdr");
+        let executable = dir.join(if cfg!(windows) {
+            "fake-herdr.exe"
+        } else {
+            "fake-herdr"
+        });
+        #[cfg(windows)]
+        if let Some(built) = std::env::var_os("DAEDALUS_TEST_HERDR_EXE") {
+            std::fs::copy(built, &executable).unwrap();
+            return executable.to_string_lossy().into_owned();
+        }
         let source = r##"
 use std::{env, fs::{self, OpenOptions}, io::{self, BufRead, Write}};
 fn quoted(value: &str) -> String {
@@ -1761,7 +1775,14 @@ fn main() {
 
     #[test]
     fn no_screen_ends_with_a_reason_instead_of_connecting_forever() {
-        let silent: Vec<String> = ["/bin/sleep", "30"].map(String::from).to_vec();
+        #[cfg(unix)]
+        let silent: Vec<String> = [crate::test_support::path("/bin/sleep"), "30"]
+            .map(String::from)
+            .to_vec();
+        #[cfg(windows)]
+        let silent: Vec<String> = ["cmd.exe", "/d", "/c", "set /p wait="]
+            .map(String::from)
+            .to_vec();
         let plan = Plan {
             adapter: "herdr-session".into(),
             argv: silent.clone(),

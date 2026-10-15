@@ -15,9 +15,10 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeMap,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
@@ -64,6 +65,7 @@ fn same_target(registration: &Registration, target: &Value, directory: &Path) ->
     }
     Ok(())
 }
+#[cfg(unix)]
 fn executable_stamp(path: &Path) -> Result<Vec<i128>> {
     let m = std::fs::metadata(path).map_err(|_| "Harness executable unavailable")?;
     Ok(vec![
@@ -74,6 +76,23 @@ fn executable_stamp(path: &Path) -> Result<Vec<i128>> {
         m.mtime_nsec() as i128,
         m.ctime() as i128,
         m.ctime_nsec() as i128,
+    ])
+}
+#[cfg(windows)]
+fn executable_stamp(path: &Path) -> Result<Vec<i128>> {
+    use std::os::windows::fs::MetadataExt;
+    let file = crate::platform::open_regular(path).map_err(|_| "Harness executable unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot inspect harness executable")?;
+    let (volume, identity) =
+        crate::platform::file_identity(&file).map_err(|_| "Cannot identify harness executable")?;
+    Ok(vec![
+        volume as i128,
+        identity as i128,
+        metadata.len() as i128,
+        metadata.last_write_time() as i128,
+        metadata.creation_time() as i128,
     ])
 }
 pub fn prepare(
@@ -99,7 +118,12 @@ pub fn prepare(
         .harness_process
         .as_ref()
         .ok_or("No verified harness process")?;
+    #[cfg(unix)]
     let executable = terminals.proc_root.join(pid.pid.to_string()).join("exe");
+    #[cfg(windows)]
+    let executable = crate::platform::process_identity(pid.pid)
+        .map_err(|_| "Harness executable unavailable")?
+        .executable;
     let before = executable_stamp(&executable)?;
     let actual =
         hook_runtime::verify_live_session(&registration, terminals).map_err(|e| e.to_string())?;
@@ -202,7 +226,7 @@ pub fn submit(
     let plan = prepare(request, config, terminals, environment)?;
     dispatch(plan, terminals)
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
@@ -275,7 +299,10 @@ mod tests {
         };
         let env = BTreeMap::from([
             ("HOME".into(), dir.to_string_lossy().into_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "PATH".into(),
+                crate::test_support::path("/usr/bin:/bin").into(),
+            ),
             ("UNRELATED_SECRET".into(), "PRIVATE".into()),
         ]);
         let plan = prepare(request.clone(), &config, &terminals, &env).unwrap();
@@ -306,14 +333,42 @@ mod tests {
     }
     #[test]
     fn target_scope_checks_object_and_legacy_session_ids() {
-        let mut r:Registration=serde_json::from_value(json!({"version":1,"id":"fixture","directory":"/tmp/fixture","scope":{"instance":"example","terminal":{"backend":"herdr","endpoint":"example","pane":"pane","generation":"generation"},"harness":"claude","conversation":"session"},"events":["Stop"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000})).unwrap();
+        let mut r:Registration=serde_json::from_value(json!({"version":1,"id":"fixture","directory":crate::test_support::path("/tmp/fixture"),"scope":{"instance":"example","terminal":{"backend":"herdr","endpoint":"example","pane":"pane","generation":"generation"},"harness":"claude","conversation":"session"},"events":["Stop"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000})).unwrap();
         let mut pane = json!({"backend":"herdr","session":"example","pane_id":"pane","terminal_id":"generation","agent_session":{"kind":"id","value":"session"}});
-        assert!(same_target(&r, &pane, Path::new("/tmp/fixture")).is_ok());
+        assert!(
+            same_target(
+                &r,
+                &pane,
+                Path::new(crate::test_support::path("/tmp/fixture"))
+            )
+            .is_ok()
+        );
         pane["agent_session"]["value"] = "other".into();
-        assert!(same_target(&r, &pane, Path::new("/tmp/fixture")).is_err());
+        assert!(
+            same_target(
+                &r,
+                &pane,
+                Path::new(crate::test_support::path("/tmp/fixture"))
+            )
+            .is_err()
+        );
         pane["agent_session"] = "session".into();
-        assert!(same_target(&r, &pane, Path::new("/tmp/fixture")).is_ok());
+        assert!(
+            same_target(
+                &r,
+                &pane,
+                Path::new(crate::test_support::path("/tmp/fixture"))
+            )
+            .is_ok()
+        );
         r.scope.terminal.generation = "recycled".into();
-        assert!(same_target(&r, &pane, Path::new("/tmp/fixture")).is_err());
+        assert!(
+            same_target(
+                &r,
+                &pane,
+                Path::new(crate::test_support::path("/tmp/fixture"))
+            )
+            .is_err()
+        );
     }
 }

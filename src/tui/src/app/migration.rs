@@ -11,12 +11,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::{ffi::OsStrExt, fs::DirBuilderExt},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
 type Result<T> = std::result::Result<T, String>;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const RECEIPT: &str = "migration.json";
@@ -51,10 +52,22 @@ pub struct ImportPlan {
 struct Stage(PathBuf, bool);
 impl Stage {
     fn create(path: PathBuf) -> Result<Self> {
+        #[cfg(unix)]
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
             .map_err(|_| "Cannot create private import staging directory")?;
+        #[cfg(windows)]
+        {
+            if path
+                .try_exists()
+                .map_err(|_| "Cannot inspect staging path")?
+            {
+                return Err("Staging path already exists".into());
+            }
+            crate::platform::ensure_private_dir(&path)
+                .map_err(|_| "Cannot create private import staging directory")?;
+        }
         Ok(Self(path, true))
     }
 }
@@ -418,11 +431,8 @@ impl ImportPlan {
             )?;
             let route_path = stage.0.join("routes.sqlite3");
             layouts::write_private(&route_path, b"")?;
-            let connection = Connection::open_with_flags(
-                &route_path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            )
-            .map_err(|_| "Cannot create imported route registry")?;
+            let connection = super::telegram_config::private_connection(&route_path)
+                .map_err(|_| "Cannot create private imported route registry")?;
             let mut registry = routes::Registry::from_connection(connection)
                 .map_err(|_| "Cannot initialize imported route registry")?;
             registry
@@ -508,8 +518,7 @@ impl ImportPlan {
         }
         install_directory(&self.stage.0, &self.destination)?;
         self.stage.1 = false;
-        fs::File::open(self.destination.parent().unwrap())
-            .and_then(|f| f.sync_all())
+        sync_directory(self.destination.parent().unwrap())
             .map_err(|_| "Import installed but directory synchronization failed")?;
         Ok(Applied {
             destination: self.destination.clone(),
@@ -519,6 +528,7 @@ impl ImportPlan {
     }
 }
 
+#[cfg(unix)]
 fn trusted_directory(path: &Path, private: bool) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let uid = unsafe { libc::geteuid() };
@@ -578,11 +588,8 @@ fn disable_imported_streams(path: &Path) -> Result<usize> {
         }
         Ok(count)
     })?.ok_or("Stream snapshot is missing")?;
-    let con = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| "Cannot open staged stream snapshot")?;
+    let con = super::telegram_config::private_connection(path)
+        .map_err(|_| "Cannot open private staged stream snapshot")?;
     let deadline = std::time::Instant::now();
     con.progress_handler(
         1000,
@@ -706,20 +713,14 @@ fn apply_mention_policy_scope(stage: &Path, instance: &str, bot: &str) -> Result
         layouts::write_private(&path, b"")?;
     }
     layouts::check_path(&path)?;
-    let con = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| "Cannot open staged input policy")?;
+    let con = super::telegram_config::private_connection(&path)
+        .map_err(|_| "Cannot open private staged input policy")?;
     // Use the shared schema initializer, then perform the inert import under one transaction.
     let registry = crate::core::routes::Registry::from_connection(con)
         .map_err(|_| "Cannot initialize staged input policy")?;
     drop(registry);
-    let mut con = rusqlite::Connection::open_with_flags(
-        &path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| "Cannot reopen staged input policy")?;
+    let mut con = super::telegram_config::private_connection(&path)
+        .map_err(|_| "Cannot reopen private staged input policy")?;
     con.execute_batch("PRAGMA trusted_schema=OFF")
         .map_err(|_| "Cannot restrict staged policy")?;
     let tx = con
@@ -761,12 +762,17 @@ fn hashes(root: &Path) -> Result<BTreeMap<String, String>> {
             }
             // All generated files are private and bounded; stream database hashes.
             use std::io::Read;
+            #[cfg(unix)]
             use std::os::unix::fs::OpenOptionsExt;
+            #[cfg(unix)]
             let file = fs::OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                 .open(&path)
                 .map_err(|_| "Cannot hash migration file")?;
+            #[cfg(windows)]
+            let file = crate::platform::open_private(&path, false, false)
+                .map_err(|_| "Cannot hash private migration file")?;
             let mut hasher = Sha256::new();
             let mut reader = file.take(sqlite::MAX_DATABASE_BYTES + 1);
             let count = std::io::copy(&mut reader, &mut hasher)
@@ -982,12 +988,75 @@ fn install_directory(source: &Path, destination: &Path) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn install_directory(_: &Path, _: &Path) -> Result<()> {
     Err("Atomic instance import is currently supported on Linux".into())
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn trusted_directory(path: &Path, _: bool) -> Result<()> {
+    layouts::check_path(path)?;
+    crate::platform::validate_private_dir(path)
+        .map_err(|_| "Import directory must have private owner-scoped access".into())
+}
+#[cfg(windows)]
+fn install_directory(source: &Path, destination: &Path) -> Result<()> {
+    crate::platform::rename_new(source, destination)
+        .map_err(|_| "Cannot install import atomically; destination may already exist".into())
+}
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        crate::platform::sync_directory(path)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn native_instance_import_is_private_source_preserving_and_idempotent() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-import-win-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::platform::ensure_private_dir(&root).unwrap();
+        let source = root.join("source");
+        crate::platform::ensure_private_dir(&source).unwrap();
+        let config = super::super::config::ControlConfig::fresh(&root).unwrap();
+        let original = serde_json::to_vec(&config).unwrap();
+        layouts::write_private(&source.join("control.json"), &original).unwrap();
+        let destination = root.join("destination");
+        let plan = ImportPlan::prepare(&source, &destination, false).unwrap();
+        assert!(!destination.exists());
+        assert!(plan.apply().unwrap().changed);
+        crate::platform::validate_private_dir(&destination).unwrap();
+        assert_eq!(
+            layouts::read_private(&source.join("control.json"))
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert!(
+            !ImportPlan::prepare(&source, &destination, false)
+                .unwrap()
+                .apply()
+                .unwrap()
+                .changed
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{app::config::ControlConfig, core::checkpoints::Checkpoint};
@@ -1518,7 +1587,7 @@ mod tests {
             instance: "example".into(),
             terminal: TerminalId {
                 backend: Backend::Tmux,
-                endpoint: "/tmp/fixture.sock".into(),
+                endpoint: crate::test_support::path("/tmp/fixture.sock").into(),
                 pane: "%1".into(),
                 generation: "fixture".into(),
             },

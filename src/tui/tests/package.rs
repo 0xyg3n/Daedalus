@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Repository and installation acceptance without a Python runtime or network.
 use sha2::{Digest, Sha256};
 use std::{

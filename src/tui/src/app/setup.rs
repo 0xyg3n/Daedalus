@@ -161,8 +161,7 @@ impl SetupPlan {
         }
         let backup = if let Some(before) = &self.before {
             let backup = write_unique(directory, "control.backup", before)?;
-            fs::File::open(directory)
-                .and_then(|file| file.sync_all())
+            crate::platform::sync_directory(directory)
                 .map_err(|_| "Cannot synchronize backup directory")?;
             Some(backup)
         } else {
@@ -170,10 +169,9 @@ impl SetupPlan {
         };
         let temporary = write_unique(directory, "control.pending", &self.after)?;
         let _temporary_guard = RemoveFile(temporary.clone());
-        fs::rename(&temporary, destination)
+        crate::platform::replace_private(&temporary, destination)
             .map_err(|_| "Cannot replace configuration; backup retained")?;
-        fs::File::open(directory)
-            .and_then(|file| file.sync_all())
+        crate::platform::sync_directory(directory)
             .map_err(|_| "Configuration written but directory synchronization failed")?;
         Ok(SetupResult {
             changed: true,
@@ -185,6 +183,7 @@ impl SetupPlan {
 
 /// Explicit local setup completion may make its existing directory private.
 /// Use the opened directory handle so a path replacement cannot redirect chmod.
+#[cfg(unix)]
 pub fn secure_local_directory(directory: &Path) -> Result<(), String> {
     validate_directory(directory)?;
     if directory.exists() {
@@ -206,6 +205,11 @@ pub fn secure_local_directory(directory: &Path) -> Result<(), String> {
 }
 
 fn ensure_private_directory(directory: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::platform::ensure_private_dir(directory).map_err(|e| e.to_string())
+    }
+    #[cfg(unix)]
     match fs::symlink_metadata(directory) {
         Ok(metadata) => {
             if !metadata.is_dir() {
@@ -235,6 +239,7 @@ fn ensure_private_directory(directory: &Path) -> Result<(), String> {
         }
         Err(_) => return Err("Cannot inspect configuration directory".into()),
     }
+    #[cfg(unix)]
     Ok(())
 }
 
@@ -244,7 +249,11 @@ impl SetupLock {
         let path = directory.join(".setup.lock");
         let mut options = private_options();
         options.create(true);
+        #[cfg(unix)]
         let file = options.open(path).map_err(|_| "Cannot open setup lock")?;
+        #[cfg(windows)]
+        let file = crate::platform::open_private(&path, true, true)
+            .map_err(|_| "Cannot open setup lock")?;
         if !file
             .metadata()
             .map_err(|_| "Cannot inspect setup lock")?
@@ -256,8 +265,8 @@ impl SetupLock {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err("Setup is already running".into());
         }
-        #[cfg(not(unix))]
-        return Err("Setup locking is not supported on this platform".into());
+        #[cfg(windows)]
+        crate::platform::lock_exclusive(&file, true).map_err(|_| "Setup is already running")?;
         Ok(Self(file))
     }
 }
@@ -267,6 +276,8 @@ impl Drop for SetupLock {
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
         // Keep the inode: unlinking would allow two independent locks.
     }
 }
@@ -282,6 +293,8 @@ fn validate_directory(path: &Path) -> Result<(), String> {
     {
         return Err("Configuration directory must be an absolute path without parent traversal or control characters".into());
     }
+    #[cfg(windows)]
+    crate::platform::check_path(path).map_err(|e| e.to_string())?;
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
@@ -310,9 +323,12 @@ fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, String> {
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    #[cfg(unix)]
     let file = options
         .open(path)
         .map_err(|_| "Cannot read configuration file")?;
+    #[cfg(windows)]
+    let file = crate::platform::open_regular(path).map_err(|_| "Cannot read configuration file")?;
     if !file
         .metadata()
         .map_err(|_| "Cannot inspect opened configuration")?
@@ -346,7 +362,11 @@ fn write_unique(directory: &Path, prefix: &str, bytes: &[u8]) -> Result<PathBuf,
         let path = directory.join(format!(".{prefix}-{}-{id}", std::process::id()));
         let mut options = private_options();
         options.create_new(true);
-        match options.open(&path) {
+        #[cfg(unix)]
+        let opened = options.open(&path);
+        #[cfg(windows)]
+        let opened = crate::platform::create_private_new(&path);
+        match opened {
             Ok(mut file) => {
                 if file
                     .write_all(bytes)
@@ -372,7 +392,7 @@ impl Drop for RemoveFile {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     struct Temp(PathBuf);
@@ -393,7 +413,10 @@ mod tests {
         }
     }
     fn config() -> ControlConfig {
-        ControlConfig::fresh(Path::new("/tmp/example workspace")).unwrap()
+        ControlConfig::fresh(Path::new(crate::test_support::path(
+            "/tmp/example workspace",
+        )))
+        .unwrap()
     }
 
     #[test]
@@ -441,7 +464,7 @@ mod tests {
         changed.subscriptions.push("codex".into());
         changed
             .tmux_sockets
-            .push("/tmp/example/custom-socket".into());
+            .push(crate::test_support::path("/tmp/example/custom-socket").into());
         changed.discovery.automatic = false;
         changed
             .discovery
@@ -532,4 +555,10 @@ mod tests {
         symlink(&temp.0, temp.0.join("linked-dir")).unwrap();
         assert!(SetupPlan::fresh(&temp.0.join("linked-dir/target"), config()).is_err());
     }
+}
+
+#[cfg(windows)]
+pub fn secure_local_directory(directory: &Path) -> Result<(), String> {
+    validate_directory(directory)?;
+    crate::platform::secure_owned_dir(directory).map_err(|e| e.to_string())
 }

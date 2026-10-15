@@ -3,9 +3,12 @@ use rusqlite::{
     Connection, OpenFlags,
     backup::{Backup, StepResult},
 };
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
-    fs::{self, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    fs,
     path::Path,
     thread,
     time::{Duration, Instant},
@@ -21,31 +24,56 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
     crate::core::layouts::check_path(source).map_err(|_| "Invalid database source path")?;
     crate::core::layouts::check_path(destination)
         .map_err(|_| "Invalid database destination path")?;
-    let source_file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(source)
-        .map_err(|_| "Cannot inspect source database")?;
-    let metadata = source_file
-        .metadata()
-        .map_err(|_| "Cannot inspect source database")?;
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.len() > MAX_DATABASE_BYTES
+    #[cfg(unix)]
     {
-        return Err("Source database must be an owned regular file within the size limit");
+        let source_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(source)
+            .map_err(|_| "Cannot inspect source database")?;
+        let metadata = source_file
+            .metadata()
+            .map_err(|_| "Cannot inspect source database")?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.len() > MAX_DATABASE_BYTES
+        {
+            return Err("Source database must be an owned regular file within the size limit");
+        }
+        let parent = destination
+            .parent()
+            .ok_or("Database destination needs a private directory")?;
+        let metadata =
+            fs::metadata(parent).map_err(|_| "Cannot inspect database destination directory")?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err("Database destination directory must be private and owned by this user");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let file = crate::platform::open_private(source, false, false)
+            .map_err(|_| "Cannot inspect private source database")?;
+        if file
+            .metadata()
+            .map_err(|_| "Cannot inspect source database")?
+            .len()
+            > MAX_DATABASE_BYTES
+        {
+            return Err("Source database exceeds limit");
+        }
+        crate::platform::validate_private_dir(
+            destination
+                .parent()
+                .ok_or("Missing private destination directory")?,
+        )
+        .map_err(|_| "Destination must be private")?;
     }
     let parent = destination
         .parent()
-        .ok_or("Database destination needs a private directory")?;
-    let metadata =
-        fs::metadata(parent).map_err(|_| "Cannot inspect database destination directory")?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err("Database destination directory must be private and owned by this user");
-    }
+        .ok_or("Missing private destination directory")?;
     let source = Connection::open_with_flags(
         source,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -78,6 +106,7 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
     {
         return Err("Source database exceeds snapshot size limit");
     }
+    #[cfg(unix)]
     let reserved = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -85,6 +114,11 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
         .custom_flags(libc::O_NOFOLLOW)
         .open(destination)
         .map_err(|_| "Snapshot destination already exists or is unavailable")?;
+    #[cfg(windows)]
+    let reserved = crate::platform::create_private_new(destination)
+        .map_err(|_| "Snapshot destination already exists or unavailable")?;
+    #[cfg(windows)]
+    crate::platform::prepare_sqlite(destination).map_err(|_| "Cannot protect snapshot journal")?;
     let mut guard = Incomplete(destination, true);
     let mut target = Connection::open_with_flags(
         destination,
@@ -93,6 +127,12 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| "Cannot open snapshot destination")?;
+    #[cfg(windows)]
+    target
+        .execute_batch(
+            "PRAGMA temp_store=MEMORY; PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL;",
+        )
+        .map_err(|_| "Cannot protect snapshot writes")?;
     target
         .busy_timeout(Duration::ZERO)
         .map_err(|_| "Cannot bound snapshot access")?;
@@ -127,8 +167,12 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
     }
     // A backup of a WAL-mode source can retain its mode. Consolidate the new,
     // exclusively owned copy so the destination is a standalone database file.
+    #[cfg(unix)]
+    let consolidate = "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;";
+    #[cfg(windows)]
+    let consolidate = "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=TRUNCATE;";
     target
-        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
+        .execute_batch(consolidate)
         .map_err(|_| "Cannot consolidate database snapshot")?;
     target
         .close()
@@ -136,9 +180,7 @@ pub fn snapshot(source: &Path, destination: &Path, timeout: Duration) -> Result<
     reserved
         .sync_all()
         .map_err(|_| "Cannot synchronize database snapshot")?;
-    fs::File::open(parent)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| "Cannot synchronize snapshot directory")?;
+    crate::platform::sync_directory(parent).map_err(|_| "Cannot synchronize snapshot directory")?;
     guard.1 = false;
     Ok(())
 }
@@ -157,7 +199,7 @@ impl Drop for Incomplete<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{

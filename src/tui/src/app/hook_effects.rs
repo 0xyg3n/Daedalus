@@ -349,12 +349,14 @@ mod tests {
             let registration = Registration {
                 version: 1,
                 id: "hook".into(),
-                directory: "/tmp/unused-hook-effect-fixture".into(),
+                directory: crate::test_support::path("/tmp/unused-hook-effect-fixture").into(),
                 scope: scope.clone(),
                 goal_id: None,
                 harness_process: None,
                 server_emitter: None,
-                transcript: Some("/tmp/unused-hook-transcript.jsonl".into()),
+                transcript: Some(
+                    crate::test_support::path("/tmp/unused-hook-transcript.jsonl").into(),
+                ),
                 events: vec![EventKind::Stop, EventKind::UserPromptSubmit],
                 options: Options {
                     telegram_delivery: true,

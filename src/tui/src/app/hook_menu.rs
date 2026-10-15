@@ -722,7 +722,7 @@ impl Menu {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::{
         backend::Observations, hook_install, hook_runtime::ProcessIdentity, hooks::Harness,
@@ -986,7 +986,8 @@ mod tests {
             menu.reply(
                 &json!({"op":"reply","id":id,"value":"yes"}),
                 &mut mock,
-                &ControlConfig::fresh(std::path::Path::new("/tmp")).unwrap(),
+                &ControlConfig::fresh(std::path::Path::new(crate::test_support::path("/tmp")))
+                    .unwrap(),
                 &mut seq
             )
             .is_err()

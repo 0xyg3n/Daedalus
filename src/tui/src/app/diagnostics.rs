@@ -4,13 +4,17 @@
 //! WAL reads use ordinary SQLite SHM reader coordination. No application state,
 //! database/WAL contents, or goal/lease recovery state is written.
 use super::{config::ControlConfig, hook_runtime::Registration};
+#[cfg(unix)]
 use crate::core::layouts;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +41,7 @@ const STATES: [&str; 15] = [
 fn unknown(reason: &'static str) -> Value {
     json!({"status":"unknown","reason":reason})
 }
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<()> {
     layouts::check_path(path).map_err(|_| "Unsafe diagnostics directory")?;
     let meta = fs::symlink_metadata(path).map_err(|_| "Diagnostics directory is unavailable")?;
@@ -45,6 +50,7 @@ fn private_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn private_file(path: &Path, limit: u64) -> Result<Option<File>> {
     layouts::check_path(path).map_err(|_| "Unsafe diagnostics state file")?;
     let file = match OpenOptions::new()
@@ -92,6 +98,7 @@ fn configuration(directory: &Path) -> Value {
         Err(_) => unknown("unsafe_or_unreadable_configuration"),
     }
 }
+#[cfg(unix)]
 fn same_file(file: &File, path: &Path) -> bool {
     let (Ok(a), Ok(b)) = (file.metadata(), fs::symlink_metadata(path)) else {
         return false;
@@ -113,8 +120,10 @@ impl Database {
         same_file(&self.file, &self.path)
             && (!self.immutable
                 || (self.metadata.len() == after.len()
-                    && self.metadata.mtime() == after.mtime()
-                    && self.metadata.mtime_nsec() == after.mtime_nsec()
+                    && self
+                        .metadata
+                        .modified()
+                        .is_ok_and(|before| after.modified().ok() == Some(before))
                     && !self
                         .path
                         .with_file_name(format!(
@@ -152,7 +161,12 @@ fn open_database(path: &Path) -> Result<Option<Database>> {
         )),
         MAX_DATABASE,
     )?;
-    if journal.is_some() || (wal.is_some() && shm.is_none()) {
+    // A retained, truncated rollback journal is the native Windows policy.
+    // Only a nonempty journal can require recovery; never recover during reads.
+    let pending_journal = journal
+        .as_ref()
+        .is_some_and(|file| file.metadata().map_or(true, |meta| meta.len() != 0));
+    if pending_journal || (wal.is_some() && shm.is_none()) {
         return Err("Database needs a complete read-only snapshot".into());
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -166,10 +180,13 @@ fn open_database(path: &Path) -> Result<Option<Database>> {
         // SQLite can otherwise create empty WAL/SHM files even for READ_ONLY.
         // Without a WAL, immutable mode reads the main file without side effects;
         // its identity/mtime and absence of a new WAL are rechecked after queries.
+        #[cfg(unix)]
         use std::os::unix::ffi::OsStrExt;
-        let encoded = path
-            .as_os_str()
-            .as_bytes()
+        #[cfg(unix)]
+        let raw = path.as_os_str().as_bytes().to_vec();
+        #[cfg(windows)]
+        let raw = path.to_string_lossy().replace('\\', "/").into_bytes();
+        let encoded = raw
             .iter()
             .map(|b| {
                 if b.is_ascii_alphanumeric() || b"/-_.~".contains(b) {
@@ -643,7 +660,7 @@ pub fn run(args: &[String], writer: &mut impl Write) -> Result<()> {
     writeln!(writer).map_err(|_| "Cannot write diagnostics".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{
@@ -985,5 +1002,37 @@ mod tests {
         assert!(goal_rows(&f.0, "other", &[], 20).unwrap().is_empty());
         let report = inspect(&f.0, 0.02).unwrap().to_string();
         assert!(!report.contains("Finish fixture"));
+    }
+}
+
+#[cfg(windows)]
+fn private_directory(path: &Path) -> Result<()> {
+    crate::platform::validate_private_dir(path).map_err(|_| "Private directory unavailable".into())
+}
+
+#[cfg(windows)]
+fn private_file(path: &Path, limit: u64) -> Result<Option<File>> {
+    let file = match crate::platform::open_private(path, false, false) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Private diagnostic file unavailable".into()),
+    };
+    if file.metadata().map_err(|_| "Cannot inspect file")?.len() > limit {
+        return Err("Diagnostic file exceeds limit".into());
+    }
+    Ok(Some(file))
+}
+
+#[cfg(windows)]
+fn same_file(file: &File, path: &Path) -> bool {
+    let Ok(other) = crate::platform::open_private(path, false, false) else {
+        return false;
+    };
+    match (
+        crate::platform::file_identity(file),
+        crate::platform::file_identity(&other),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }

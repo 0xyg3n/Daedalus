@@ -1847,7 +1847,7 @@ mod tests {
     }
     fn checkpoint() -> Checkpoint {
         serde_json::from_value(
-            json!({"name":"saved","harness":"claude","sid":"abc-123","cwd":"/tmp/project"}),
+            json!({"name":"saved","harness":"claude","sid":"abc-123","cwd":crate::test_support::path("/tmp/project")}),
         )
         .unwrap()
     }
@@ -1878,7 +1878,7 @@ mod tests {
                 Request::Load(_) => Answer::Saved(row()),
                 Request::Live { pane, sid } => {
                     let mut frozen = pane.clone();
-                    frozen["_daedalus_handoff_process"] = json!({"pid":123,"start":"456","argv_hash":"fixture","cwd":"/tmp/project","profile":""});
+                    frozen["_daedalus_handoff_process"] = json!({"pid":123,"start":"456","argv_hash":"fixture","cwd":crate::test_support::path("/tmp/project"),"profile":""});
                     frozen["_fixture_supplied_sid"] = json!(sid);
                     let mut row = checkpoint();
                     if self.missing_sid {
@@ -1921,7 +1921,7 @@ mod tests {
         }
     }
     fn pane() -> Value {
-        json!({"backend":"tmux","server":"tmux@/tmp/mock.sock","socket":"/tmp/mock.sock","pane_id":"%1","terminal_id":"generation-original","session":"project","session_id":"$1","window_id":"@1"})
+        json!({"backend":"tmux","server":"tmux@/tmp/mock.sock","socket":crate::test_support::path("/tmp/mock.sock"),"pane_id":"%1","terminal_id":"generation-original","session":"project","session_id":"$1","window_id":"@1"})
     }
     fn view() -> View {
         View {
@@ -1934,7 +1934,7 @@ mod tests {
         }
     }
     fn config() -> ControlConfig {
-        ControlConfig::fresh(Path::new("/tmp/project")).unwrap()
+        ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap()
     }
     fn reply(
         menu: &mut SessionMenu,
@@ -2333,13 +2333,26 @@ mod tests {
             &mut menu,
             &mut source,
             &mut seq,
-            json!("/tmp/socket-b,/tmp/socket-a,/tmp/socket-a"),
+            json!(
+                [
+                    crate::test_support::path("/tmp/socket-b"),
+                    crate::test_support::path("/tmp/socket-a"),
+                    crate::test_support::path("/tmp/socket-a")
+                ]
+                .join(",")
+            ),
         )
         .unwrap();
         assert!(source.requests.is_empty());
         let outcome = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
         let updated = outcome.configuration.unwrap();
-        assert_eq!(updated.tmux_sockets, vec!["/tmp/socket-a", "/tmp/socket-b"]);
+        assert_eq!(
+            updated.tmux_sockets,
+            vec![
+                crate::test_support::path("/tmp/socket-a"),
+                crate::test_support::path("/tmp/socket-b")
+            ]
+        );
         assert_eq!(updated.agent_home, config().agent_home);
         assert!(outcome.refresh);
         assert!(
@@ -2394,14 +2407,20 @@ mod tests {
     fn project_creation_and_organization_keep_exact_targets_and_confirm_before_effect() {
         let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
         start(&mut menu, &mut source, &mut seq, "project.new");
-        for value in ["tmux", "0", "new_project", "/tmp", "shell"] {
+        for value in [
+            "tmux",
+            "0",
+            "new_project",
+            crate::test_support::path("/tmp"),
+            "shell",
+        ] {
             reply(&mut menu, &mut source, &mut seq, json!(value)).unwrap();
         }
         assert!(source.requests.is_empty());
         reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
         match source.requests.last().unwrap() {
             Request::Workspace(request) => assert!(
-                matches!(&**request,WorkspaceRequest::Create{anchor:Some(p),name,cwd,tool,..} if p==&pane()&&name=="new_project"&&cwd=="/tmp"&&tool=="shell")
+                matches!(&**request,WorkspaceRequest::Create{anchor:Some(p),name,cwd,tool,..} if p==&pane()&&name=="new_project"&&cwd==crate::test_support::path("/tmp")&&tool=="shell")
             ),
             _ => panic!("Missing project create"),
         }

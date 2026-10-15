@@ -17,14 +17,18 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::{
+    fd::AsRawFd,
+    unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::Read,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
+    fs::{self, File},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -56,11 +60,15 @@ pub struct SessionStore {
 struct StoreLock(File);
 impl Drop for StoreLock {
     fn drop(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
     }
 }
+#[cfg(unix)]
 fn lock(directory: &Path) -> Result<StoreLock> {
     layouts::check_path(directory)?;
     fs::DirBuilder::new()
@@ -120,7 +128,14 @@ fn utc_now() -> String {
         .unwrap_or_default()
         .as_secs() as libc::time_t;
     let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
+    #[cfg(unix)]
     let ptr = unsafe { libc::gmtime_r(&seconds, time.as_mut_ptr()) };
+    #[cfg(windows)]
+    let ptr = if unsafe { libc::gmtime_s(time.as_mut_ptr(), &seconds) } == 0 {
+        time.as_mut_ptr()
+    } else {
+        std::ptr::null_mut()
+    };
     if ptr.is_null() {
         return String::new();
     }
@@ -163,6 +178,7 @@ struct ProcessEvidence {
     cwd: String,
     profile: String,
 }
+#[cfg(unix)]
 fn read_process(adapter: &Terminals, pid: &str, harness: &str) -> Result<Option<ProcessEvidence>> {
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return Err("Invalid foreground process ID".into());
@@ -604,6 +620,11 @@ impl SessionStore {
         }
         let mut frozen = before;
         frozen["_daedalus_handoff_process"] = process_fingerprint(&evidence);
+        #[cfg(windows)]
+        if evidence.is_none() {
+            frozen["_daedalus_handoff_process"] =
+                windows_native_process(adapter, &frozen, &harness)?;
+        }
         if checkpoint.sid.is_empty() && evidence.is_none() {
             return Err(
                 "Handoff requires a native session ID or a verifiable foreground process".into(),
@@ -952,12 +973,12 @@ fn native_binary(path: &Path, environment: &BTreeMap<String, String>) -> Result<
                 .unwrap_or_default(),
         )
         .filter(|p| p.is_absolute())
-        .map(|p| p.join(path))
+        .flat_map(|p| harnesses::executable_candidates(&p, &path.to_string_lossy()))
         .collect()
     };
     candidates
         .into_iter()
-        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && native_executable(&m)))
         .ok_or_else(|| "Native terminal client is not installed".into())
 }
 fn view_facts(pane: &Value, snapshot: &Value) -> (usize, String) {
@@ -1130,6 +1151,14 @@ pub fn prepare_attach(
 }
 fn runtime_environment(environment: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     const RUNTIME: &[&str] = &[
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PATHEXT",
+        "PSMODULEPATH",
         "HOME",
         "PATH",
         "TERM",
@@ -1229,6 +1258,9 @@ pub fn prepare_duplicate_view(
             "tmux grouped view",
         )
     } else {
+        if cfg!(windows) {
+            return Err("Herdr direct terminal duplicate views are unavailable on Windows; use Watch or attach a full Herdr session".into());
+        }
         if read_only {
             return Err("Herdr read-only observation is available through Watch; its native duplicate-view client does not advertise a read-only option".into());
         }
@@ -1358,7 +1390,50 @@ pub fn unlink_window(adapter: &Terminals, pane: &Value) -> Result<Receipt> {
     })
 }
 
-#[cfg(test)]
+/// Supported Windows APIs prove the native executable and its incarnation.
+/// Never pretend command-line/profile inspection was available on Windows.
+#[cfg(windows)]
+fn windows_native_process(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Value> {
+    let id = terminals::identity(pane)?;
+    if id.backend != Backend::Herdr {
+        return Ok(Value::Null);
+    }
+    let info = adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
+    let rows = info["process_info"]["foreground_processes"]
+        .as_array()
+        .ok_or("Missing foreground process information")?;
+    let mut candidates = Vec::new();
+    for row in rows.iter().take(128) {
+        let pid = row["pid"]
+            .as_u64()
+            .and_then(|p| u32::try_from(p).ok())
+            .or_else(|| row["pid"].as_str().and_then(|p| p.parse().ok()))
+            .ok_or("Invalid foreground PID")?;
+        let actual =
+            crate::platform::process_identity(pid).map_err(|_| "Foreground process changed")?;
+        if actual.owner != crate::platform::current_identity().map_err(|e| e.to_string())? {
+            return Err("Foreground process belongs to another account".into());
+        }
+        if actual
+            .executable
+            .file_stem()
+            .is_some_and(|name| name.eq_ignore_ascii_case(harness))
+        {
+            candidates.push(actual);
+        }
+    }
+    if candidates.len() > 1 {
+        return Err("Foreground native executable is ambiguous".into());
+    }
+    let Some(actual) = candidates.pop() else {
+        return Ok(Value::Null);
+    };
+    Ok(
+        json!({"pid":actual.pid.to_string(),"start":actual.creation_time.to_string(),"executable":actual.executable,"arguments_observed":false,"argv_sha256":null,"cwd":first(pane,&["foreground_cwd","cwd"]),"profile":""}),
+    )
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1420,7 +1495,10 @@ mod tests {
         );
         let environment = BTreeMap::from([
             ("HOME".into(), dir.to_string_lossy().into_owned()),
-            ("PATH".into(), "/usr/bin:/bin".into()),
+            (
+                "PATH".into(),
+                crate::test_support::path("/usr/bin:/bin").into(),
+            ),
             ("TERM".into(), "xterm-256color".into()),
             ("TELEGRAM_BOT_TOKEN".into(), "fixture-private-token".into()),
             ("GROK_HOME".into(), "/unrelated/sibling".into()),
@@ -1815,4 +1893,40 @@ mod tests {
         assert!(error.contains("foreground process changed"));
         assert!(!f.store.directory.join("checkpoints").exists());
     }
+}
+
+#[cfg(windows)]
+fn lock(directory: &Path) -> Result<StoreLock> {
+    crate::platform::ensure_private_dir(directory).map_err(|e| e.to_string())?;
+    let file = crate::platform::open_private(&directory.join(".sessions.lock"), true, true)
+        .map_err(|e| e.to_string())?;
+    crate::platform::lock_exclusive(&file, true).map_err(|_| "Session store is busy")?;
+    Ok(StoreLock(file))
+}
+
+#[cfg(unix)]
+fn native_executable(metadata: &fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+#[cfg(windows)]
+fn native_executable(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn read_process(
+    _adapter: &Terminals,
+    pid: &str,
+    _harness: &str,
+) -> Result<Option<ProcessEvidence>> {
+    let pid = pid.parse().map_err(|_| "Invalid foreground process ID")?;
+    let actual =
+        crate::platform::process_identity(pid).map_err(|_| "Cannot verify foreground process")?;
+    if actual.owner != crate::platform::current_identity().map_err(|e| e.to_string())? {
+        return Err("Foreground process belongs to another account".into());
+    }
+    // Windows does not expose supported argv/cwd/environment APIs for another
+    // process. Herdr's correlated native session metadata remains available;
+    // never invent argv evidence by treating its display label as a command.
+    Ok(None)
 }

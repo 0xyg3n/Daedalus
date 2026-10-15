@@ -21,11 +21,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
-    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -66,9 +68,12 @@ impl Plan {
 }
 fn uuid() -> Result<String> {
     let mut bytes = [0u8; 16];
+    #[cfg(unix)]
     fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|_| "Cannot allocate a session UUID")?;
+    #[cfg(windows)]
+    crate::platform::random_bytes(&mut bytes).map_err(|_| "Cannot allocate session UUID")?;
     bytes[6] = (bytes[6] & 15) | 64;
     bytes[8] = (bytes[8] & 63) | 128;
     let s = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -275,10 +280,18 @@ pub fn apply(
     let _active = super::hook_runtime::active_guard(directory).map_err(|e| e.to_string())?;
     let ticket = plan.ticket();
     layouts::check_path(&ticket)?;
+    #[cfg(unix)]
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&ticket)
         .map_err(|_| "Launch already submitted or ticket unavailable")?;
+    #[cfg(windows)]
+    {
+        if ticket.exists() {
+            return Err("Launch already submitted".into());
+        }
+        crate::platform::ensure_private_dir(&ticket).map_err(|e| e.to_string())?;
+    }
     layouts::write_private(
         &ticket.join("expected.json"),
         &serde_json::to_vec(&plan.hook).map_err(|_| "Cannot record launch intent")?,

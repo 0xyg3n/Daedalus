@@ -352,11 +352,14 @@ mod tests {
         };
         registry.save(&dir).unwrap();
         write_private(&dir.join("session_checkpoints.json"),
-            &serde_json::to_vec(&serde_json::json!({"seats": {"Old session": [{"session_id": "old-id", "cwd": std::env::temp_dir(), "claude_config_dir": "/tmp/profile"}]}})).unwrap()).unwrap();
+            &serde_json::to_vec(&serde_json::json!({"seats": {"Old session": [{"session_id": "old-id", "cwd": std::env::temp_dir(), "claude_config_dir": crate::test_support::path("/tmp/profile")}]}})).unwrap()).unwrap();
         let imported = Registry::load(&dir).unwrap();
         assert_eq!(imported.checkpoints.len(), 2);
         assert_eq!(imported.checkpoints[1].sid, "old-id");
-        assert_eq!(imported.checkpoints[1].profile, "/tmp/profile");
+        assert_eq!(
+            imported.checkpoints[1].profile,
+            crate::test_support::path("/tmp/profile")
+        );
         write_private(
             &dir.join("session-checkpoints.json"),
             &serde_json::to_vec(&registry).unwrap(),
@@ -401,7 +404,7 @@ mod tests {
     fn caps() -> Capabilities {
         Capabilities {
             harness: "claude".into(),
-            binary: "/usr/bin/claude".into(),
+            binary: crate::test_support::path("/usr/bin/claude").into(),
             resume: true,
             native_fork: true,
             handoff: true,
@@ -432,7 +435,7 @@ mod tests {
                 &row(),
                 Operation::NativeFork,
                 &target,
-                Path::new("/tmp/checkpoints")
+                Path::new(crate::test_support::path("/tmp/checkpoints"))
             )
             .is_err()
         );
@@ -443,7 +446,7 @@ mod tests {
                 &row(),
                 Operation::NativeFork,
                 &target,
-                Path::new("/tmp/checkpoints")
+                Path::new(crate::test_support::path("/tmp/checkpoints"))
             )
             .is_err()
         );
@@ -454,7 +457,7 @@ mod tests {
             &row(),
             Operation::NativeFork,
             &caps(),
-            Path::new("/tmp/checkpoints"),
+            Path::new(crate::test_support::path("/tmp/checkpoints")),
         )
         .unwrap();
         assert_eq!(launch.args, ["--resume", "session-123", "--fork-session"]);
@@ -471,7 +474,7 @@ mod tests {
                 &checkpoint,
                 Operation::Handoff,
                 &caps(),
-                Path::new("/tmp/checkpoints")
+                Path::new(crate::test_support::path("/tmp/checkpoints"))
             )
             .is_err()
         );
@@ -482,13 +485,18 @@ mod tests {
         checkpoint.harness = "pi".into();
         let mut capabilities = caps();
         capabilities.harness = "pi".into();
-        capabilities.binary = "/fixture/pi".into();
+        capabilities.binary = crate::test_support::path("/fixture/pi").into();
         for (operation, flag) in [
             (Operation::Resume, "--session"),
             (Operation::NativeFork, "--fork"),
         ] {
-            let planned =
-                plan(&checkpoint, operation, &capabilities, Path::new("/unused")).unwrap();
+            let planned = plan(
+                &checkpoint,
+                operation,
+                &capabilities,
+                Path::new(crate::test_support::path("/unused")),
+            )
+            .unwrap();
             assert_eq!(planned.args, [flag, &checkpoint.sid]);
             assert!(!planned.args.contains(&"--session-id".to_owned()));
         }

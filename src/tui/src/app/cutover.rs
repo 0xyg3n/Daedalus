@@ -14,14 +14,18 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
     os::unix::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawFd,
     },
-    path::{Path, PathBuf},
-    time::Duration,
 };
 pub type Result<T> = std::result::Result<T, String>;
 const PROOF: &str = "cutover.json";
@@ -63,6 +67,7 @@ struct Locks {
     _owner: Owner,
     _files: Vec<CutoverLock>,
 }
+#[cfg(unix)]
 fn private_dir(path: &Path) -> Result<()> {
     layouts::check_path(path)?;
     let m = fs::metadata(path).map_err(|_| "Instance directory missing")?;
@@ -72,6 +77,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 struct CutoverLock(File);
+#[cfg(unix)]
 impl Drop for CutoverLock {
     fn drop(&mut self) {
         // A concurrent subprocess can inherit the open file description before
@@ -81,6 +87,7 @@ impl Drop for CutoverLock {
         }
     }
 }
+#[cfg(unix)]
 fn lock(path: &Path) -> Result<CutoverLock> {
     layouts::check_path(path)?;
     private_dir(path.parent().ok_or("Missing lock parent")?)?;
@@ -119,6 +126,7 @@ fn acquire(source: &Path, destination: &Path, global: &Path, bot: i64) -> Result
         _files: files,
     })
 }
+#[cfg(unix)]
 fn read(path: &Path) -> Result<Vec<u8>> {
     layouts::check_path(path)?;
     let m = fs::symlink_metadata(path).map_err(|_| "Cutover state missing")?;
@@ -155,8 +163,7 @@ fn write_proof(path: &Path, p: &Proof) -> Result<()> {
     )
 }
 fn sync_parent(path: &Path) -> Result<()> {
-    File::open(path.parent().ok_or("Missing parent")?)
-        .and_then(|f| f.sync_all())
+    sync_directory(path.parent().ok_or("Missing parent")?)
         .map_err(|_| "Cannot sync cutover directory".into())
 }
 fn exists(path: &Path) -> bool {
@@ -572,6 +579,7 @@ fn source_token(source: &Path, legacy: bool, bot: i64) -> Result<String> {
         .ok_or("Legacy token missing")?;
     super::telegram_config::validate_token(bot, token.as_bytes())
 }
+#[cfg(unix)]
 fn legacy_processes_absent(source: &Path, proc_root: &Path) -> Result<()> {
     let entries = fs::read_dir(proc_root).map_err(|_| "Cannot verify legacy process quiescence")?;
     let known = [
@@ -762,6 +770,7 @@ fn reconcile_legacy_routes(
     )?;
     Ok((vec![], unresolved, vec![]))
 }
+#[cfg(unix)]
 fn rename_new(from: &Path, to: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let a =
@@ -987,9 +996,7 @@ pub fn rollback(source: &Path, global: &Path, approval: &str) -> Result<()> {
         return Err("Restored destination does not match rollback transaction".into());
     }
     fs::remove_file(source.join(RETIRED)).map_err(|_| "Cannot restore source activation")?;
-    File::open(source)
-        .and_then(|f| f.sync_all())
-        .map_err(|_| "Cannot sync source recovery")?;
+    sync_directory(source).map_err(|_| "Cannot sync source recovery")?;
     drop((guards, source_guard, owner));
     Ok(())
 }
@@ -1015,9 +1022,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         }
         i += 2;
     }
-    let global = PathBuf::from(format!("/tmp/daedalus-service-{}", unsafe {
-        libc::geteuid()
-    }));
+    let global = super::telegram_service::global_directory()?;
     if verb == "rollback" {
         if flags.len() != 2 {
             return Err("Rollback requires --source and --approve".into());
@@ -1050,7 +1055,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         directory: directory.clone(),
         config,
         terminals: crate::adapters::terminals::Terminals::default(),
-        environment: std::env::vars().collect(),
+        environment: crate::platform::environment(),
     };
     let plan = Plan::prepare(&directory, &global, || operations.inventory())?;
     serde_json::to_writer_pretty(&mut *out, &plan.preview)
@@ -1068,7 +1073,53 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn private_dir(path: &Path) -> Result<()> {
+    layouts::check_path(path)?;
+    crate::platform::validate_private_dir(path)
+        .map_err(|_| "Instance directory must have private owner-scoped access".into())
+}
+#[cfg(windows)]
+impl Drop for CutoverLock {
+    fn drop(&mut self) {
+        let _ = crate::platform::unlock(&self.0);
+    }
+}
+#[cfg(windows)]
+fn lock(path: &Path) -> Result<CutoverLock> {
+    layouts::check_path(path)?;
+    private_dir(path.parent().ok_or("Missing lock parent")?)?;
+    let file = crate::platform::open_private(path, true, true)
+        .map_err(|_| "Cannot open private cutover lock")?;
+    crate::platform::lock_exclusive(&file, true)
+        .map_err(|_| "Instance is busy or cutover lock is unsafe")?;
+    Ok(CutoverLock(file))
+}
+#[cfg(windows)]
+fn read(path: &Path) -> Result<Vec<u8>> {
+    layouts::read_private(path)?.ok_or("Cutover state missing".into())
+}
+#[cfg(windows)]
+fn legacy_processes_absent(_: &Path, _: &Path) -> Result<()> {
+    Err("Legacy Unix runtime retirement cannot be verified on Windows; retire and cut over that instance on its original host".into())
+}
+#[cfg(windows)]
+fn rename_new(from: &Path, to: &Path) -> Result<()> {
+    crate::platform::rename_new(from, to)
+        .map_err(|_| "Cannot publish cutover; retained transaction requires recovery".into())
+}
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        crate::platform::sync_directory(path)
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{

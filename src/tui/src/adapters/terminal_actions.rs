@@ -299,6 +299,7 @@ impl Terminals {
         validate_launch(launch)?;
         let actual = self.verify(parent)?;
         let id = identity(&actual)?;
+        #[cfg(unix)]
         let binary = launch
             .binary
             .to_str()
@@ -337,12 +338,20 @@ impl Terminals {
             // Multiple command arguments select tmux's direct executable mode.
             // Clear the server environment before installing the complete,
             // explicitly sanitized launch environment. Never inherit bot tokens.
-            args.extend(["--".into(), "/usr/bin/env".into(), "-i".into()]);
-            for (key, value) in &launch.environment {
-                args.push(format!("{key}={value}"));
+            #[cfg(unix)]
+            {
+                args.extend(["--".into(), "/usr/bin/env".into(), "-i".into()]);
+                for (key, value) in &launch.environment {
+                    args.push(format!("{key}={value}"));
+                }
+                args.push(binary.into());
+                args.extend(launch.args.clone());
             }
-            args.push(binary.into());
-            args.extend(launch.args.clone());
+            #[cfg(windows)]
+            {
+                args.push("--".into());
+                args.extend(super::windows_launch::argv(launch)?);
+            }
             let pane = match self.query(
                 &self.tmux,
                 &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -436,28 +445,34 @@ impl Terminals {
                 return Err("New terminal is no longer an available shell".into());
             }
             self.verify(pane)?;
-            let mut words = vec!["/usr/bin/env".to_owned(), "-i".to_owned()];
-            for (key, value) in &launch.environment {
-                words.push(format!("{key}={value}"));
-            }
-            words.push(
-                launch
-                    .binary
-                    .to_str()
-                    .ok_or("Executable path is not UTF-8")?
-                    .into(),
-            );
-            words.extend(launch.args.clone());
-            let command = words
-                .iter()
-                .map(|w| shell_quote(w))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let command = format!(
-                "cd {} && exec {}",
-                shell_quote(launch.cwd.to_str().ok_or("Project path is not UTF-8")?),
+            #[cfg(unix)]
+            let command = {
+                let mut words = vec!["/usr/bin/env".to_owned(), "-i".to_owned()];
+                for (key, value) in &launch.environment {
+                    words.push(format!("{key}={value}"));
+                }
+                words.push(
+                    launch
+                        .binary
+                        .to_str()
+                        .ok_or("Executable path is not UTF-8")?
+                        .into(),
+                );
+                words.extend(launch.args.clone());
+                let command = words
+                    .iter()
+                    .map(|w| shell_quote(w))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let command = format!(
+                    "cd {} && exec {}",
+                    shell_quote(launch.cwd.to_str().ok_or("Project path is not UTF-8")?),
+                    command
+                );
                 command
-            );
+            };
+            #[cfg(windows)]
+            let command = super::windows_launch::command(launch)?;
             self.herdr_result(&created.endpoint, &["pane", "run", &created.pane, &command])?;
             Ok(())
         })();
@@ -500,11 +515,12 @@ fn ack<T>(result: Result<T>) -> Result<Receipt> {
         ),
     })
 }
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -571,7 +587,10 @@ esac
             args: vec![literal.into()],
             environment: BTreeMap::from([
                 ("HOME".into(), dir.to_string_lossy().into_owned()),
-                ("PATH".into(), "/usr/bin:/bin".into()),
+                (
+                    "PATH".into(),
+                    crate::test_support::path("/usr/bin:/bin").into(),
+                ),
                 ("TERM".into(), "xterm-256color".into()),
                 ("LANG".into(), literal.into()),
             ]),
@@ -610,7 +629,7 @@ esac
                 "HOME".into(),
                 std::env::temp_dir().to_string_lossy().into_owned(),
             ),
-            ("PATH".into(), "/usr/bin".into()),
+            ("PATH".into(), crate::test_support::path("/usr/bin").into()),
         ]);
         assert!(validate_environment(&env).is_ok());
         env.insert("BAD=KEY".into(), "value".into());
@@ -646,7 +665,7 @@ esac
                 pid,
                 "sh",
                 "1",
-                "/tmp",
+                crate::test_support::path("/tmp"),
                 "11",
                 "Title",
                 "/dev/pts/1",
@@ -680,14 +699,17 @@ esac
             proc_root,
             ..Terminals::default()
         };
-        let pane = json!({"backend":"tmux","socket":"/tmp/mock.sock","pane_id":"%1","terminal_id":"v2:11:100:22:100","session_id":"$1"});
+        let pane = json!({"backend":"tmux","socket":crate::test_support::path("/tmp/mock.sock"),"pane_id":"%1","terminal_id":"v2:11:100:22:100","session_id":"$1"});
         let literal = "$(touch never); a b";
         let launch = LaunchPlan {
             binary: "/opt/example-agent".into(),
             args: vec![literal.into()],
             environment: BTreeMap::from([
                 ("HOME".into(), dir.to_string_lossy().into_owned()),
-                ("PATH".into(), "/usr/bin:/bin".into()),
+                (
+                    "PATH".into(),
+                    crate::test_support::path("/usr/bin:/bin").into(),
+                ),
                 ("TERM".into(), "xterm-256color".into()),
                 ("LANG".into(), "$(touch never) 'literal'".into()),
             ]),
@@ -736,7 +758,7 @@ esac
                 pid,
                 "sh",
                 "1",
-                "/tmp",
+                crate::test_support::path("/tmp"),
                 "11",
                 "Title",
                 "/dev/pts/1",
@@ -768,7 +790,7 @@ esac
             proc_root,
             ..Terminals::default()
         };
-        let pane = json!({"backend":"tmux","socket":"/tmp/mock.sock","pane_id":"%1","terminal_id":"v2:11:100:22:100","session_id":"$1"});
+        let pane = json!({"backend":"tmux","socket":crate::test_support::path("/tmp/mock.sock"),"pane_id":"%1","terminal_id":"v2:11:100:22:100","session_id":"$1"});
         let text = "$(touch should-not-exist); 'quoted'";
         let receipt = adapter.action(&pane, Action::Send(text.into())).unwrap();
         assert_eq!(receipt.state, ReceiptState::Unconfirmed);

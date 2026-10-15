@@ -69,3 +69,11 @@ registration. A bank is never guessed from a project name or pane title.
   operation status.
 - Missing configuration disables memory. A failed request is reported as failed;
   no memory is invented.
+
+## Native Windows
+
+Existing verified Herdr processes support native registration contracts for
+Claude Code 2.1.296+, Hermes, Pi and OpenCode. Windows guided hooked first launch,
+Codex/Grok/Cursor hooks and hooks through native tmux-compatible backends are
+unverified and fail closed. Native terminal controls and ordinary launch are
+separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boundaries).

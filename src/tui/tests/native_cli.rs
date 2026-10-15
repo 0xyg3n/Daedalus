@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Packaged entry-point checks: these paths cannot resolve Python or a harness.
 use serde_json::{Value, json};
 use std::{

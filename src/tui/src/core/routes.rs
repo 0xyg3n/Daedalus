@@ -1003,7 +1003,7 @@ mod tests {
         value["meta"]["chat_bindings"]["-100"]["terminal_id"] = json!(row.terminal_id);
         let target = TerminalId {
             backend: Backend::Tmux,
-            endpoint: "/tmp/project.sock".into(),
+            endpoint: crate::test_support::path("/tmp/project.sock").into(),
             pane: "%1".into(),
             generation: "process-generation".into(),
         };

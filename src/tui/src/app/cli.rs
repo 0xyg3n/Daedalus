@@ -227,14 +227,14 @@ mod tests {
             parse(&args(&[
                 "init",
                 "--config-dir",
-                "/tmp/config",
+                crate::test_support::path("/tmp/config"),
                 "--workspace",
-                "/tmp/work"
+                crate::test_support::path("/tmp/work")
             ]))
             .unwrap(),
             Command::Init {
-                directory: "/tmp/config".into(),
-                workspace: "/tmp/work".into(),
+                directory: crate::test_support::path("/tmp/config").into(),
+                workspace: crate::test_support::path("/tmp/work").into(),
                 apply: false
             }
         );
@@ -243,15 +243,20 @@ mod tests {
                 "import",
                 "--apply",
                 "--from",
-                "/tmp/source",
+                crate::test_support::path("/tmp/source"),
                 "--config-dir",
-                "/tmp/config"
+                crate::test_support::path("/tmp/config")
             ]))
             .unwrap(),
             Command::Import { apply: true, .. }
         ));
         assert!(matches!(
-            parse(&args(&["validate", "--from", "/tmp/config"])).unwrap(),
+            parse(&args(&[
+                "validate",
+                "--from",
+                crate::test_support::path("/tmp/config")
+            ]))
+            .unwrap(),
             Command::Validate { .. }
         ));
         assert_eq!(parse(&[]).unwrap(), Command::Help);

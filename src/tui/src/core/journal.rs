@@ -272,6 +272,35 @@ impl Journal {
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
         Self::initialize(Connection::open_with_flags(path, flags)?)
     }
+    #[cfg(windows)]
+    pub fn open(path: &Path) -> Result<Self> {
+        crate::platform::check_path(path)?;
+        let parent = path
+            .parent()
+            .ok_or(Error::Invalid("Journal needs a private parent directory"))?;
+        crate::platform::ensure_private_dir(parent)?;
+        let file = crate::platform::prepare_sqlite(path)?;
+        let identity = crate::platform::file_identity(&file)?;
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let con = Connection::open_with_flags(path, flags)?;
+        let after = crate::platform::open_private(path, false, false)?;
+        if crate::platform::file_identity(&after)? != identity {
+            return Err(Error::Invalid("Journal identity changed while opening"));
+        }
+        // Precreate a private rollback journal and retain it across transactions.
+        // This does not depend on ACL inheritance (which is absent on some
+        // Windows-compatible filesystems). No public API enables WAL mode.
+        let mode: String = con.query_row("PRAGMA journal_mode=TRUNCATE", [], |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("truncate") {
+            return Err(Error::Invalid(
+                "Private Windows rollback journal mode unavailable",
+            ));
+        }
+        con.execute_batch("PRAGMA temp_store=MEMORY;")?;
+        Self::initialize(con)
+    }
     pub fn memory() -> Result<Self> {
         Self::initialize(Connection::open_in_memory()?)
     }
@@ -848,14 +877,20 @@ impl Journal {
     ) -> Result<ImportReport> {
         direction(dir)?;
         timestamp(now)?;
+        #[cfg(unix)]
         let mut options = std::fs::OpenOptions::new();
+        #[cfg(unix)]
         options.read(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
         }
-        let file = match options.open(path) {
+        #[cfg(unix)]
+        let opened = options.open(path);
+        #[cfg(windows)]
+        let opened = crate::platform::open_regular(path);
+        let file = match opened {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(ImportReport::default());
@@ -981,6 +1016,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_journal_retains_private_rollback_sidecar() {
+        let tmp = Temp::new();
+        let mut journal = Journal::open(&tmp.db()).unwrap();
+        journal
+            .admit("telegram", "fixture", "1", &json!({"fixture":true}), 1.0)
+            .unwrap();
+        for suffix in ["", "-journal"] {
+            let mut name = tmp.db().as_os_str().to_os_string();
+            name.push(suffix);
+            crate::platform::open_private(&std::path::PathBuf::from(name), false, false).unwrap();
+        }
+        drop(journal);
+        let reopened = Journal::open(&tmp.db()).unwrap();
+        assert_eq!(
+            reopened
+                .events("telegram", "fixture", &["admitted"])
+                .unwrap()
+                .len(),
+            1
+        );
     }
     #[test]
     fn scheduler_pages_destinations_without_loading_payloads_or_history() {

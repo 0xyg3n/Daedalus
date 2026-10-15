@@ -5,18 +5,24 @@ use crate::core::layouts;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
-    fs::{self, OpenOptions},
+    fs,
+    path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
     io::Read,
     os::unix::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
     },
-    path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
 const MAX_INSTANCES: usize = 128;
+#[cfg(unix)]
 const MAX_PROCESSES: usize = 4096;
 
+#[cfg(unix)]
 fn private_directory(path: &Path) -> Result<()> {
     layouts::check_path(path)?;
     let meta = fs::symlink_metadata(path).map_err(|_| "Instance directory is unavailable")?;
@@ -80,6 +86,7 @@ pub fn remembered(preference_directory: &Path) -> Result<Option<PathBuf>> {
     let path = PathBuf::from(path);
     Ok(configuration(&path).is_ok().then_some(path))
 }
+#[cfg(unix)]
 fn process_candidate(process: &Path) -> Result<Option<PathBuf>> {
     let meta = fs::symlink_metadata(process).map_err(|_| "Process unavailable")?;
     if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
@@ -169,45 +176,50 @@ pub fn discover(
             }
         }
     }
-    let mut process_candidates = Vec::new();
-    if let Ok(entries) = fs::read_dir(proc_root) {
-        for (index, entry) in entries.enumerate() {
-            if index >= MAX_PROCESSES {
-                warnings.push("Process discovery limit reached");
-                break;
-            }
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let Some(pid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| s.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            if let Ok(Some(path)) = process_candidate(&entry.path()) {
-                if process_candidates.len() >= MAX_INSTANCES {
-                    warnings.push("Process instance limit reached");
+    #[cfg(unix)]
+    {
+        let mut process_candidates = Vec::new();
+        if let Ok(entries) = fs::read_dir(proc_root) {
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_PROCESSES {
+                    warnings.push("Process discovery limit reached");
                     break;
                 }
-                process_candidates.push((path, pid));
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|s| s.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if let Ok(Some(path)) = process_candidate(&entry.path()) {
+                    if process_candidates.len() >= MAX_INSTANCES {
+                        warnings.push("Process instance limit reached");
+                        break;
+                    }
+                    process_candidates.push((path, pid));
+                }
+            }
+        } else {
+            warnings.push("Process discovery unavailable");
+        }
+        // Outside known roots, only verified native owners may introduce a candidate.
+        for (path, pid) in process_candidates {
+            if candidates.len() >= MAX_INSTANCES {
+                break;
+            }
+            if telegram_supervisor::inspect_at(&path, proc_root).is_ok_and(|status| {
+                status.state == "running" && status.process.is_some_and(|record| record.pid == pid)
+            }) {
+                candidates.insert(path);
             }
         }
-    } else {
-        warnings.push("Process discovery unavailable");
     }
-    // Outside known roots, only verified native owners may introduce a candidate.
-    for (path, pid) in process_candidates {
-        if candidates.len() >= MAX_INSTANCES {
-            break;
-        }
-        if telegram_supervisor::inspect_at(&path, proc_root).is_ok_and(|status| {
-            status.state == "running" && status.process.is_some_and(|record| record.pid == pid)
-        }) {
-            candidates.insert(path);
-        }
-    }
+    #[cfg(windows)]
+    warnings.push("Arbitrary Windows process discovery is unavailable; configured and saved instance directories are checked explicitly");
     let mut instances = Vec::new();
     for path in candidates {
         let Ok(config) = configuration(&path) else {
@@ -241,7 +253,14 @@ pub fn discover(
     Ok(json!({"instances":instances,"warnings":warnings}))
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn private_directory(path: &Path) -> Result<()> {
+    layouts::check_path(path)?;
+    crate::platform::validate_private_dir(path)
+        .map_err(|_| "Instance directory must have private owner-scoped access".into())
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{collections::BTreeSet, os::unix::fs::symlink};

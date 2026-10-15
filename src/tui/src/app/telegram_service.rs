@@ -267,6 +267,7 @@ pub struct Owner {
     _instance: OwnerLock,
 }
 struct OwnerLock(std::fs::File);
+#[cfg(unix)]
 impl Drop for OwnerLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
@@ -277,6 +278,7 @@ impl Drop for OwnerLock {
         }
     }
 }
+#[cfg(unix)]
 fn lock(path: &std::path::Path) -> Result<OwnerLock> {
     use std::os::unix::{
         fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -463,6 +465,7 @@ impl Cursors {
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn stop_signal(_: libc::c_int) {
     STOP.store(true, Ordering::Release);
 }
@@ -507,9 +510,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
             .ok_or("Run setup before starting Telegram")?,
     )?;
     let token = config.read_token()?;
-    let global = std::path::PathBuf::from(format!("/tmp/daedalus-service-{}", unsafe {
-        libc::geteuid()
-    }));
+    let global = global_directory()?;
     let _owner = Owner::acquire(&directory, &global, config.bot_id)?;
     // Revalidate under ownership: a concurrent cutover may have retired this
     // source after the early read-only check.
@@ -546,7 +547,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         directory: directory.clone(),
         config: control,
         terminals: Terminals::default(),
-        environment: std::env::vars().collect(),
+        environment: crate::platform::environment(),
     };
     let mut feeder = NativeFeeder {
         instance: config.instance.clone(),
@@ -562,15 +563,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         Sender::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
     drop(token);
     STOP.store(false, Ordering::Release);
-    let (old_int, old_term) = unsafe {
-        (
-            libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t),
-            libc::signal(
-                libc::SIGTERM,
-                stop_signal as *const () as libc::sighandler_t,
-            ),
-        )
-    };
+    let _signals = ServiceSignals::install()?;
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();
     let mut checked = 0.0;
@@ -583,6 +576,9 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         writeln!(out,"{{\"service\":\"telegram\",\"state\":\"running\",\"transport_identity_verified\":true}}").map_err(|_|"Cannot write service state")?;
         out.flush().map_err(|_| "Cannot flush service state")?;
         while !STOP.load(Ordering::Acquire) {
+            if super::telegram_supervisor::stop_requested(&directory)? {
+                break;
+            }
             let now = clock();
             if now - checked >= 1.0 {
                 let next = ServiceConfig::load(&path)?;
@@ -641,10 +637,6 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         &config,
         super::telegram_supervisor::Phase::Stopped,
     );
-    unsafe {
-        libc::signal(libc::SIGINT, old_int);
-        libc::signal(libc::SIGTERM, old_term);
-    }
     result?;
     poll_result?;
     send_result?;
@@ -653,6 +645,123 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     writeln!(out, "{{\"service\":\"telegram\",\"state\":\"stopped\"}}")
         .map_err(|_| "Cannot write service state")?;
     Ok(())
+}
+
+#[cfg(windows)]
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        let _ = crate::platform::unlock(&self.0);
+    }
+}
+#[cfg(windows)]
+fn lock(path: &std::path::Path) -> Result<OwnerLock> {
+    crate::core::layouts::check_path(path)?;
+    let parent = path.parent().ok_or("Missing service lock directory")?;
+    crate::platform::ensure_private_dir(parent)
+        .map_err(|_| "Cannot create private service lock directory")?;
+    crate::platform::validate_private_dir(parent)
+        .map_err(|_| "Service lock directory is not private and owned")?;
+    let file = crate::platform::open_private(path, true, true)
+        .map_err(|_| "Cannot open service owner lock")?;
+    crate::platform::validate_private_file(&file).map_err(|_| "Service owner lock is unsafe")?;
+    crate::platform::lock_exclusive(&file, true)
+        .map_err(|_| "Another service already owns this bot or instance")?;
+    Ok(OwnerLock(file))
+}
+#[cfg(unix)]
+struct ServiceSignals {
+    interrupt: libc::sighandler_t,
+    terminate: libc::sighandler_t,
+}
+#[cfg(unix)]
+impl ServiceSignals {
+    fn install() -> Result<Self> {
+        let interrupt =
+            unsafe { libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t) };
+        if interrupt == libc::SIG_ERR {
+            return Err("Cannot install service interrupt handler".into());
+        }
+        let terminate = unsafe {
+            libc::signal(
+                libc::SIGTERM,
+                stop_signal as *const () as libc::sighandler_t,
+            )
+        };
+        if terminate == libc::SIG_ERR {
+            unsafe {
+                libc::signal(libc::SIGINT, interrupt);
+            }
+            return Err("Cannot install service termination handler".into());
+        }
+        Ok(Self {
+            interrupt,
+            terminate,
+        })
+    }
+}
+#[cfg(unix)]
+impl Drop for ServiceSignals {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGINT, self.interrupt);
+            libc::signal(libc::SIGTERM, self.terminate);
+        }
+    }
+}
+#[cfg(windows)]
+unsafe extern "system" fn console_stop(event: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        STOP.store(true, Ordering::Release);
+        1
+    } else {
+        0
+    }
+}
+#[cfg(windows)]
+struct ServiceSignals(bool);
+#[cfg(windows)]
+impl ServiceSignals {
+    fn install() -> Result<Self> {
+        if unsafe { windows_sys::Win32::System::Console::GetConsoleCP() } == 0 {
+            // Detached managed service uses its exact private cooperative request.
+            return Ok(Self(false));
+        }
+        if unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_stop), 1)
+        } == 0
+        {
+            return Err("Cannot install service console handler".into());
+        }
+        Ok(Self(true))
+    }
+}
+#[cfg(windows)]
+impl Drop for ServiceSignals {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_stop), 0);
+            }
+        }
+    }
+}
+
+pub(crate) fn global_directory() -> Result<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        Ok(std::path::PathBuf::from(format!(
+            "/tmp/daedalus-service-{}",
+            unsafe { libc::geteuid() }
+        )))
+    }
+    #[cfg(windows)]
+    {
+        Ok(crate::platform::user_local_data_directory()
+            .map_err(|_| "Cannot resolve authoritative user data directory")?
+            .join("Daedalus")
+            .join("service-owners"))
+    }
 }
 
 #[cfg(test)]
@@ -728,7 +837,7 @@ mod tests {
                 instance: "example".into(),
                 terminal: TerminalId {
                     backend: Backend::Tmux,
-                    endpoint: "/tmp/mock.sock".into(),
+                    endpoint: crate::test_support::path("/tmp/mock.sock").into(),
                     pane: "%1".into(),
                     generation: "one".into(),
                 },
@@ -813,7 +922,7 @@ mod tests {
             version: 1,
             instance: "example".into(),
             bot_id: 123,
-            token_file: "/tmp/daedalus-fixture-token".into(),
+            token_file: crate::test_support::path("/tmp/daedalus-fixture-token").into(),
             grants: vec![],
             listen_chats: Default::default(),
             registrations: vec![],
@@ -837,7 +946,8 @@ mod tests {
             registrations: vec![],
             terminals: Terminals::default(),
         };
-        let directory = std::path::Path::new("/tmp/daedalus-fixture-instance");
+        let directory =
+            std::path::Path::new(crate::test_support::path("/tmp/daedalus-fixture-instance"));
         let scope = Scope {
             instance: "example".into(),
             bot: "123".into(),

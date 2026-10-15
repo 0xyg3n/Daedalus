@@ -742,7 +742,7 @@ fn describe(step: &Step) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::backend::Observations;
     use super::*;
@@ -832,7 +832,7 @@ mod tests {
         }
     }
     fn pane() -> Value {
-        json!({"backend":"tmux","server":"tmux@/tmp/mock.sock","socket":"/tmp/mock.sock","pane_id":"%1","terminal_id":"original","session":"project"})
+        json!({"backend":"tmux","server":"tmux@/tmp/mock.sock","socket":crate::test_support::path("/tmp/mock.sock"),"pane_id":"%1","terminal_id":"original","session":"project"})
     }
     fn view(steps: Vec<Step>) -> View {
         let mut layouts = layouts::Layouts::default();
@@ -856,7 +856,7 @@ mod tests {
         menu.reply(
             &json!({"op":"reply","id":*seq,"value":value}),
             mock,
-            &ControlConfig::fresh(Path::new("/tmp/project")).unwrap(),
+            &ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap(),
             seq,
         )
         .unwrap()
@@ -881,7 +881,8 @@ mod tests {
             menu.reply(
                 &json!({"op":"reply","id":id,"value":"yes"}),
                 &mut mock,
-                &ControlConfig::fresh(Path::new("/tmp/project")).unwrap(),
+                &ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project")))
+                    .unwrap(),
                 &mut seq
             )
             .is_err()

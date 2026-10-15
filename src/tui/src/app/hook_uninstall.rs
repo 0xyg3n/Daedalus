@@ -113,7 +113,8 @@ impl Plan {
         if backup["profile"] != json!(receipt.profile) || backup["after_sha"] != receipt.after_sha {
             return Err("Installation backup does not match receipt".into());
         }
-        let original_profile = read(&receipt.profile)?.ok_or("Installed profile is missing")?;
+        let original_profile =
+            hook_install::read_profile(&receipt.profile)?.ok_or("Installed profile is missing")?;
         if hash(&original_profile) != receipt.after_sha {
             return Err("Profile changed after installation; removal preserves manual edits and requires review outside this operation".into());
         }
@@ -179,13 +180,14 @@ impl Plan {
             .parent()
             .ok_or("Profile has no parent")?;
         let _profile_lock = if parent != directory {
-            Some(hook_install::lock(parent)?)
+            Some(hook_install::lock_profile(parent)?)
         } else {
             None
         };
         if read(&self.receipt_path)?.as_ref() != Some(&self.receipt_bytes)
             || read(&self.backup_path)?.as_ref() != Some(&self.backup_bytes)
-            || read(&self.removal.profile)?.as_ref() != Some(&self.removal.original_profile)
+            || hook_install::read_profile(&self.removal.profile)?.as_ref()
+                != Some(&self.removal.original_profile)
             || read(&self.removal.registration)?.as_ref()
                 != Some(&self.removal.original_registration)
         {
@@ -214,7 +216,7 @@ impl Plan {
 }
 fn restore_profile(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
     match bytes {
-        Some(bytes) => layouts::write_private(path, bytes),
+        Some(bytes) => hook_install::write_profile(path, bytes),
         None => fs::remove_file(path).map_err(|_| "Cannot remove managed profile".into()),
     }
 }
@@ -236,23 +238,23 @@ pub fn rollback(path: &Path) -> Result<()> {
     let _lock = hook_install::lock(&removal.directory)?;
     let parent = removal.profile.parent().ok_or("Profile has no parent")?;
     let _profile_lock = if parent != removal.directory {
-        Some(hook_install::lock(parent)?)
+        Some(hook_install::lock_profile(parent)?)
     } else {
         None
     };
-    if read(&removal.profile)? != removal.removed_profile
+    if hook_install::read_profile(&removal.profile)? != removal.removed_profile
         || read(&removal.registration)?.as_ref() != Some(&removal.disabled_registration)
     {
         return Err("Removed profile or registration changed; preserve subsequent edits".into());
     }
-    layouts::write_private(&removal.profile, &removal.original_profile)?;
+    hook_install::write_profile(&removal.profile, &removal.original_profile)?;
     layouts::write_private(&removal.registration, &removal.original_registration).map_err(|_| {
         "Profile restored but registration restoration is unconfirmed; inspect before retrying"
             .into()
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
     pub(crate) struct Fixture {

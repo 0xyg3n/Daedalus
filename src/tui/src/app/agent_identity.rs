@@ -12,19 +12,24 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::{
+    fd::{AsRawFd, FromRawFd, OwnedFd},
+    unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
+        net::UnixStream,
+    },
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
-    io::{Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::{
-            ffi::OsStrExt,
-            fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
-            net::UnixStream,
-        },
-    },
+    io::Write,
     path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use std::{
+    fs::{self, OpenOptions},
+    io::Read,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -78,7 +83,9 @@ pub struct Native<'a> {
     pub terminals: &'a Terminals,
     pub herdr_sockets: BTreeMap<String, PathBuf>,
 }
+#[cfg(unix)]
 static REQUEST: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
 fn connect_socket(path: &Path) -> Result<UnixStream> {
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -153,6 +160,7 @@ fn connect_socket(path: &Path) -> Result<UnixStream> {
     Ok(stream)
 }
 impl Native<'_> {
+    #[cfg(unix)]
     fn rpc(&self, server: &str, method: &str, params: Value) -> Result<Value> {
         let path = self
             .herdr_sockets
@@ -488,11 +496,15 @@ impl Plan {
 struct Lock(std::fs::File);
 impl Drop for Lock {
     fn drop(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
     }
 }
+#[cfg(unix)]
 fn lock(directory: &Path) -> Result<Lock> {
     let path = directory.join("armonia.sqlite3.organization.lock");
     layouts::check_path(&path)?;
@@ -747,7 +759,10 @@ fn local_scope(directory: &Path) -> Result<(Scope, String)> {
     let bytes = super::telegram_config::read_private(&directory.join("control.json"), 1048576)?
         .ok_or("Instance configuration missing")?;
     let config = super::config::ControlConfig::parse(&bytes)?;
+    #[cfg(unix)]
     let actor = format!("uid:{}", unsafe { libc::geteuid() });
+    #[cfg(windows)]
+    let actor = crate::platform::current_identity().map_err(|e| e.to_string())?;
     Ok((
         Scope {
             instance: config.agent_name,
@@ -843,7 +858,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<()> {
         .map_err(|_| "Cannot write identity result".into())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     struct Fixture(PathBuf);
@@ -975,9 +990,11 @@ mod tests {
     fn changed_metadata_socket_invalidates_review_without_mutation() {
         let f = Fixture::new();
         let mut backend = Mock::new();
-        backend.observation.metadata_socket = Some("/tmp/fixture/old.sock".into());
+        backend.observation.metadata_socket =
+            Some(crate::test_support::path("/tmp/fixture/old.sock").into());
         let plan = f.plan(&mut backend, "socket-event");
-        backend.observation.metadata_socket = Some("/tmp/fixture/new.sock".into());
+        backend.observation.metadata_socket =
+            Some(crate::test_support::path("/tmp/fixture/new.sock").into());
         assert!(apply(&f.0, plan, &mut backend).is_err());
         assert_eq!(backend.calls, 0);
     }
@@ -1143,4 +1160,23 @@ mod tests {
         assert_eq!(scope.bot, "local-cli");
         assert!(actor.starts_with("uid:"));
     }
+}
+
+#[cfg(windows)]
+impl Native<'_> {
+    fn rpc(&self, _server: &str, _method: &str, _params: Value) -> Result<Value> {
+        Err("Optional Armonia metadata socket integration is not available on Windows".into())
+    }
+}
+
+#[cfg(windows)]
+fn lock(directory: &Path) -> Result<Lock> {
+    let file = crate::platform::open_private(
+        &directory.join("armonia.sqlite3.organization.lock"),
+        true,
+        true,
+    )
+    .map_err(|e| e.to_string())?;
+    crate::platform::lock_exclusive(&file, true).map_err(|_| "Armonia organization is busy")?;
+    Ok(Lock(file))
 }

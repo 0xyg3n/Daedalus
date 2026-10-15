@@ -279,6 +279,20 @@ impl ProcessPlan {
     }
 }
 
+/// Known executable suffixes only; never resolve from the current directory.
+pub(crate) fn executable_candidates(directory: &Path, name: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        [".exe", ".com", ".cmd", ".bat", ""]
+            .iter()
+            .map(|extension| directory.join(format!("{name}{extension}")))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![directory.join(name)]
+    }
+}
 pub fn executable(tool: &Tool, environment: &BTreeMap<String, String>) -> Option<PathBuf> {
     let mut directories: Vec<PathBuf> =
         std::env::split_paths(environment.get("PATH").map(String::as_str).unwrap_or(""))
@@ -286,6 +300,7 @@ pub fn executable(tool: &Tool, environment: &BTreeMap<String, String>) -> Option
             .collect();
     if let Some(home) = environment
         .get("HOME")
+        .or_else(|| environment.get("USERPROFILE"))
         .map(Path::new)
         .filter(|p| p.is_absolute())
     {
@@ -296,7 +311,7 @@ pub fn executable(tool: &Tool, environment: &BTreeMap<String, String>) -> Option
         .flat_map(|name| {
             directories
                 .iter()
-                .map(move |directory| directory.join(name))
+                .flat_map(move |directory| executable_candidates(directory, name))
         })
         .find(|path| {
             std::fs::metadata(path).is_ok_and(|metadata| {
@@ -326,6 +341,7 @@ pub fn profile_directory(
         PathBuf::from(
             environment
                 .get("HOME")
+                .or_else(|| environment.get("USERPROFILE"))
                 .ok_or("HOME is required to select a native profile")?,
         )
         .join(tool.default_profile)
@@ -349,7 +365,7 @@ fn child_environment(
 ) -> Result<BTreeMap<String, String>, String> {
     // No provider tokens, Telegram routes, sibling harness profiles, loader injection,
     // shell startup hooks or permission-bypass variables cross this boundary.
-    const RUNTIME: [&str; 18] = [
+    const RUNTIME: [&str; 24] = [
         "HOME",
         "PATH",
         "TERM",
@@ -368,6 +384,12 @@ fn child_environment(
         "TMP",
         "TEMP",
         "TERM_PROGRAM",
+        "USERPROFILE",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "LOCALAPPDATA",
+        "APPDATA",
     ];
     let mut child: BTreeMap<String, String> = environment
         .iter()
@@ -380,6 +402,7 @@ fn child_environment(
     // reads its global config from the profile instead of ~/.claude.json.
     let default = environment
         .get("HOME")
+        .or_else(|| environment.get("USERPROFILE"))
         .map(|home| Path::new(home).join(tool.default_profile));
     if default.as_deref() != Some(profile.as_path()) {
         child.insert(
@@ -494,13 +517,16 @@ mod tests {
     use super::*;
     fn env() -> BTreeMap<String, String> {
         [
-            ("HOME", "/tmp/test-home"),
-            ("PATH", "/usr/bin"),
+            ("HOME", crate::test_support::path("/tmp/test-home")),
+            ("PATH", crate::test_support::path("/usr/bin")),
             ("TERM", "xterm-256color"),
             ("TELEGRAM_BOT_TOKEN", "private-token"),
-            ("CODEX_HOME", "/tmp/sibling"),
-            ("CLAUDE_CONFIG_DIR", "/tmp/claude-default"),
-            ("LD_PRELOAD", "/tmp/injected"),
+            ("CODEX_HOME", crate::test_support::path("/tmp/sibling")),
+            (
+                "CLAUDE_CONFIG_DIR",
+                crate::test_support::path("/tmp/claude-default"),
+            ),
+            ("LD_PRELOAD", crate::test_support::path("/tmp/injected")),
             ("OPENAI_API_KEY", "wrong-account"),
         ]
         .into_iter()
@@ -515,8 +541,8 @@ mod tests {
             assert!(!tool.methods.is_empty());
             let plan = launch_plan(
                 &tool,
-                Path::new("/usr/bin/native"),
-                Path::new("/tmp/work"),
+                Path::new(crate::test_support::path("/usr/bin/native")),
+                Path::new(crate::test_support::path("/tmp/work")),
                 &env(),
                 &BTreeMap::new(),
             )
@@ -531,13 +557,16 @@ mod tests {
         let tool = tool("claude").unwrap();
         let plan = launch_plan(
             &tool,
-            Path::new("/usr/bin/claude"),
-            Path::new("/tmp/work"),
+            Path::new(crate::test_support::path("/usr/bin/claude")),
+            Path::new(crate::test_support::path("/tmp/work")),
             &env(),
             &BTreeMap::new(),
         )
         .unwrap();
-        assert_eq!(plan.environment["CLAUDE_CONFIG_DIR"], "/tmp/claude-default");
+        assert_eq!(
+            plan.environment["CLAUDE_CONFIG_DIR"],
+            crate::test_support::path("/tmp/claude-default")
+        );
         for key in [
             "TELEGRAM_BOT_TOKEN",
             "CODEX_HOME",
@@ -549,38 +578,50 @@ mod tests {
         assert!(plan.args.is_empty());
         assert!(!format!("{plan:?}").contains("private-token"));
         let command = plan.command();
-        assert_eq!(command.get_program(), "/usr/bin/claude");
+        assert_eq!(
+            command.get_program(),
+            crate::test_support::path("/usr/bin/claude")
+        );
         assert_eq!(command.get_args().count(), 0);
     }
     #[test]
     fn xdg_profiles_are_scoped_without_mutating_caller() {
         let environment = env();
         let profiles = [
-            ("cursor".into(), "/tmp/cursor config".into()),
-            ("opencode".into(), "/tmp/opencode-data".into()),
+            (
+                "cursor".into(),
+                crate::test_support::path("/tmp/cursor config").into(),
+            ),
+            (
+                "opencode".into(),
+                crate::test_support::path("/tmp/opencode-data").into(),
+            ),
         ]
         .into();
         let cursor = tool("cursor").unwrap();
         let plan = login_plan(
             &cursor,
             "link",
-            Path::new("/usr/bin/cursor-agent"),
-            Path::new("/tmp"),
+            Path::new(crate::test_support::path("/usr/bin/cursor-agent")),
+            Path::new(crate::test_support::path("/tmp")),
             &environment,
             &profiles,
         )
         .unwrap();
-        assert_eq!(plan.environment["XDG_CONFIG_HOME"], "/tmp/cursor config");
+        assert_eq!(
+            plan.environment["XDG_CONFIG_HOME"],
+            crate::test_support::path("/tmp/cursor config")
+        );
         assert_eq!(plan.environment["NO_OPEN_BROWSER"], "1");
         assert!(!environment.contains_key("XDG_CONFIG_HOME"));
         assert_eq!(
             account_directory(&cursor, &environment, &profiles).unwrap(),
-            Path::new("/tmp/cursor config/cursor")
+            Path::new(crate::test_support::path("/tmp/cursor config/cursor"))
         );
         let codex = launch_plan(
             &tool("codex").unwrap(),
-            Path::new("/usr/bin/codex"),
-            Path::new("/tmp"),
+            Path::new(crate::test_support::path("/usr/bin/codex")),
+            Path::new(crate::test_support::path("/tmp")),
             &environment,
             &profiles,
         )
@@ -592,8 +633,8 @@ mod tests {
         let plan = login_plan(
             &tool("codex").unwrap(),
             "api-key",
-            Path::new("/usr/bin/codex"),
-            Path::new("/tmp"),
+            Path::new(crate::test_support::path("/usr/bin/codex")),
+            Path::new(crate::test_support::path("/tmp")),
             &env(),
             &BTreeMap::new(),
         )
@@ -607,7 +648,7 @@ mod tests {
         let tool = tool("codex").unwrap();
         let caps = checkpoint_capabilities(
             &tool,
-            Path::new("/usr/bin/codex"),
+            Path::new(crate::test_support::path("/usr/bin/codex")),
             Some("Commands:\n resume Resume a session\n fork Fork a session"),
         )
         .unwrap();
@@ -632,7 +673,7 @@ mod tests {
         assert_eq!(plan.args, ["fork", "session-123"]);
         let without_fork = checkpoint_capabilities(
             &tool,
-            Path::new("/usr/bin/codex"),
+            Path::new(crate::test_support::path("/usr/bin/codex")),
             Some("Commands:\n resume Resume a session"),
         )
         .unwrap();
@@ -655,12 +696,15 @@ mod tests {
         environment.remove("CODEX_HOME");
         for id in ["claude", "codex"] {
             let tool = tool(id).unwrap();
-            let default = format!("/tmp/test-home/{}", tool.default_profile);
+            let default = Path::new(crate::test_support::path("/tmp/test-home"))
+                .join(tool.default_profile)
+                .to_string_lossy()
+                .into_owned();
             for profiles in [BTreeMap::new(), [(id.to_string(), default.clone())].into()] {
                 let plan = launch_plan(
                     &tool,
-                    Path::new("/usr/bin/native"),
-                    Path::new("/tmp/work"),
+                    Path::new(crate::test_support::path("/usr/bin/native")),
+                    Path::new(crate::test_support::path("/tmp/work")),
                     &environment,
                     &profiles,
                 )
@@ -670,34 +714,48 @@ mod tests {
                     "{id}: {profiles:?}"
                 );
             }
-            let other: BTreeMap<String, String> = [(id.to_string(), "/tmp/other".into())].into();
+            let other: BTreeMap<String, String> = [(
+                id.to_string(),
+                crate::test_support::path("/tmp/other").into(),
+            )]
+            .into();
             let plan = launch_plan(
                 &tool,
-                Path::new("/usr/bin/native"),
-                Path::new("/tmp/work"),
+                Path::new(crate::test_support::path("/usr/bin/native")),
+                Path::new(crate::test_support::path("/tmp/work")),
                 &environment,
                 &other,
             )
             .unwrap();
-            assert_eq!(plan.environment[tool.profile_variable], "/tmp/other");
+            assert_eq!(
+                plan.environment[tool.profile_variable],
+                crate::test_support::path("/tmp/other")
+            );
         }
     }
     #[test]
     fn paths_stay_literal_and_capabilities_require_evidence() {
-        let profiles = [("claude".into(), "/tmp/$(touch nope);profile".into())].into();
+        let profiles = [(
+            "claude".into(),
+            crate::test_support::path("/tmp/$(touch nope);profile").into(),
+        )]
+        .into();
         let tool = tool("claude").unwrap();
         let plan = launch_plan(
             &tool,
-            Path::new("/tmp/bin with space/claude"),
-            Path::new("/tmp"),
+            Path::new(crate::test_support::path("/tmp/bin with space/claude")),
+            Path::new(crate::test_support::path("/tmp")),
             &env(),
             &profiles,
         )
         .unwrap();
-        assert_eq!(plan.command().get_program(), "/tmp/bin with space/claude");
+        assert_eq!(
+            plan.command().get_program(),
+            crate::test_support::path("/tmp/bin with space/claude")
+        );
         assert_eq!(
             plan.environment["CLAUDE_CONFIG_DIR"],
-            "/tmp/$(touch nope);profile"
+            crate::test_support::path("/tmp/$(touch nope);profile")
         );
         assert!(
             !checkpoint_capabilities(&tool, &plan.binary, None)
@@ -712,7 +770,7 @@ mod tests {
         assert!(
             !checkpoint_capabilities(
                 &super::tool("hermes").unwrap(),
-                Path::new("/usr/bin/hermes"),
+                Path::new(crate::test_support::path("/usr/bin/hermes")),
                 Some("--resume --fork-session")
             )
             .unwrap()
@@ -722,7 +780,7 @@ mod tests {
     #[test]
     fn pi_capabilities_require_native_session_flags_not_other_provider_flags() {
         let tool = tool("pi").unwrap();
-        let binary = Path::new("/fixture/pi");
+        let binary = Path::new(crate::test_support::path("/fixture/pi"));
         let unknown = checkpoint_capabilities(&tool, binary, None).unwrap();
         assert!(!unknown.resume && !unknown.native_fork && !unknown.handoff);
         let foreign =

@@ -140,7 +140,7 @@ impl Feeder for NativeFeeder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::{
@@ -423,7 +423,7 @@ mod tests {
         ));
         let sent = fs::read_to_string(f.directory.join("sent")).unwrap();
         assert_eq!(sent.lines().count(), 1);
-        let status = std::process::Command::new("/bin/sh")
+        let status = std::process::Command::new(crate::test_support::path("/bin/sh"))
             .arg("-c")
             .arg(&sent)
             .status()

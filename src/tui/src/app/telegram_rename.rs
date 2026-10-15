@@ -353,7 +353,7 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn caller() -> Caller {
@@ -371,7 +371,7 @@ mod tests {
         }
     }
     fn pane() -> Value {
-        json!({"backend":"tmux","socket":"/tmp/test.sock","session_id":"$1","session":"project","window_id":"@1","pane_id":"%1","terminal_id":"v2:100:111:200:222"})
+        json!({"backend":"tmux","socket":crate::test_support::path("/tmp/test.sock"),"session_id":"$1","session":"project","window_id":"@1","pane_id":"%1","terminal_id":"v2:100:111:200:222"})
     }
     fn inventory() -> Value {
         json!({"panes":[pane()],"clients":[{"session_id":"$1","pid":"333","start_ticks":"444","client":"/dev/pts/1","tty":"/dev/pts/1"}]})

@@ -174,23 +174,30 @@ mod tests {
             parse(&args(&[
                 "select",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--chat",
                 "42",
                 "--actor",
                 "7",
                 "--target",
-                "/tmp/target",
+                crate::test_support::path("/tmp/target"),
                 "--apply"
             ]))
             .is_err()
         );
-        assert!(parse(&args(&["active", "--config-dir", "/tmp/fixture"])).is_err());
+        assert!(
+            parse(&args(&[
+                "active",
+                "--config-dir",
+                crate::test_support::path("/tmp/fixture")
+            ]))
+            .is_err()
+        );
         assert!(
             parse(&args(&[
                 "list",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--actor",
                 "7"
             ]))
@@ -200,13 +207,13 @@ mod tests {
             parse(&args(&[
                 "select",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--chat",
                 "42",
                 "--actor",
                 "0",
                 "--target",
-                "/tmp/target"
+                crate::test_support::path("/tmp/target")
             ]))
             .is_err()
         );
@@ -214,13 +221,13 @@ mod tests {
             parse(&args(&[
                 "select",
                 "--config-dir",
-                "/tmp/fixture",
+                crate::test_support::path("/tmp/fixture"),
                 "--chat",
                 "42",
                 "--actor",
                 "7",
                 "--target",
-                "/tmp/target"
+                crate::test_support::path("/tmp/target")
             ]))
             .is_ok()
         );
@@ -237,7 +244,10 @@ mod tests {
         ));
         super::super::setup::SetupPlan::fresh(
             &root,
-            super::super::config::ControlConfig::fresh(Path::new("/tmp")).unwrap(),
+            super::super::config::ControlConfig::fresh(Path::new(crate::test_support::path(
+                "/tmp",
+            )))
+            .unwrap(),
         )
         .unwrap()
         .apply()
@@ -256,7 +266,7 @@ mod tests {
                 generation: "generation".into(),
             },
             label: "fixture".into(),
-            workspace: "/tmp".into(),
+            workspace: crate::test_support::path("/tmp").into(),
             harness: "claude".into(),
             conversation: Some("conversation".into()),
             available: true,
@@ -341,7 +351,7 @@ mod tests {
                 generation: "generation".into(),
             },
             label: "fixture".into(),
-            workspace: "/tmp".into(),
+            workspace: crate::test_support::path("/tmp").into(),
             harness: "claude".into(),
             conversation: Some("conversation".into()),
             available: true,

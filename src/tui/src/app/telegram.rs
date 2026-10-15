@@ -78,17 +78,23 @@ impl Files for PrivateFiles {
             })
             .unwrap_or_else(|| "bin".into());
         let path = self.directory.join(format!("{sha}.{extension}"));
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.directory)
-            .map_err(|_| "Cannot create private attachment directory")?;
-        let meta = std::fs::metadata(&self.directory)
-            .map_err(|_| "Cannot inspect attachment directory")?;
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-            return Err("Attachment directory must be private and owned by this user".into());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&self.directory)
+                .map_err(|_| "Cannot create private attachment directory")?;
+            let meta = std::fs::metadata(&self.directory)
+                .map_err(|_| "Cannot inspect attachment directory")?;
+            if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+                return Err("Attachment directory must be private and owned by this user".into());
+            }
         }
+        #[cfg(windows)]
+        crate::platform::ensure_private_dir(&self.directory)
+            .map_err(|_| "Cannot create private owner-scoped attachment directory")?;
         if let Some(existing) = layouts::read_private_limit(&path, FILE_LIMIT as u64)? {
             if existing != bytes {
                 return Err("Attachment content conflicts with existing file".into());
@@ -1211,7 +1217,7 @@ mod tests {
     impl Files for MockFiles {
         fn save(&mut self, name: &str, bytes: &[u8]) -> Result<Attachment> {
             Ok(Attachment {
-                path: Path::new("/tmp/fixture.bin").into(),
+                path: Path::new(crate::test_support::path("/tmp/fixture.bin")).into(),
                 sha256: "hash".into(),
                 bytes: bytes.len(),
                 name: name.into(),
@@ -1241,7 +1247,7 @@ mod tests {
         let registration = Registration {
             version: 1,
             id: "fixture".into(),
-            directory: "/tmp/daedalus-hook-test".into(),
+            directory: crate::test_support::path("/tmp/daedalus-hook-test").into(),
             scope: crate::core::goal_store::Scope {
                 instance: "example".into(),
                 terminal: feeder.target,
@@ -1439,7 +1445,7 @@ mod tests {
     fn fixture() -> (Engine, MockApi, MockFeeder) {
         let target = TerminalId {
             backend: Backend::Tmux,
-            endpoint: "/tmp/mock.sock".into(),
+            endpoint: crate::test_support::path("/tmp/mock.sock").into(),
             pane: "%1".into(),
             generation: "generation".into(),
         };
@@ -1928,6 +1934,7 @@ mod tests {
             1
         );
     }
+    #[cfg(unix)]
     #[test]
     fn attachment_store_accepts_large_files_without_using_untrusted_names_as_paths() {
         use std::os::unix::fs::MetadataExt;

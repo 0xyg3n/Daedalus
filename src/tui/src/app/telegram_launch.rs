@@ -217,7 +217,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn pane() -> Value {
-        json!({"backend":"tmux","socket":"/tmp/fixture.sock","pane_id":"%7","terminal_id":"generation","cwd":"/tmp/project","agent_session":{"kind":"id","value":"session"}})
+        json!({"backend":"tmux","socket":crate::test_support::path("/tmp/fixture.sock"),"pane_id":"%7","terminal_id":"generation","cwd":crate::test_support::path("/tmp/project"),"agent_session":{"kind":"id","value":"session"}})
     }
     #[test]
     fn private_plan_is_never_rendered_and_tampering_is_rejected() {
@@ -242,16 +242,29 @@ mod tests {
         reviewed.selection.harness = "grok".into();
         reviewed.plan["request"]["harness"] = "grok".into();
         reviewed.plan["hook"]["spec"]["registration"]["scope"]["harness"] = "grok".into();
-        reviewed.plan["hook"]["spec"]["hook_profile"] = "/tmp/grok-profile".into();
+        reviewed.plan["hook"]["spec"]["hook_profile"] =
+            crate::test_support::path("/tmp/grok-profile").into();
         let plan: super::super::pane_launch::Plan =
             serde_json::from_value(reviewed.plan.clone()).unwrap();
         reviewed.digest = plan.fingerprint().unwrap();
         let description = reviewed.description().unwrap();
-        assert!(description.contains("verified turn-bound goal continuation"));
-        assert!(description.contains(
-            "Create-only native hook file: /tmp/grok-profile/hooks/daedalus-fixture.json"
-        ));
-        assert!(description.contains("feeder readiness remains unavailable"));
+        #[cfg(unix)]
+        {
+            assert!(description.contains("verified turn-bound goal continuation"));
+            assert!(description.contains(&format!(
+                "Create-only native hook file: {}",
+                std::path::Path::new(crate::test_support::path("/tmp/grok-profile"))
+                    .join("hooks").join("daedalus-fixture.json")
+                    .display()
+            )));
+            assert!(description.contains("feeder readiness remains unavailable"));
+        }
+        #[cfg(windows)]
+        {
+            let failure = super::super::hook_launch::prepare(plan.hook.spec.clone(), 0)
+                .expect_err("Windows guided Grok launch must fail closed");
+            assert!(failure.contains("Windows"));
+        }
         assert!(!description.contains("DO_NOT_RENDER_PRIVATE_PLAN"));
     }
     #[test]
@@ -290,8 +303,8 @@ mod tests {
         parent.verify(&original).unwrap();
         for (key, value) in [
             ("terminal_id", "new-generation"),
-            ("cwd", "/tmp/other"),
-            ("socket", "/tmp/other.sock"),
+            ("cwd", crate::test_support::path("/tmp/other")),
+            ("socket", crate::test_support::path("/tmp/other.sock")),
         ] {
             let mut changed = original.clone();
             changed[key] = value.into();

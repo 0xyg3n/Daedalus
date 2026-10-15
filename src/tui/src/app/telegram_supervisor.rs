@@ -4,6 +4,8 @@ use super::telegram_config::{self, ServiceConfig};
 use crate::core::layouts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::{
     fs::{self, OpenOptions},
     io::Read,
@@ -11,7 +13,6 @@ use std::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawFd,
     },
-    path::{Path, PathBuf},
 };
 pub type Result<T> = std::result::Result<T, String>;
 const STATE: &str = "telegram-runtime.json";
@@ -41,6 +42,7 @@ pub struct Observation {
     pub state: &'static str,
     pub process: Option<Record>,
 }
+#[cfg(unix)]
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -64,6 +66,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+#[cfg(unix)]
 fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     if pid == 0 {
         return Err("Invalid service process".into());
@@ -84,6 +87,7 @@ fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     let alive = fields.first().is_some_and(|s| !matches!(*s, "Z" | "X"));
     Ok((ticks, alive))
 }
+#[cfg(unix)]
 fn boot(proc_root: &Path) -> Result<String> {
     // boot_id is kernel-owned rather than process-owned.
     let value = fs::read_to_string(proc_root.join("sys/kernel/random/boot_id"))
@@ -94,6 +98,7 @@ fn boot(proc_root: &Path) -> Result<String> {
     }
     Ok(value.into())
 }
+#[cfg(unix)]
 fn verify(record: &Record, proc_root: &Path) -> Result<()> {
     if record.version != 1 || record.boot_id != boot(proc_root)? {
         return Err("Service belongs to another system boot".into());
@@ -123,6 +128,7 @@ fn verify(record: &Record, proc_root: &Path) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn held(directory: &Path) -> Result<bool> {
     let path = directory.join(".telegram-service.lock");
     layouts::check_path(&path)?;
@@ -192,6 +198,7 @@ pub(crate) fn inspect_at(directory: &Path, proc_root: &Path) -> Result<Observati
     })
 }
 /// Called by the service itself only while its Owner guards remain held.
+#[cfg(unix)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
     let pid = std::process::id();
     let proc_root = Path::new("/proc");
@@ -215,6 +222,7 @@ pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<
         &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
     )
 }
+#[cfg(unix)]
 pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
     use std::os::fd::{FromRawFd, OwnedFd};
     if expected.directory != directory {
@@ -251,6 +259,7 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
         json!({"state":"submitted","operation":"stop","message":"Stop requested. Running state remains observed until the process exits."}),
     )
 }
+#[cfg(unix)]
 pub fn start(directory: &Path) -> Result<Value> {
     use std::os::unix::process::CommandExt;
     let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
@@ -326,7 +335,232 @@ pub fn start(directory: &Path) -> Result<Value> {
     )
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn verify(record: &Record, _: &Path) -> Result<()> {
+    let process = crate::platform::process_identity(record.pid)
+        .map_err(|_| "Service process is unavailable")?;
+    let owner =
+        crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
+    if record.version != 1
+        || record.boot_id != owner
+        || process.owner != owner
+        || record.start_ticks != process.creation_time
+        || record.executable != process.executable
+        || record.executable
+            != std::env::current_exe().map_err(|_| "Cannot inspect native executable")?
+    {
+        return Err("Service process identity changed".into());
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn held(directory: &Path) -> Result<bool> {
+    let path = directory.join(".telegram-service.lock");
+    let file = match crate::platform::open_private(&path, true, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("Cannot inspect service ownership".into()),
+    };
+    match crate::platform::lock_exclusive(&file, true) {
+        Ok(()) => {
+            crate::platform::unlock(&file).map_err(|_| "Cannot release owner probe")?;
+            Ok(false)
+        }
+        Err(error) if error.raw_os_error() == Some(33) => Ok(true),
+        Err(_) => Err("Cannot determine service ownership".into()),
+    }
+}
+#[cfg(windows)]
+pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
+    let process = crate::platform::process_identity(std::process::id())
+        .map_err(|_| "Cannot inspect service process")?;
+    let owner = crate::platform::current_identity().map_err(|_| "Cannot verify service owner")?;
+    if process.owner != owner {
+        return Err("Service owner changed".into());
+    }
+    let value = Record {
+        version: 1,
+        pid: process.pid,
+        start_ticks: process.creation_time,
+        boot_id: owner,
+        executable: process.executable,
+        directory: directory.into(),
+        instance: config.instance.clone(),
+        bot_id: config.bot_id,
+        phase,
+    };
+    layouts::write_private(
+        &directory.join(STATE),
+        &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
+    )
+}
+#[cfg(windows)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopRequest {
+    pid: u32,
+    start_ticks: u64,
+    instance: String,
+    directory: PathBuf,
+}
+#[cfg(windows)]
+pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
+    if expected.directory != directory || inspect(directory)?.process.as_ref() != Some(expected) {
+        return Err("Service changed; review stop again".into());
+    }
+    verify(expected, Path::new(""))?;
+    if !held(directory)? {
+        return Err("Service already released ownership".into());
+    }
+    let request = StopRequest {
+        pid: expected.pid,
+        start_ticks: expected.start_ticks,
+        instance: expected.instance.clone(),
+        directory: directory.into(),
+    };
+    layouts::write_private(
+        &directory.join("telegram-stop.json"),
+        &serde_json::to_vec(&request).map_err(|_| "Cannot encode stop request")?,
+    )?;
+    Ok(
+        json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Ownership remains observed until shutdown finishes."}),
+    )
+}
+#[cfg(unix)]
+pub fn stop_requested(_: &Path) -> Result<bool> {
+    Ok(false)
+}
+#[cfg(windows)]
+pub fn stop_requested(directory: &Path) -> Result<bool> {
+    let path = directory.join("telegram-stop.json");
+    let Some(bytes) = telegram_config::read_private(&path, 8192)? else {
+        return Ok(false);
+    };
+    let request: StopRequest =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private stop request")?;
+    let process = crate::platform::process_identity(std::process::id())
+        .map_err(|_| "Cannot inspect service process")?;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    let matches = request.pid == process.pid
+        && request.start_ticks == process.creation_time
+        && request.directory == directory
+        && request.instance == config.instance;
+    // Stale requests remain inert evidence. A subsequent reviewed stop replaces them.
+    if matches {
+        std::fs::remove_file(path).map_err(|_| "Cannot consume stop request")?;
+    }
+    Ok(matches)
+}
+#[cfg(windows)]
+pub fn start(directory: &Path) -> Result<Value> {
+    use std::os::windows::process::CommandExt;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    config.read_token()?;
+    config.check_registrations()?;
+    super::cutover::activation_check(directory)?;
+    if inspect(directory)?.state != "stopped" {
+        return Err("Service already owns or may be starting for this instance".into());
+    }
+    let path = directory.join("telegram-service.log");
+    let mut log = crate::platform::open_private(&path, true, true)
+        .map_err(|_| "Cannot open private service log")?;
+    use std::io::Seek;
+    log.seek(std::io::SeekFrom::End(0))
+        .map_err(|_| "Cannot position service log")?;
+    let mut command = std::process::Command::new(
+        std::env::current_exe().map_err(|_| "Cannot locate native executable")?,
+    );
+    command
+        .args(["telegram", "serve", "--config-dir"])
+        .arg(directory)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
+        .stderr(log)
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .env_clear();
+    for key in [
+        "PATH",
+        "SystemRoot",
+        "WINDIR",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "TEMP",
+        "TMP",
+        "PATHEXT",
+        "COMSPEC",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Cannot start native Telegram service")?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(
+        json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested; service ownership and transport identity are checked separately."}),
+    )
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn cooperative_stop_rejects_stale_process_and_keeps_ownership_until_release() {
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-supervisor-win-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::platform::ensure_private_dir(&directory).unwrap();
+        let global = directory.join("owners");
+        let config = ServiceConfig {
+            version: 1,
+            instance: "fixture".into(),
+            bot_id: 123,
+            token_file: directory.join("token"),
+            grants: vec![],
+            listen_chats: Default::default(),
+            registrations: vec![],
+            hook_bindings: vec![],
+        };
+        layouts::write_private(
+            &directory.join("telegram-service.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let owner =
+            super::super::telegram_service::Owner::acquire(&directory, &global, config.bot_id)
+                .unwrap();
+        record(&directory, &config, Phase::Running).unwrap();
+        let expected = inspect(&directory).unwrap().process.unwrap();
+        let mut stale = expected.clone();
+        stale.start_ticks += 1;
+        assert!(stop(&directory, &stale).is_err());
+        assert!(!stop_requested(&directory).unwrap());
+        stop(&directory, &expected).unwrap();
+        assert!(stop_requested(&directory).unwrap());
+        assert!(!stop_requested(&directory).unwrap());
+        assert_eq!(inspect(&directory).unwrap().state, "running");
+        drop(owner);
+        assert_eq!(inspect(&directory).unwrap().state, "stopped");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
@@ -385,14 +619,18 @@ mod tests {
             b"daedalus\0telegram\0serve\0--config-dir\0/private/instance\0",
         )
         .unwrap();
-        symlink("/bin/daedalus", proc_root.join("17/exe")).unwrap();
+        symlink(
+            crate::test_support::path("/bin/daedalus"),
+            proc_root.join("17/exe"),
+        )
+        .unwrap();
         let mut record = Record {
             version: 1,
             pid: 17,
             start_ticks: 42,
             boot_id: "test-boot".into(),
-            executable: "/bin/daedalus".into(),
-            directory: "/private/instance".into(),
+            executable: crate::test_support::path("/bin/daedalus").into(),
+            directory: crate::test_support::path("/private/instance").into(),
             instance: "test".into(),
             bot_id: 123,
             phase: Phase::Running,
