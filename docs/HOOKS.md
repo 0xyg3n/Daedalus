@@ -90,13 +90,16 @@ Reinstall the reviewed profile to enable this on an existing registration; simpl
 updating the binary does not change private provider profiles.
 
 `Stop` remains a continuation gate and never proves readiness. The idle ping
-usually arrives about a minute after the session settles, including failed or
-cancelled turns. It does not prove a successful task or queue a final answer.
-Daedalus correlates `promptId` with the newest accepted prompt, ignores older
-turns and subagents, and keeps a queued-input reservation until that exact input
-was observed. A session-scoped idle ping can initialize readiness, but cannot
-release an input that the harness has not acknowledged. Permission notifications
-do not mark the agent idle. Grok live Telegram streaming remains unavailable.
+usually arrives about a minute after the session settles, including after a
+failed or cancelled turn. It does not prove a successful task or queue a final
+answer. Daedalus correlates `promptId` with the newest accepted prompt, ignores
+older turns and subagents, and keeps a queued-input reservation until that exact
+input was observed. A session-scoped idle ping can initialize readiness when no
+prompt is open, and it can settle the newest prompt only after that prompt's
+Stop gate returned empty. It cannot mark the session idle while that prompt is
+still open, and it cannot release an input that the harness has not
+acknowledged. Permission notifications do not mark the agent idle. Grok live
+Telegram streaming remains unavailable.
 
 Contract: [Grok native hooks and busy/idle tracking](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md).
 

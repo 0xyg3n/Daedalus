@@ -2269,6 +2269,52 @@ mod tests {
         assert_eq!(readiness(&path, 10, 100).unwrap(), Readiness::Busy);
     }
     #[test]
+    fn session_scoped_idle_while_the_newest_prompt_is_open_stays_busy() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Grok;
+        fixture.0.goal_id = None;
+        fixture.0.events = vec![
+            EventKind::UserPromptSubmit,
+            EventKind::Stop,
+            EventKind::Settled,
+        ];
+        let path = install(&fixture.0).unwrap();
+        let invoke = |id: &str, mut data: Value, now| {
+            data["sessionId"] = "session".into();
+            execute(
+                serde_json::to_vec(&data).unwrap().as_slice(),
+                &fixture.0,
+                Some(id),
+                &mut Verified,
+                &mut FakeClock(now),
+            )
+        };
+        let idle = json!({"hookEventName":"notification","notificationType":"idle_prompt"});
+        invoke(
+            "prompt",
+            json!({"hookEventName":"user_prompt_submit","promptId":"current","prompt":"work"}),
+            1,
+        )
+        .unwrap();
+        invoke("stop", json!({"hookEventName":"stop","promptId":"current","reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"answer"}), 2).unwrap();
+        assert_eq!(readiness(&path, 2, 100).unwrap(), Readiness::Unknown);
+        invoke("settled", idle.clone(), 3).unwrap();
+        assert_eq!(readiness(&path, 3, 100).unwrap(), Readiness::Idle);
+        invoke(
+            "newer",
+            json!({"hookEventName":"user_prompt_submit","promptId":"new","prompt":"working"}),
+            4,
+        )
+        .unwrap();
+        assert_eq!(readiness(&path, 4, 100).unwrap(), Readiness::Busy);
+        invoke("stale-session-idle", idle.clone(), 5).unwrap();
+        assert_eq!(readiness(&path, 5, 100).unwrap(), Readiness::Busy);
+        invoke("stop-new", json!({"hookEventName":"stop","promptId":"new","reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"next"}), 6).unwrap();
+        assert_eq!(readiness(&path, 6, 100).unwrap(), Readiness::Unknown);
+        invoke("settled-new", idle, 7).unwrap();
+        assert_eq!(readiness(&path, 7, 100).unwrap(), Readiness::Idle);
+    }
+    #[test]
     fn grok_native_idle_is_deduplicated_across_notification_wrappers() {
         let mut fixture = Fixture::new();
         fixture.0.scope.harness = Harness::Grok;
@@ -3006,7 +3052,7 @@ pub enum Readiness {
 }
 fn readiness_connection(directory: &Path) -> Result<Connection> {
     let con = private_connection(directory, "hook-observations.sqlite3")?;
-    con.execute_batch("CREATE TABLE IF NOT EXISTS hook_observations(seq INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT NOT NULL,event_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,state TEXT NOT NULL,observed_at INTEGER NOT NULL,finalized INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS hook_observations_scope ON hook_observations(scope,seq); CREATE TABLE IF NOT EXISTS hook_reservations(scope TEXT PRIMARY KEY,correlation TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_prompt_receipts(scope TEXT PRIMARY KEY,correlation TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_prompt_turns(scope TEXT PRIMARY KEY,turn_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_active_turns(scope TEXT PRIMARY KEY,turn_id TEXT NOT NULL);").map_err(|_|Error::Persistence)?;
+    con.execute_batch("CREATE TABLE IF NOT EXISTS hook_observations(seq INTEGER PRIMARY KEY AUTOINCREMENT,scope TEXT NOT NULL,event_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,state TEXT NOT NULL,observed_at INTEGER NOT NULL,finalized INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS hook_observations_scope ON hook_observations(scope,seq); CREATE TABLE IF NOT EXISTS hook_reservations(scope TEXT PRIMARY KEY,correlation TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_prompt_receipts(scope TEXT PRIMARY KEY,correlation TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_prompt_turns(scope TEXT PRIMARY KEY,turn_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_active_turns(scope TEXT PRIMARY KEY,turn_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS hook_turn_release(scope TEXT PRIMARY KEY,turn_id TEXT NOT NULL);").map_err(|_|Error::Persistence)?;
     Ok(con)
 }
 fn observe_readiness(
@@ -3069,6 +3115,11 @@ fn observe_readiness(
             tx.execute("DELETE FROM hook_active_turns WHERE scope=?", [&scope])
                 .map_err(|_| Error::Persistence)?;
         }
+        if r.scope.harness == Harness::Grok {
+            // A new prompt opens the turn again. The previous Stop gate no longer applies.
+            tx.execute("DELETE FROM hook_turn_release WHERE scope=?", [&scope])
+                .map_err(|_| Error::Persistence)?;
+        }
     }
     let active_turn: Option<String> = tx
         .query_row(
@@ -3087,8 +3138,40 @@ fn observe_readiness(
     {
         return Ok(()); // A delayed older turn must not supersede the newest observation.
     }
+    if r.scope.harness == Harness::Grok
+        && kind == EventKind::Stop
+        && let Some(active) = active_turn.as_deref()
+        && native_turn(Harness::Grok, payload) == Some(active)
+    {
+        if matches!(reply, Some(Reply::Empty)) {
+            tx.execute("INSERT INTO hook_turn_release(scope,turn_id) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET turn_id=excluded.turn_id",params![scope,active]).map_err(|_|Error::Persistence)?;
+        } else if matches!(reply, Some(Reply::Json(_))) {
+            tx.execute(
+                "DELETE FROM hook_turn_release WHERE scope=? AND turn_id=?",
+                params![scope, active],
+            )
+            .map_err(|_| Error::Persistence)?;
+        }
+    }
+    let released_turn: Option<String> = tx
+        .query_row(
+            "SELECT turn_id FROM hook_turn_release WHERE scope=?",
+            [&scope],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| Error::Persistence)?;
+    // A promptless idle is the session backstop. It may initialize readiness, or
+    // settle the newest prompt after that prompt's Stop gate returned empty. It
+    // must not overwrite a newer prompt that is still open.
+    let open_prompt_blocks_session_idle = grok_idle
+        && native_turn(Harness::Grok, payload).is_none()
+        && active_turn
+            .as_deref()
+            .is_some_and(|active| released_turn.as_deref() != Some(active));
     let active_provider_stop = if r.scope.harness == Harness::Grok {
         grok_idle
+            && !open_prompt_blocks_session_idle
             && native_turn(Harness::Grok, payload)
                 .is_none_or(|turn| active_turn.as_deref().is_none_or(|active| active == turn))
     } else {
