@@ -1560,6 +1560,10 @@ impl Ui {
             return;
         }
         let current = self.selected_terminal();
+        // Working is a Wall preset, not an invisible filter on other views.
+        if view != View::Wall {
+            self.working_only = false;
+        }
         if view == View::Focus {
             self.previous = self.view;
             self.focus_target = current.clone().unwrap_or_default();
@@ -2496,5 +2500,14 @@ pub mod tests {
         ui.reveal("b");
         assert!(!ui.collapsed.contains("server"));
         assert!(ui.focus_tree_reveal);
+    }
+    #[test]
+    fn working_wall_scope_does_not_hide_idle_terminals_in_tiles() {
+        let mut ui = tiles_fixture();
+        ui.view = View::Wall;
+        ui.working_only = true;
+        ui.set_view(View::Tiles);
+        assert!(!ui.working_only);
+        assert_eq!(ui.tiles().len(), 3);
     }
 }

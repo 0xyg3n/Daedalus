@@ -88,7 +88,7 @@ pub struct Theme {
     /// The boot splash; `DAEDALUS_SPLASH=0` skips it.
     pub splash: bool,
     /// Idle seconds before the screensaver starts: `DAEDALUS_SCREENSAVER`,
-    /// 5 when unset, at least 3; 0 turns it off.
+    /// 15 when unset, at least 3; 0 turns it off.
     pub screensaver: u64,
     pub epoch: Instant,
 }
@@ -142,7 +142,7 @@ impl Theme {
             screensaver: match get("DAEDALUS_SCREENSAVER").map(|v| v.trim().parse::<u64>()) {
                 Some(Ok(0)) => 0,
                 Some(Ok(seconds)) => seconds.max(3),
-                _ => 5,
+                _ => 15,
             },
             epoch: Instant::now(),
         }
@@ -480,11 +480,11 @@ mod tests {
         assert!(theme(&[("DAEDALUS_SPLASH", "1")]).splash);
         assert!(!theme(&[("DAEDALUS_SPLASH", "0")]).splash);
         assert!(!theme(&[("TERM", "dumb")]).splash);
-        assert_eq!(theme(&[]).screensaver, 5);
+        assert_eq!(theme(&[]).screensaver, 15);
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "0")]).screensaver, 0);
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "1")]).screensaver, 3);
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "600")]).screensaver, 600);
-        assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "soon")]).screensaver, 5);
+        assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "soon")]).screensaver, 15);
     }
     #[test]
     fn ascii_icons_and_branches_are_single_ascii_cells() {

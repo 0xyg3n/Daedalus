@@ -392,8 +392,8 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     // Whatever draws a terminal preview this frame asks for it again.
     ui.preview_targets.clear();
     let workspaces = ui.page == WORKSPACES;
-    // Focus gives the terminal the full width; the sections stay one key away.
-    let side = wide && !(workspaces && ui.view == View::Focus);
+    // Preview views reserve the workspace width for terminals; sections stay one key away.
+    let side = wide && !(workspaces && ui.view != View::Tree);
     let body = if side {
         // At 100 columns or more, a sidebar of at most 40 leaves the page 60.
         let folded = ui.sizes.sidebar == 0;
@@ -964,8 +964,8 @@ fn quick_bar(f: &mut Frame, area: Rect, ui: &mut Ui, tail: &[(&str, &str, &str)]
     }
 }
 
-const TILE_WIDTH: u16 = 30;
-const TILE_HEIGHT: u16 = 7;
+const TILE_WIDTH: u16 = 44;
+const TILE_HEIGHT: u16 = 10;
 
 /// Grid of live terminal previews; only on-screen tiles are ever read.
 fn tiles_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
@@ -985,12 +985,11 @@ fn tiles_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ui,
         "Terminals",
     );
-    wall_scope(f, Rect::new(inner.x, inner.y + 1, inner.width, 1), ui);
     let grid = Rect::new(
         inner.x,
-        inner.y + 2,
+        inner.y + 1,
         inner.width,
-        inner.height.saturating_sub(3),
+        inner.height.saturating_sub(2),
     );
     quick_bar(
         f,
@@ -1012,7 +1011,7 @@ fn tiles_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let (columns, used_rows) = grid_shape(grid, shown.len(), fit_columns, fit_rows);
     ui.tile_columns = columns;
     ui.tiles_per_page = per_page;
-    let mut summary = format!(" {count} terminals");
+    let mut summary = format!(" {count} terminals · large previews");
     if pages > 1 {
         summary += &format!(" · page {}/{pages}", page + 1);
     }
@@ -1159,7 +1158,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         "Terminals",
     );
     wall_scope(f, Rect::new(inner.x, inner.y + 1, inner.width, 1), ui);
-    let grid = Rect::new(
+    let full_grid = Rect::new(
         inner.x,
         inner.y + 2,
         inner.width,
@@ -1173,7 +1172,53 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     );
     let count = tiles.len();
     ui.tile = ui.tile.min(count.saturating_sub(1));
-    grid_summary(f, area, ui, format!(" {count} terminals"));
+    grid_summary(f, area, ui, format!(" {count} terminals · overview"));
+    // Wall keeps a compact overview and a large selected screen side by side.
+    // Tiles instead spends its entire area on paged, readable previews.
+    let (grid, inspect) = if full_grid.width >= 110 && count > 1 {
+        let width = (full_grid.width / 3).clamp(36, 64);
+        let parts = split(
+            full_grid,
+            Direction::Horizontal,
+            vec![Constraint::Min(50), Constraint::Length(width)],
+        );
+        (parts[0], Some(parts[1]))
+    } else if count > 1
+        && full_grid.height >= 24
+        && count
+            <= usize::from((full_grid.width / WALL_CELL.0).max(1))
+                * usize::from((full_grid.height / 2 / WALL_CELL.1).max(1))
+    {
+        let parts = split(
+            full_grid,
+            Direction::Vertical,
+            vec![Constraint::Percentage(45), Constraint::Percentage(55)],
+        );
+        (parts[0], Some(parts[1]))
+    } else {
+        (full_grid, None)
+    };
+    let mut selected_rows = 0;
+    if let Some(inspect) = inspect {
+        f.render_widget(
+            Paragraph::new(" SELECTED TERMINAL ").style(theme.fg(Tone::Accent)),
+            Rect::new(inspect.x, inspect.y, inspect.width, 1),
+        );
+        if let Some(row) = tiles.get(ui.tile) {
+            selected_rows = draw_tile(
+                f,
+                Rect::new(
+                    inspect.x,
+                    inspect.y + 1,
+                    inspect.width,
+                    inspect.height.saturating_sub(1),
+                ),
+                ui,
+                row,
+                true,
+            );
+        }
+    }
     if tiles.is_empty() {
         no_tiles(f, grid, ui);
         return;
@@ -1182,14 +1227,22 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let fit_rows = (grid.height / WALL_CELL.1).max(1) as usize;
     if count > fit_columns * fit_rows {
         wall_chips(f, grid, ui, &tiles);
+        if selected_rows > 0 {
+            ui.preview_targets.push(tiles[ui.tile].id.clone());
+            ui.preview_rows = selected_rows;
+        }
         return;
     }
     let (columns, used_rows) = grid_shape(grid, count, fit_columns, fit_rows);
     ui.tile_columns = columns;
     ui.tiles_per_page = count;
     let cell_w = grid.width / columns as u16;
-    let cell_h = grid.height / used_rows as u16;
-    let mut most = 0;
+    let cell_h = if count == 1 {
+        grid.height
+    } else {
+        (grid.height / used_rows as u16).min(8)
+    };
+    let mut most = selected_rows;
     for (n, row) in tiles.iter().enumerate() {
         let (c, r) = ((n % columns) as u16, (n / columns) as u16);
         let x = grid.x + c * cell_w;
@@ -1650,6 +1703,11 @@ fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
         .style(theme.surface())
         .title(" Workspaces ");
     let inner = block.inner(area);
+    let count = ui.snapshot.tree.iter().filter(|n| n.tile.is_some()).count();
+    let block = block.title_bottom(Line::from(Span::styled(
+        format!(" {count} terminals · click to watch "),
+        theme.fg(Tone::Faint),
+    )));
     f.render_widget(block, area);
     ui.focus_tree_area = Some(area);
     let rows: Vec<_> = ui
@@ -1705,9 +1763,46 @@ fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 Tone::Text
             })
         };
-        let text = format!("{}{} {}", row.branch, badge, node.label);
+        let harness = node.tile.as_ref().map(|t| t.harness.as_str()).unwrap_or("");
+        let icon = if harness.is_empty() {
+            theme.icon(&node.kind)
+        } else {
+            theme.icon(harness)
+        };
+        let prefix = format!("{}{badge} {icon} ", row.branch);
+        let state = if branch {
+            ""
+        } else if node.live() {
+            if node.state == "blocked" || node.activity == "blocked" {
+                " !"
+            } else {
+                " +"
+            }
+        } else {
+            ""
+        };
+        let room = (inner.width as usize).saturating_sub(width(&prefix) + width(state));
+        let label = fit(&clean(&node.label), room, &theme);
+        let pad =
+            (inner.width as usize).saturating_sub(width(&prefix) + width(&label) + width(state));
         let hit = Rect::new(inner.x, inner.y + line as u16, inner.width, 1);
-        f.render_widget(Paragraph::new(clean(&text)).style(style), hit);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(label, style),
+                Span::styled(" ".repeat(pad), style),
+                Span::styled(
+                    state,
+                    if active {
+                        style
+                    } else {
+                        theme.fg(heat(ui, node).unwrap_or(Tone::Muted))
+                    },
+                ),
+            ]))
+            .style(style),
+            hit,
+        );
         ui.focus_tree_hits.push((hit, row.id.clone(), branch));
     }
 }
@@ -5509,5 +5604,50 @@ mod tests {
         ] {
             assert_eq!(harness_tone(name), tone, "{name}");
         }
+    }
+    #[test]
+    fn tiles_use_full_width_and_wall_has_distinct_overview_and_inspection() {
+        let mut tiles = workspace(Theme::default(), View::Tiles);
+        let tiled = text(&render(&mut tiles, 160, 44));
+        assert!(tiles.tile_hits.iter().map(|(r, _)| r.x).min().unwrap() < 5);
+        assert!(!tiled.contains("SELECTED TERMINAL"));
+        assert!(tiles.tile_hits.iter().all(|(r, _)| r.height >= TILE_HEIGHT));
+        let mut wall = workspace(Theme::default(), View::Wall);
+        let overview = text(&render(&mut wall, 160, 44));
+        assert!(overview.contains("SELECTED TERMINAL"));
+        assert_eq!(wall.tile_hits.len(), tiles.tiles().len());
+        assert!(wall.tile_hits.iter().all(|(r, _)| r.height <= 8));
+        assert!(
+            wall.preview_rows > 8,
+            "selected inspection uses the full height"
+        );
+        assert!(wall.tile_hits.iter().all(|(r, _)| r.right() < 120));
+        let narrow = text(&render(&mut wall, 90, 44));
+        assert!(
+            narrow.contains("SELECTED TERMINAL"),
+            "narrow Wall stacks the selected screen"
+        );
+        assert!(wall.tile_hits.iter().all(|(r, _)| r.height <= 8));
+    }
+    #[test]
+    fn focus_outline_shows_harness_icons_and_working_status() {
+        let mut ui = workspace(Theme::default(), View::Focus);
+        let node = ui.snapshot.tree.iter_mut().find(|n| n.id == "a").unwrap();
+        node.state = "working".into();
+        node.tile.as_mut().unwrap().harness = "claude".into();
+        render(&mut ui, 140, 40);
+        assert!(
+            ui.focus_tree_hits
+                .iter()
+                .any(|(_, id, branch)| id == "a" && !branch)
+        );
+        let area = ui.focus_tree_area.unwrap();
+        let buffer = render(&mut ui, 140, 40);
+        let outline: String = (area.top()..area.bottom())
+            .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        assert!(outline.contains(ui.theme.icon("claude")));
+        assert!(outline.contains('+'));
     }
 }

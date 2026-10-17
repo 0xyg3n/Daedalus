@@ -420,7 +420,11 @@ impl Picture {
             return;
         }
         self.prepare(screen.right(), screen.bottom(), frame, SPLASH_FEATHER);
-        let glitch = if animated { burst(t) } else { None };
+        let glitch = if animated {
+            burst(t).map(|(seed, strength)| (seed, strength * 0.25))
+        } else {
+            None
+        };
         let fade = if animated { smooth(t / 1.2) } else { 1.0 };
         let rows = f32::from(screen.bottom()) * 2.0;
         let roll = (t * 0.11).fract();
@@ -431,13 +435,13 @@ impl Picture {
                     let (mut c, cover) = self.glitched(i, j, glitch);
                     // Scanlines: every other sub-pixel row a little darker.
                     if j % 2 == 1 {
-                        c = theme::mix(c, (0, 0, 0), 0.14);
+                        c = theme::mix(c, (0, 0, 0), 0.04);
                     }
                     // A light rolls down, faint over the empty background.
                     if animated {
                         let v = j as f32 / rows;
                         let band = (-((v - roll) / 0.025).powi(2)).exp();
-                        c = theme::mix(c, (190, 225, 255), 0.10 * band * (0.3 + 0.7 * cover));
+                        c = theme::mix(c, (190, 225, 255), 0.035 * band * (0.3 + 0.7 * cover));
                     }
                     theme::mix(theme::BG, c, fade)
                 });
@@ -464,6 +468,11 @@ impl Picture {
                 (theme::BG, 0.0)
             }
         };
+        // A calm frame must retain the original channels. Splitting even one
+        // sub-pixel here blurred the artwork continuously, including reduced motion.
+        if glitch.is_none() {
+            return at(i as isize);
+        }
         let (seed, strength) = glitch.unwrap_or((0, 0.0));
         let height = 2 + (unit(seed, 5) * 14.0) as usize;
         let band = (j / height) as u64;
@@ -893,16 +902,13 @@ mod tests {
         assert_eq!(seeded, frame(Some((0xDAED_A105, 1.0))));
         // Another seed corrupts other places.
         assert_ne!(seeded, frame(Some((0x5EED, 1.0))));
-        // Calm, red and blue still sit one sub-pixel either side of green.
+        // Calm frames preserve all three channels at the same source position.
         let source = |i: usize, j: usize| {
             let (c, cover) = picture.pixel(i, j);
             theme::mix(theme::BG, c, cover)
         };
         let (i, j) = (w / 2, h / 2);
-        assert_eq!(
-            calm[j * w + i].0,
-            (source(i - 1, j).0, source(i, j).1, source(i + 1, j).2)
-        );
+        assert_eq!(calm[j * w + i].0, source(i, j));
         // A full-strength burst shifts bands and wrecks a share of the picture,
         // and only where there is picture: the empty edges stay background.
         let differ = calm.iter().zip(&seeded).filter(|(a, b)| a != b).count();
@@ -947,5 +953,19 @@ mod tests {
         assert!(!Theme::from_vars(vars(&[("NO_COLOR", "1")])).backdrop);
         assert!(!Theme::from_vars(vars(&[("COLORTERM", "")])).backdrop);
         assert!(!Theme::from_vars(vars(&[("DAEDALUS_ICONS", "ascii")])).backdrop);
+    }
+    #[test]
+    fn calm_screensaver_preserves_original_color_channels() {
+        let mut picture = Picture::default();
+        picture.prepare(100, 30, Rect::new(0, 0, 100, 30), SPLASH_FEATHER);
+        for j in 0..60 {
+            for i in 0..200 {
+                let (color, cover) = picture.pixel(i, j);
+                assert_eq!(
+                    picture.glitched(i, j, None),
+                    (theme::mix(theme::BG, color, cover), cover)
+                );
+            }
+        }
     }
 }

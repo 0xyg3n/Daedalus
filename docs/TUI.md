@@ -87,7 +87,7 @@ mapping.
 | `DAEDALUS_REDUCED_MOTION=1` | No animation |
 | `DAEDALUS_BACKDROP=0` | No background light or artwork; otherwise `b` changes it |
 | `DAEDALUS_SPLASH=0` | Skip the start-up splash |
-| `DAEDALUS_SCREENSAVER=SECONDS` | Idle time before the screensaver (`0`: never); `s` toggles it |
+| `DAEDALUS_SCREENSAVER=SECONDS` | Idle time before the screensaver (default: 15 seconds; `0`: never); `s` toggles it |
 | `DAEDALUS_GRAPHICS=0` or `kitty` | Force the character artwork, or always request images |
 
 Terminals with the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
@@ -152,3 +152,9 @@ rows when full previews cannot fit.
 **Ctrl+U** opens release details. While attached, use **Ctrl+]**, then **U**.
 Updates require explicit approval; the startup check can be disabled with
 `DAEDALUS_UPDATE_CHECK=0`. See [installation](INSTALL.md#update-and-removal).
+
+Tiles uses the full workspace width for larger paged previews; `+` and `-` adjust
+their size. Wall uses compact previews for the overview and, on wide terminals,
+a separate enlarged screen for the selected terminal. Its overview cards stay
+compact even when only a few terminals exist. Focus shows harness icons and
+working (`+`) or blocked (`!`) markers in its persistent workspace outline.
