@@ -168,7 +168,7 @@ if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum 
 
 For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
 
-Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) checks the latest **stable** release and installs nothing. It does not select beta releases; use the [release list](https://github.com/0xyg3n/Daedalus/releases) for beta downloads. The older 0.1.0 remains the latest stable release. Details are in the [install guide](docs/INSTALL.md).
+Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) checks the latest **stable** release and installs nothing. It does not select beta releases; use the [release list](https://github.com/0xyg3n/Daedalus/releases) for beta downloads. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

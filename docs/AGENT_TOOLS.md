@@ -1,6 +1,6 @@
 # Agent JSON interface
 
-Available in v0.2.0-beta.2 and later, or the current source build.
+Included in the current Rust executable.
 
 `daedalus agent capabilities` lists noninteractive native command families and
 operation names. `daedalus agent call` reads one JSON request from stdin and emits
