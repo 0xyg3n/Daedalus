@@ -17,6 +17,8 @@ struct Request {
     tool: String,
     args: Vec<String>,
     #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     input: Option<String>,
 }
 struct LimitedOutput {
@@ -46,7 +48,7 @@ impl Write for LimitedOutput {
 }
 fn operations(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {
-        "inventory" | "diagnostics" => &[],
+        "inventory" | "diagnostics" | "workspace_usage" => &[],
         "terminal" => &[
             "list",
             "capture",
@@ -91,6 +93,7 @@ fn operations(tool: &str) -> Option<&'static [&'static str]> {
 fn capabilities() -> Value {
     let families = [
         "inventory",
+        "workspace_usage",
         "terminal",
         "checkpoint",
         "route",
@@ -105,11 +108,28 @@ fn capabilities() -> Value {
     ];
     json!({"protocol":"daedalus.agent.v1","tools":families.into_iter().map(|tool|json!({"tool":tool,"operations":operations(tool).unwrap()})).collect::<Vec<_>>(),
         "limits":{"request_bytes":INPUT_LIMIT,"operation_output_bytes":OUTPUT_LIMIT,"arguments":ARG_LIMIT,"argument_bytes":ARG_BYTES},
-        "reviews":"Native parsers, previews and approval requirements apply unchanged; no flags are added.",
+        "reviews":"Native parsers, previews and approval requirements apply unchanged; no flags are added. Read each operation's help: explicit mutation flags vary by command.",
+        "correlation":{"field":"request_id","optional":true,"max_bytes":128,"characters":"ASCII letters, digits, dash, underscore, period, colon","not_idempotency":true},
+        "coordination":["Read inventory for exact current terminal identities; display labels are not routing identities.","Read workspace_usage for existing selection aggregates; this does not sample or reserve work.","Prepare the native operation and review its target, permissions and any approval digest.","Apply only the reviewed operation with its required flags; native identity and approval checks run again.","Observe receipts/status after effects; correlate responses by request_id and never automatically retry uncertain mutations."],
+        "workspace_usage":"Read-only live Herdr terminal aggregates; no pane text, background collection or human-attention inference.",
         "interactive_handoff":["tui","setup","terminal attach","hook launch","hook run","telegram serve","native provider sign-in"],
         "notice":"Capabilities are entrypoint coverage, not provider/platform support. terminal wait retains its native timeout. Authorized operations may call installed tools; no generic command runner is exposed."})
 }
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
 fn validate(request: &Request) -> std::result::Result<(), &'static str> {
+    if request
+        .request_id
+        .as_ref()
+        .is_some_and(|id| !valid_request_id(id))
+    {
+        return Err("invalid_request_id");
+    }
     if request.args.len() > ARG_LIMIT
         || request
             .args
@@ -140,6 +160,7 @@ fn validate(request: &Request) -> std::result::Result<(), &'static str> {
 fn dispatch(request: Request, output: &mut LimitedOutput) -> Result<()> {
     match request.tool.as_str() {
         "inventory" => super::inventory::run(&request.args, output),
+        "workspace_usage" => super::workspace_api::run(&request.args, output),
         "terminal" => super::terminal_cli::run(&request.args, output),
         "checkpoint" => super::session_cli::run(&request.args, output),
         "route" => super::route_cli::run(&request.args, output),
@@ -187,20 +208,30 @@ fn call(reader: impl Read) -> Value {
         Ok(request) => request,
         Err(_) => return failure("invalid_request"),
     };
+    let request_id = request.request_id.clone().filter(|id| valid_request_id(id));
     if let Err(code) = validate(&request) {
-        return failure(code);
+        return correlated(failure(code), request_id.as_deref());
     }
     let mut output = LimitedOutput::new();
     let result = dispatch(request, &mut output);
     if output.exceeded {
-        return failure("output_limit");
+        return correlated(failure("output_limit"), request_id.as_deref());
     }
     if result.is_err() {
-        return failure("operation_failed");
+        return correlated(failure("operation_failed"), request_id.as_deref());
     }
     let result = serde_json::from_slice::<Value>(&output.bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&output.bytes).into_owned()));
-    json!({"version":1,"ok":true,"result":result})
+    correlated(
+        json!({"version":1,"ok":true,"result":result}),
+        request_id.as_deref(),
+    )
+}
+fn correlated(mut response: Value, request_id: Option<&str>) -> Value {
+    if let Some(id) = request_id {
+        response["request_id"] = json!(id);
+    }
+    response
 }
 pub fn run(args: &[String], reader: impl Read, output: &mut impl Write) -> Result<()> {
     if args.is_empty() || args == ["--help"] || args == ["-h"] {
@@ -218,8 +249,11 @@ pub fn run(args: &[String], reader: impl Read, output: &mut impl Write) -> Resul
     let mut encoded = LimitedOutput::new();
     if serde_json::to_writer(&mut encoded, &value).is_err() {
         encoded = LimitedOutput::new();
-        serde_json::to_writer(&mut encoded, &failure("output_limit"))
-            .map_err(|_| "Cannot encode agent response")?;
+        serde_json::to_writer(
+            &mut encoded,
+            &correlated(failure("output_limit"), value["request_id"].as_str()),
+        )
+        .map_err(|_| "Cannot encode agent response")?;
     }
     output
         .write_all(&encoded.bytes)
@@ -265,6 +299,42 @@ mod tests {
             assert!(!result.to_string().contains("DO_NOT_ECHO"));
             assert_ne!(result["error"]["code"], "operation_failed");
         }
+    }
+    #[test]
+    fn correlation_is_bounded_and_not_a_retry_or_authorization_token() {
+        let result = invoke(
+            json!({"request_id":"worker-2:inspect.1","tool":"workspace_usage","args":["--help"]}),
+        );
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["request_id"], "worker-2:inspect.1");
+        assert!(
+            result["result"]
+                .as_str()
+                .unwrap()
+                .contains("server-selection")
+        );
+        let denied = invoke(json!({"request_id":"review-1","tool":"terminal","args":["attach"]}));
+        assert_eq!(denied["error"]["code"], "unsupported_operation");
+        assert_eq!(denied["request_id"], "review-1");
+        for id in [
+            "".to_owned(),
+            "x".repeat(129),
+            "SECRET\nSECOND-LINE".to_owned(),
+            "$(shell)".to_owned(),
+        ] {
+            let invalid =
+                invoke(json!({"request_id":id,"tool":"workspace_usage","args":["--help"]}));
+            assert_eq!(invalid["error"]["code"], "invalid_request_id");
+            assert!(invalid.get("request_id").is_none());
+            assert!(!invalid.to_string().contains("SECRET"));
+        }
+        assert!(
+            capabilities()["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["tool"] == "workspace_usage")
+        );
     }
     #[test]
     fn output_bound_is_enforced_without_partial_success() {

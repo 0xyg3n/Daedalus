@@ -7,6 +7,7 @@ mod options;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod update_ui;
 mod view;
 use crossterm::{
     event::{
@@ -231,6 +232,10 @@ fn main() -> io::Result<()> {
         return daedalus_tui::app::session_cli::run(&args[1..], &mut io::stdout())
             .map_err(io::Error::other);
     }
+    if args.first().is_some_and(|arg| arg == "workspace-usage") {
+        return daedalus_tui::app::workspace_api::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other);
+    }
     if args.first().is_some_and(|arg| arg == "inventory") {
         return daedalus_tui::app::inventory::run(&args[1..], &mut io::stdout())
             .map_err(io::Error::other);
@@ -249,7 +254,7 @@ fn main() -> io::Result<()> {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, agent, inventory, terminal, checkpoint, route, job, hook, goal, telegram, memory, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
+            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, agent, inventory, workspace-usage, terminal, checkpoint, route, job, hook, goal, telegram, memory, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -298,6 +303,10 @@ fn main() -> io::Result<()> {
         preview_rows: 8,
         ..Ui::default()
     };
+    let mut updater = update_ui::Controller::new(
+        !backend_args.iter().any(|arg| arg == "--demo")
+            && std::env::var("DAEDALUS_UPDATE_CHECK").as_deref() != Ok("0"),
+    );
     let mut last = Instant::now();
     let mut suspended = false;
     // An action chosen during a background refresh waits for that refresh.
@@ -433,10 +442,27 @@ fn main() -> io::Result<()> {
                 ui.busy = true;
                 ui.action_pending = true;
             }
-            if may_rest(&ui) && ui.saver.due(ui.theme.screensaver, Instant::now()) {
+            updater.poll(
+                inventory
+                    && ui.splash.is_none()
+                    && ui.dialog.is_none()
+                    && ui.options.is_none()
+                    && ui.embed.is_none()
+                    && !ui.searching
+                    && !ui.busy
+                    && ui.saver.since.is_none(),
+            );
+            if !updater.visible()
+                && may_rest(&ui)
+                && ui.saver.due(ui.theme.screensaver, Instant::now())
+            {
                 ui.saver.since = Some(Instant::now());
             }
-            terminal.draw(|f| view::draw(f, &mut ui))?;
+            terminal.draw(|f| {
+                view::draw(f, &mut ui);
+                let area = f.area();
+                updater.draw(f, area, &ui.theme);
+            })?;
             show_picture(&mut ui, &mut io::stdout())?;
             if event::poll(frame_interval(&ui))? {
                 if let Some(id) = ui.selected_terminal() {
@@ -459,13 +485,38 @@ fn main() -> io::Result<()> {
                         graphics::remove(&mut io::stdout(), false)?;
                     }
                 }
+                if updater.visible() {
+                    match event {
+                        Event::Key(key) => {
+                            updater.key(key);
+                        }
+                        Event::Mouse(mouse) => {
+                            updater.mouse(mouse);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if saver_input(&mut ui, &event) {
                     continue;
                 }
                 let step = match event {
                     Event::Paste(text) => paste(&mut ui, &text),
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        if let Some(dialog) = ui.dialog.take() {
+                        let update_shortcut = matches!(key.code, KeyCode::Char('u' | 'U'))
+                            && (ui.embed.as_ref().is_some_and(|embed| embed.prefix)
+                                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && !ui
+                                        .embed
+                                        .as_ref()
+                                        .is_some_and(|embed| embed.mode == Mode::Control)));
+                        if update_shortcut && ui.dialog.is_none() && ui.options.is_none() {
+                            if let Some(embed) = ui.embed.as_mut() {
+                                embed.prefix = false;
+                            }
+                            updater.open();
+                            Step::Continue
+                        } else if let Some(dialog) = ui.dialog.take() {
                             suspended |= dialog_key(&mut ui, dialog, key, &mut host)?;
                             Step::Continue
                         } else if ui.options.is_some() {
@@ -804,6 +855,16 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
     if matches!(key.code, KeyCode::Char('k' | 'K')) {
         return open_switcher(ui);
     }
+    if matches!(key.code, KeyCode::Char('w' | 'W' | 'b' | 'B')) {
+        return wall_preset(
+            ui,
+            if matches!(key.code, KeyCode::Char('b' | 'B')) {
+                "wall.working"
+            } else {
+                "wall.all"
+            },
+        );
+    }
     match key.code {
         KeyCode::Char('d' | 'D' | 'q' | 'Q') | KeyCode::Esc => {
             close_focus(ui);
@@ -928,6 +989,14 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
         return Step::Continue;
     }
+    if ui.page == WORKSPACES && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('W') {
+            return wall_preset(ui, "wall.all");
+        }
+        if key.code == KeyCode::Char('B') {
+            return wall_preset(ui, "wall.working");
+        }
+    }
     let pages = ui.page_count();
     let workspaces = ui.page == WORKSPACES;
     match key.code {
@@ -1039,6 +1108,7 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
             return Some(switch_view(ui, target));
         }
         KeyCode::Char('P') if ui.view.grid() => {
+            ui.working_only = false;
             ui.pinned_only = !ui.pinned_only;
             ui.select_tile(0);
             ui.last_preview = None;
@@ -1159,10 +1229,16 @@ fn move_pane(ui: &mut Ui, dx: i32, dy: i32) -> Step {
 /// Move Focus to another terminal of the tab. The old one is detached and
 /// keeps running; the new one starts read-only, like any Focus.
 fn focus_pane(ui: &mut Ui, id: &str) -> Step {
+    if ui.terminal_node(id).is_none() {
+        ui.status = "Terminal disappeared; refresh and select it again".into();
+        ui.status_error = true;
+        return Step::Continue;
+    }
+    ui.pane_resize = None;
     if let Some(mut old) = ui.embed.take() {
         old.detach();
     }
-    ui.focus_target = id.to_owned();
+    ui.reveal(id);
     ui.takeover_armed = false;
     ui.last_preview = None;
     ui.zoomed = false;
@@ -1209,6 +1285,20 @@ fn switch_view(ui: &mut Ui, target: View) -> Step {
         // Focus starts read-only; attaching for input is a separate choice.
         return quick_action(ui, "terminal.watch");
     }
+    Step::Continue
+}
+
+fn wall_preset(ui: &mut Ui, scope: &str) -> Step {
+    leave_focus(ui);
+    ui.switching = false;
+    ui.searching = false;
+    ui.filter.clear();
+    ui.working_only = scope == "wall.working";
+    ui.pinned_only = scope == "wall.pinned";
+    ui.order = Order::Activity;
+    ui.view = View::Wall;
+    ui.select_tile(0);
+    ui.last_preview = None;
     Step::Continue
 }
 
@@ -1292,6 +1382,38 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         options_mouse(ui, mouse);
         return Step::Continue;
     }
+    let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+    if ui.focus_tree_area.is_some_and(|r| r.contains(position)) {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                ui.focus_tree_offset = ui.focus_tree_offset.saturating_add(3)
+            }
+            MouseEventKind::ScrollUp => {
+                ui.focus_tree_offset = ui.focus_tree_offset.saturating_sub(3)
+            }
+            MouseEventKind::Down(event::MouseButton::Left) => {
+                if let Some((_, id, branch)) = ui
+                    .focus_tree_hits
+                    .iter()
+                    .find(|(r, _, _)| r.contains(position))
+                    .cloned()
+                {
+                    if branch {
+                        if !ui.collapsed.remove(&id) {
+                            ui.collapsed.insert(id);
+                        }
+                    } else if ui
+                        .terminal_node(&ui.focus_target)
+                        .is_none_or(|n| n.id != id)
+                    {
+                        return focus_pane(ui, &id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return Step::Continue;
+    }
     if let Some(step) = focus_resize_mouse(ui, mouse) {
         return step;
     }
@@ -1325,6 +1447,7 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
             } else if let Some((_, action)) = ui.quick_hits.iter().find(|(r, _)| r.contains(p)) {
                 let action = action.clone();
                 return match action.as_str() {
+                    "wall.all" | "wall.working" | "wall.pinned" => wall_preset(ui, &action),
                     "detach" => {
                         close_focus(ui);
                         Step::Continue
@@ -1360,7 +1483,7 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     .is_some_and(|(i, at)| i == index && at.elapsed() < Duration::from_millis(500));
                 ui.select_tile(index);
                 ui.clicked = Some((index, Instant::now()));
-                if again {
+                if again || ui.view == View::Wall {
                     return switch_view(ui, View::Focus);
                 }
             } else if let Some(&(_, row)) = ui.list_hits.iter().find(|(r, _)| r.contains(p)) {
@@ -3080,5 +3203,44 @@ mod cli_tests {
             key_event(&mut ui, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
             Step::Continue
         ));
+    }
+    #[test]
+    fn wall_presets_clear_stale_filters_and_focus_tree_clicks_open_exact_panes() {
+        let mut ui = workspace();
+        ui.filter = "old filter".into();
+        ui.pinned_only = true;
+        press(&mut ui, KeyCode::Char('B'));
+        assert_eq!(ui.view, View::Wall);
+        assert!(ui.working_only && !ui.pinned_only && ui.filter.is_empty());
+        press(&mut ui, KeyCode::Char('W'));
+        assert!(!ui.working_only && !ui.pinned_only);
+        ui.view = View::Focus;
+        ui.focus_target = "a".into();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let (rect, _, branch) = ui
+            .focus_tree_hits
+            .iter()
+            .find(|(_, id, _)| id == "b")
+            .cloned()
+            .unwrap();
+        assert!(!branch, "a pane with an agent child must remain clickable");
+        let step = mouse_event(
+            &mut ui,
+            MouseEvent {
+                kind: MouseEventKind::Down(event::MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        let Step::Send(request) = step else {
+            panic!("expected watch request")
+        };
+        assert_eq!(request["node"], "b");
+        assert_eq!(request["action"], "terminal.watch");
+        assert_eq!(ui.focus_target, "b");
+        assert!(ui.focus_tree_reveal);
     }
 }

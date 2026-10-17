@@ -15,6 +15,7 @@ digest where one is required.
 | `config` | `init`, `import`, `import-instance`, `validate` |
 | `agent` | `capabilities`, `call` with one bounded JSON request on stdin; see [agent tools](AGENT_TOOLS.md) |
 | `inventory --json` | List tmux and Herdr terminals |
+| `workspace-usage --config-dir ABS --json` | Read existing Herdr selection aggregates for current terminal identities |
 | `terminal` | `list`, `capture`, `send`, `interrupt`, `close`, `focus`, `attach`, `rename`, `launch`, `wait`, `command`, `keys`, `control` |
 | `checkpoint` | `list`, `show`, `save`, `remove`, `spawn --operation resume\|fork\|handoff` |
 | `route` | `list`, `active`, `candidates`, `select` |
@@ -24,7 +25,8 @@ digest where one is required.
 | `telegram` | `status`, `start`, `stop`, `bindings`, `bind`, `config init\|import\|check`, `serve`, `cutover preview\|apply\|rollback` |
 | `agent-identity` | Optional Armonia rename: `preview`, `apply`, `status` |
 | `diagnostics --json` | Queue, route, registration and configuration health |
-| `update check [--json]` | Check for a newer GitHub release; installs nothing |
+| `update check [--json]` | Review a compatible GitHub release; installs nothing |
+| `update install --version VERSION --approve SHA [--json]` | Verify and install the exact reviewed release; Windows stages for manual activation |
 | `job` | Short aliases for terminal, checkpoint, route and diagnostics operations |
 | `tma` | Open an independent view of an exact terminal |
 

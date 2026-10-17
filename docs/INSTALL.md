@@ -206,15 +206,25 @@ Telegram service, stop it and hand over with `daedalus telegram cutover preview|
 
 ## Update and removal
 
-`daedalus update check [--json]`, or **AI tools → Check for updates** in the panel,
-checks the latest stable GitHub release. It does not select prereleases or prove
-that a source build includes the latest commits. The current published beta is
-[0.2.0-beta.3](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3);
-use its binaries and checksums for the beta features described in the README.
-It installs nothing. To upgrade, run
-the installer again. Older releases stay under `PREFIX/share/daedalus/native/`;
-installing an older revision relinks it. Restart a running Telegram service after
-switching binaries.
+The TUI performs one background release check at launch. A newer compatible release
+opens a prompt when no terminal or dialog owns input; **Later** is selected by
+default. **Ctrl+U** opens the notice again (**Ctrl+]**, then **U** while attached).
+Set `DAEDALUS_UPDATE_CHECK=0` to disable the startup check. Stable installations
+select stable releases; beta installations can select newer betas or stable releases.
+
+`daedalus update check --json` returns a review with version, platform, checksum
+and approval digest. It installs nothing. Explicit installation uses:
+
+```sh
+daedalus update install --version VERSION --approve APPROVAL_SHA256
+```
+
+The installer rechecks the release and approval against the running binary,
+verifies SHA-256 and native architecture, and preserves the previous executable.
+Linux activation is atomic; the running session continues until you restart it.
+Windows downloads and verifies a staged executable but does **not** activate it:
+close the application and follow the returned manual activation instructions.
+Neither path restarts Telegram or changes private configuration.
 
 On Windows, close Daedalus and stop its Telegram service before deleting its
 installation prefix; private configuration remains separate.

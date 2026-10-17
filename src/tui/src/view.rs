@@ -352,6 +352,8 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     f.render_widget(Block::default().style(theme.base()), area);
     ui.nav_hits.clear();
     ui.list_hits.clear();
+    ui.focus_tree_hits.clear();
+    ui.focus_tree_area = None;
     ui.handles.clear();
     ui.pane_dividers.clear();
     ui.side_hits.clear();
@@ -438,7 +440,26 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     } else if workspaces && ui.view == View::Wall {
         wall_panel(f, content, ui);
     } else if workspaces && ui.view == View::Focus {
-        cursor = focus_panel(f, content, ui);
+        if content.width >= 80 && content.height >= 12 {
+            let width = (content.width / 4).clamp(24, 38);
+            let columns = split(
+                content,
+                Direction::Horizontal,
+                vec![Constraint::Length(width), Constraint::Min(50)],
+            );
+            focus_structure(f, columns[0], ui);
+            cursor = focus_panel(f, columns[1], ui);
+        } else if content.height >= 22 {
+            let parts = split(
+                content,
+                Direction::Vertical,
+                vec![Constraint::Length(8), Constraint::Min(12)],
+            );
+            focus_structure(f, parts[0], ui);
+            cursor = focus_panel(f, parts[1], ui);
+        } else {
+            cursor = focus_panel(f, content, ui);
+        }
     } else {
         let inspect = content.width >= 92 && ui.prefs.details;
         let details = if inspect {
@@ -964,6 +985,7 @@ fn tiles_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ui,
         "Terminals",
     );
+    wall_scope(f, Rect::new(inner.x, inner.y + 1, inner.width, 1), ui);
     let grid = Rect::new(
         inner.x,
         inner.y + 2,
@@ -1053,7 +1075,9 @@ fn grid_summary(f: &mut Frame, area: Rect, ui: &Ui, mut summary: String) {
 }
 
 fn no_tiles(f: &mut Frame, grid: Rect, ui: &Ui) {
-    let text = if ui.pinned_only {
+    let text = if ui.working_only {
+        "No agents are reporting working or blocked. Select All to see every terminal."
+    } else if ui.pinned_only {
         "No pinned terminals. P shows every terminal; p pins the selected one."
     } else if !ui.filter.is_empty() {
         "No matches. Esc clears the search."
@@ -1075,6 +1099,48 @@ const WALL_CHIP: u16 = 26;
 
 /// Every terminal at once, never paged: framed live screens while they fit,
 /// then one line each. Only what is drawn is previewed.
+fn wall_scope(f: &mut Frame, area: Rect, ui: &mut Ui) {
+    let all = ui.snapshot.tree.iter().filter(|n| n.tile.is_some()).count();
+    let working = ui
+        .snapshot
+        .tree
+        .iter()
+        .filter(|n| n.tile.is_some() && n.live())
+        .count();
+    let mut x = area.x;
+    for (id, label, on) in [
+        (
+            "wall.all",
+            format!(" All {all} "),
+            !ui.working_only && !ui.pinned_only,
+        ),
+        (
+            "wall.working",
+            format!(" Working {working} "),
+            ui.working_only,
+        ),
+        (
+            "wall.pinned",
+            format!(" Pinned {} ", ui.snapshot.workspace.pins.len()),
+            ui.pinned_only,
+        ),
+    ] {
+        let w = (width(&label) as u16).min(area.right().saturating_sub(x));
+        if w == 0 {
+            break;
+        }
+        let hit = Rect::new(x, area.y, w, 1);
+        let style = if on {
+            ui.theme.selected(1.0)
+        } else {
+            ui.theme.fg(Tone::Muted)
+        };
+        f.render_widget(Paragraph::new(label).style(style), hit);
+        ui.quick_hits.push((hit, id.into()));
+        x += w + 1;
+    }
+}
+
 fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let theme = ui.theme;
     let tiles = ui.tiles();
@@ -1092,6 +1158,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ui,
         "Terminals",
     );
+    wall_scope(f, Rect::new(inner.x, inner.y + 1, inner.width, 1), ui);
     let grid = Rect::new(
         inner.x,
         inner.y + 2,
@@ -1573,6 +1640,78 @@ fn preview_screen(f: &mut Frame, screen: Rect, ui: &Ui, id: &str) {
     }
 }
 
+/// A persistent outline beside Focus; it never captures the terminal's keys.
+fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
+    let theme = ui.theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(theme.border())
+        .border_style(theme.fg(Tone::Faint))
+        .style(theme.surface())
+        .title(" Workspaces ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    ui.focus_tree_area = Some(area);
+    let rows: Vec<_> = ui
+        .rows()
+        .into_iter()
+        .filter(|r| r.kind == Kind::Node)
+        .filter(|r| {
+            ui.snapshot
+                .tree
+                .get(r.source)
+                .is_some_and(|n| n.kind != "agent session" && (n.children || n.tile.is_some()))
+        })
+        .collect();
+    let visible = inner.height as usize;
+    if ui.focus_tree_reveal {
+        if let Some(index) = rows.iter().position(|r| r.id == ui.focus_target)
+            && (index < ui.focus_tree_offset
+                || index >= ui.focus_tree_offset.saturating_add(visible))
+        {
+            ui.focus_tree_offset = index.saturating_sub(visible.saturating_sub(1));
+        }
+        ui.focus_tree_reveal = false;
+    }
+    ui.focus_tree_offset = ui.focus_tree_offset.min(rows.len().saturating_sub(visible));
+    for (line, row) in rows
+        .iter()
+        .skip(ui.focus_tree_offset)
+        .take(visible)
+        .enumerate()
+    {
+        let node = &ui.snapshot.tree[row.source];
+        let active = ui
+            .terminal_node(&ui.focus_target)
+            .is_some_and(|n| n.id == row.id);
+        let branch = node.tile.is_none() && row.children;
+        let badge = if branch {
+            if ui.collapsed.contains(&row.id) {
+                theme.glyph("▸", ">")
+            } else {
+                theme.glyph("▾", "v")
+            }
+        } else if active {
+            theme.glyph("●", "*")
+        } else {
+            theme.glyph("·", ".")
+        };
+        let style = if active {
+            theme.selected(1.0)
+        } else {
+            theme.fg(if row.children {
+                Tone::Muted
+            } else {
+                Tone::Text
+            })
+        };
+        let text = format!("{}{} {}", row.branch, badge, node.label);
+        let hit = Rect::new(inner.x, inner.y + line as u16, inner.width, 1);
+        f.render_widget(Paragraph::new(clean(&text)).style(style), hit);
+        ui.focus_tree_hits.push((hit, row.id.clone(), branch));
+    }
+}
+
 /// The focused terminal: a live embedded view, or how to open one.
 fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
     let theme = ui.theme;
@@ -1699,6 +1838,10 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
     if ui.embed.as_ref().is_some_and(|e| e.prefix) {
         let pairs = [
             ("D", "Detach"),
+            ("K", "Switch"),
+            ("W", "Wall"),
+            ("B", "Working"),
+            ("U", "Updates"),
             ("O", "Observe"),
             ("A", "Attach"),
             ("F", "Fit size"),
@@ -1750,9 +1893,9 @@ fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16, u16)> {
             hints,
             ui,
             &[
-                ("Alt+arrows", "Resize pane", "focus.resize.hint"),
-                ("m", "More", "more"),
                 ("Esc", "Back", "detach"),
+                ("m", "More", "more"),
+                ("Alt+arrows", "Resize pane", "focus.resize.hint"),
             ],
         );
     }

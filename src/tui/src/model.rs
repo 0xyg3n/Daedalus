@@ -219,6 +219,7 @@ impl Node {
     /// Working or blocked right now.
     pub fn live(&self) -> bool {
         matches!(self.activity.as_str(), "working" | "blocked")
+            || matches!(self.state.as_str(), "working" | "busy" | "blocked")
     }
 }
 /// One inspector fact, sent as `[label, value]` or `[label, value, tone]`.
@@ -601,7 +602,12 @@ impl Forest<'_> {
 /// Sort key for activity order: live first, then the latest; ties keep
 /// layout order because the sort is stable.
 fn recency(live: bool, at: f64) -> (bool, i64) {
-    (!live, -(at as i64))
+    let timestamp = if at.is_finite() && at > 0.0 {
+        at as i64
+    } else {
+        0
+    };
+    (!live, -timestamp)
 }
 /// One tile in Tiles: a live terminal or a pinned reference that is gone.
 #[derive(Clone, Debug, PartialEq)]
@@ -927,6 +933,7 @@ pub struct Ui {
     pub tiles_per_page: usize,
     pub tile_columns: usize,
     pub pinned_only: bool,
+    pub working_only: bool,
     pub previews: HashMap<String, Preview>,
     pub preview_pending: bool,
     pub last_preview: Option<Instant>,
@@ -980,6 +987,10 @@ pub struct Ui {
     /// Focus shows one terminal alone instead of its whole tab.
     pub zoomed: bool,
     /// Panes of the tab drawn in Focus, for clicks.
+    pub focus_tree_hits: Vec<(ratatui::layout::Rect, String, bool)>,
+    pub focus_tree_area: Option<ratatui::layout::Rect>,
+    pub focus_tree_offset: usize,
+    pub focus_tree_reveal: bool,
     pub pane_hits: Vec<(ratatui::layout::Rect, String)>,
     /// Native split edges shown in Focus; drag submits one checked backend resize.
     pub pane_dividers: Vec<PaneDivider>,
@@ -1407,6 +1418,9 @@ impl Ui {
         let Some(tile) = &node.tile else {
             return false;
         };
+        if self.working_only && !node.live() {
+            return false;
+        }
         terms.is_empty()
             || matches(
                 terms,
@@ -1440,11 +1454,12 @@ impl Ui {
                     }
                 }
                 None => {
-                    if terms.is_empty()
-                        || matches(
-                            &terms,
-                            &format!("{} {} {}", pin.label, pin.place, pin.status),
-                        )
+                    if !self.working_only
+                        && (terms.is_empty()
+                            || matches(
+                                &terms,
+                                &format!("{} {} {}", pin.label, pin.place, pin.status),
+                            ))
                     {
                         rows.push(TileRow {
                             id: String::new(),
@@ -1476,6 +1491,13 @@ impl Ui {
                 });
             }
             rows.extend(rest);
+        }
+        if self.view == View::Wall && self.order == Order::Activity && !self.pinned_only {
+            rows.sort_by_key(|r| {
+                r.source
+                    .and_then(|i| self.snapshot.tree.get(i))
+                    .map_or((true, 0), |n| recency(n.live(), n.active_at))
+            });
         }
         rows
     }
@@ -1568,7 +1590,15 @@ impl Ui {
                 }
                 self.select_id(id);
             }
-            View::Focus => self.focus_target = id.to_owned(),
+            View::Focus => {
+                self.focus_target = id.to_owned();
+                self.focus_tree_reveal = true;
+                let mut key = id.to_owned();
+                while let Some(n) = self.snapshot.tree.iter().find(|n| n.id == key) {
+                    self.collapsed.remove(&n.parent);
+                    key = n.parent.clone();
+                }
+            }
         }
     }
     /// Nearest selectable row, preferring the direction of travel.
@@ -2438,5 +2468,33 @@ pub mod tests {
         );
         layout.zoomed = true;
         assert!(layout.dividers(screen).is_empty());
+    }
+    #[test]
+    fn wall_working_filter_and_order_use_state_and_reject_invalid_recency() {
+        let mut ui = tiles_fixture();
+        ui.view = View::Wall;
+        ui.order = Order::Activity;
+        ui.snapshot
+            .tree
+            .iter_mut()
+            .find(|n| n.id == "b")
+            .unwrap()
+            .state = "working".into();
+        ui.snapshot
+            .tree
+            .iter_mut()
+            .find(|n| n.id == "a")
+            .unwrap()
+            .active_at = f64::NEG_INFINITY;
+        assert_eq!(ui.tiles()[0].id, "b", "working comes before idle pins");
+        ui.working_only = true;
+        let rows = ui.tiles();
+        assert_eq!(rows.len(), 1, "idle and missing pins are omitted");
+        assert_eq!(rows[0].id, "b");
+        ui.collapsed.insert("server".into());
+        ui.view = View::Focus;
+        ui.reveal("b");
+        assert!(!ui.collapsed.contains("server"));
+        assert!(ui.focus_tree_reveal);
     }
 }

@@ -136,3 +136,19 @@ workspace paths, prompts or credentials. Instance import copies these local
 aggregates without activating tracking during preview. Configuration and runtime
 databases stay outside Git. Existing pin ordering is the shortcut priority; no
 background monitoring service is installed.
+
+## Workspace overview and updates
+
+Focus keeps a scrollable workspace outline beside the terminal (or above it on
+narrow screens). Click a terminal to watch it; its previous terminal keeps running.
+Branches collapse independently. Small terminals retain the terminal-only view.
+
+In Workspaces, **W** opens all terminals in Wall and **B** limits the Wall to
+terminals reporting working or blocked. The **All / Working / Pinned** buttons
+switch scope. Working terminals come first in activity order; pinned-only mode
+preserves pin order. Click a Wall terminal to open Focus. Crowded walls use compact
+rows when full previews cannot fit.
+
+**Ctrl+U** opens release details. While attached, use **Ctrl+]**, then **U**.
+Updates require explicit approval; the startup check can be disabled with
+`DAEDALUS_UPDATE_CHECK=0`. See [installation](INSTALL.md#update-and-removal).

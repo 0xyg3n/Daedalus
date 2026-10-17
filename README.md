@@ -127,7 +127,7 @@ An agent with a local command tool can call the same Rust operations as the TUI.
 {"tool":"inventory","args":["--config-dir","/abs/instance","--json"]}
 ```
 
-Pass that request to `daedalus agent call`. Terminal control, checkpoints, routes, hooks, goals, Telegram administration and diagnostics use their existing identity checks and preview/apply rules. No approval flags are added automatically. Interactive attachment, sign-in and setup stay in the native CLI or TUI. This is a local JSON CLI interface; it is not an MCP server. See the [agent tools guide](docs/AGENT_TOOLS.md) for integration examples and current coverage.
+Pass that request to `daedalus agent call`. Terminal control, checkpoints, routes, hooks, goals, Telegram administration and diagnostics use their existing identity checks and preview/apply rules. No approval flags are added automatically. Interactive attachment, sign-in and setup stay in the native CLI or TUI. This is a local JSON CLI interface; it is not an MCP server. Requests can include a `request_id` for response correlation. `workspace_usage` reads private Herdr selection aggregates without capturing terminal text. See the [agent tools guide](docs/AGENT_TOOLS.md) for integration examples and current coverage.
 
 ## Platform support
 
@@ -173,7 +173,7 @@ if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum 
 
 For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
 
-Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) checks the latest **stable** release and installs nothing. It does not select beta releases; use the [release list](https://github.com/0xyg3n/Daedalus/releases) for beta downloads. Details are in the [install guide](docs/INSTALL.md).
+Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. The TUI checks releases in the background at launch and offers an update when one is available (**Later** is the default). **Ctrl+U** opens update details; inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums and architecture. Linux activates the verified binary while retaining the previous one; Windows stages it for manual activation after closing the application. `DAEDALUS_UPDATE_CHECK=0` disables the startup check. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

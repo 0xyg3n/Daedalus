@@ -92,6 +92,7 @@ impl Ui {
             .env("HOME", &directory)
             .env("TERM", "xterm-256color")
             .env("DAEDALUS_SPLASH", "0")
+            .env("DAEDALUS_UPDATE_CHECK", "0")
             .env("DAEDALUS_GRAPHICS", if graphics { "kitty" } else { "0" })
             .env("DAEDALUS_BACKDROP", if graphics { "1" } else { "0" })
             .env("DAEDALUS_REDUCED_MOTION", "1")

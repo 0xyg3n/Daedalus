@@ -65,3 +65,5 @@ pub mod instances;
 pub mod update;
 
 pub mod workspace_usage;
+
+pub mod workspace_api;
