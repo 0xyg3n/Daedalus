@@ -801,6 +801,9 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
     if let Some(step) = focus_resize_key(ui, key) {
         return step;
     }
+    if matches!(key.code, KeyCode::Char('k' | 'K')) {
+        return open_switcher(ui);
+    }
     match key.code {
         KeyCode::Char('d' | 'D' | 'q' | 'Q') | KeyCode::Esc => {
             close_focus(ui);
@@ -874,6 +877,26 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         if embed.mode == Mode::Control && embed.live() {
             embed.key(key);
             return Step::Continue;
+        }
+    }
+    if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return open_switcher(ui);
+    }
+    if ui.switching {
+        if key.code == KeyCode::Esc {
+            ui.switching = false;
+            ui.searching = false;
+            ui.filter.clear();
+            ui.select(0, true);
+            return Step::Continue;
+        }
+        if key.code == KeyCode::Enter {
+            return choose_switcher(ui, None);
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && let KeyCode::Char(c @ '1'..='9') = key.code
+        {
+            return choose_switcher(ui, Some((c as usize) - ('1' as usize)));
         }
     }
     let tiles = ui.page == WORKSPACES && ui.view.grid();
@@ -1187,6 +1210,40 @@ fn switch_view(ui: &mut Ui, target: View) -> Step {
         return quick_action(ui, "terminal.watch");
     }
     Step::Continue
+}
+
+fn open_switcher(ui: &mut Ui) -> Step {
+    leave_focus(ui);
+    ui.navigate(WORKSPACES);
+    ui.view = View::Tree;
+    ui.switching = true;
+    ui.searching = true;
+    ui.filter.clear();
+    ui.select(0, true);
+    ui.status =
+        "Find a workspace, tab, pane or agent · Enter watches · Alt+1–9 opens a result".into();
+    ui.status_error = false;
+    Step::Continue
+}
+fn choose_switcher(ui: &mut Ui, rank: Option<usize>) -> Step {
+    let node = match rank {
+        Some(rank) => ui
+            .rows()
+            .into_iter()
+            .filter(|r| r.kind == Kind::Node)
+            .nth(rank)
+            .map(|r| r.id),
+        None => ui.selected_terminal(),
+    };
+    let Some(node) = node else {
+        ui.status = "No matching terminal".into();
+        return Step::Continue;
+    };
+    ui.switching = false;
+    ui.searching = false;
+    ui.filter.clear();
+    ui.reveal(&node);
+    Step::Send(terminal_request(ui, "terminal.watch", &node))
 }
 
 fn quick_action(ui: &mut Ui, action: &str) -> Step {
@@ -1929,6 +1986,45 @@ mod cli_tests {
     }
     fn workspace() -> Ui {
         model::tests::tiles_fixture()
+    }
+    #[test]
+    fn quick_switcher_opens_exact_result_and_empty_search_never_falls_back() {
+        let mut ui = workspace();
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        assert!(ui.switching && ui.searching);
+        assert_eq!(ui.view, View::Tree);
+        let node = ui.selected_terminal().unwrap();
+        let step = choose_switcher(&mut ui, None);
+        assert!(
+            matches!(step,Step::Send(ref v) if v["action"]=="terminal.watch" && v["node"]==node)
+        );
+        assert!(!ui.switching && !ui.searching);
+        open_switcher(&mut ui);
+        ui.filter = "no_such_window_123".into();
+        assert!(matches!(choose_switcher(&mut ui, Some(0)), Step::Continue));
+        assert!(ui.switching);
+        key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!ui.switching);
+    }
+    #[test]
+    fn switcher_shortcut_uses_the_visible_filtered_result() {
+        let mut ui = workspace();
+        open_switcher(&mut ui);
+        let expected = ui
+            .rows()
+            .into_iter()
+            .find(|r| r.kind == Kind::Node)
+            .unwrap()
+            .id;
+        let step = key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+        );
+        assert!(matches!(step,Step::Send(ref v) if v["node"]==expected));
+        assert!(!ui.switching);
     }
     #[test]
     fn refreshing_keeps_the_page() {

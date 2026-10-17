@@ -2561,7 +2561,10 @@ fn search(f: &mut Frame, area: Rect, ui: &Ui, title: &str) {
     let icon = theme.icon("search");
     let line = if ui.searching {
         Line::from(vec![
-            Span::styled(format!(" {icon} "), field.patch(theme.fg(Tone::Accent))),
+            Span::styled(
+                format!(" {icon} {}", if ui.switching { "Switch: " } else { "" }),
+                field.patch(theme.fg(Tone::Accent)),
+            ),
             Span::styled(clean(&ui.filter), field.patch(theme.fg(Tone::Text))),
             Span::styled(theme.glyph("▏", "_"), field.patch(theme.fg(Tone::Accent))),
         ])
@@ -3884,7 +3887,16 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
         .as_ref()
         .is_some_and(|e| e.live() && e.mode == Mode::Control);
     let pairs: Vec<(&str, &str)> = if ui.searching {
-        vec![(enter, "Done"), ("Esc", "Clear"), (arrows, "Move")]
+        if ui.switching {
+            vec![
+                (enter, "Watch"),
+                ("Alt+1–9", "Open"),
+                ("Esc", "Close"),
+                (arrows, "Move"),
+            ]
+        } else {
+            vec![(enter, "Done"), ("Esc", "Clear"), (arrows, "Move")]
+        }
     } else if ui.page == WORKSPACES && ui.view == View::Focus && control {
         vec![
             ("^] D", "Detach"),
@@ -3970,7 +3982,11 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
         ]
     };
     let mut pairs = pairs;
+    if control {
+        pairs.insert(0, ("^] K", "Switch"));
+    }
     if !ui.searching && !control {
+        pairs.insert(0, ("^K", "Switch"));
         // Before Quit, so it survives a narrow screen as long as Quit does.
         let at = pairs.len().saturating_sub(1);
         pairs.insert(at, ("?", "Hide keys"));

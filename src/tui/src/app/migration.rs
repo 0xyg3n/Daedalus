@@ -364,6 +364,7 @@ impl ImportPlan {
             "telegram-controls.sqlite3",
             "session-renames.sqlite3",
             "telegram-stream.sqlite3",
+            "workspace-usage.sqlite3",
             "routes.sqlite3",
         ] {
             let path = source.join(name);
@@ -1570,6 +1571,25 @@ mod tests {
                 .unwrap()
                 .changed
         );
+    }
+    #[test]
+    fn private_workspace_usage_is_preserved_without_sampling_during_import() {
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("new");
+        let database = rusqlite::Connection::open(source.join("workspace-usage.sqlite3")).unwrap();
+        database.execute_batch("CREATE TABLE workspace_usage(terminal TEXT PRIMARY KEY,visits INTEGER,seconds REAL,last_selected REAL);INSERT INTO workspace_usage VALUES('hashed-terminal',4,12.5,100);").unwrap();
+        ImportPlan::prepare(&source, &destination, false)
+            .unwrap()
+            .apply()
+            .unwrap();
+        let copy = rusqlite::Connection::open(destination.join("workspace-usage.sqlite3")).unwrap();
+        let values: (i64, f64) = copy
+            .query_row("SELECT visits,seconds FROM workspace_usage", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(values, (4, 12.5));
     }
     #[test]
     fn native_goal_import_is_inert_and_repeatable_without_recovery_writes() {

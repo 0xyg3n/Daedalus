@@ -26,6 +26,7 @@ pub struct Node {
     pub linked: usize,
     pub viewed: bool,
     pub server_focused: bool,
+    pub usage: WorkspaceUsage,
     pub actionable: bool,
     pub fields: Vec<Field>,
     /// The label split by role (id, title, harness, model, topic, sid,
@@ -39,6 +40,13 @@ pub struct Node {
     pub activity: String,
     /// On a tab or window: its panes where the backend places them.
     pub layout: Option<Layout>,
+}
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceUsage {
+    pub visits: u64,
+    pub seconds: f64,
+    pub last_selected: f64,
 }
 /// A tab's split layout in cells, as Herdr or tmux reports it.
 #[derive(Clone, Default, Deserialize, Serialize, Debug, PartialEq)]
@@ -897,6 +905,7 @@ pub struct Ui {
     pub offset: usize,
     pub filter: String,
     pub searching: bool,
+    pub switching: bool,
     pub collapsed: HashSet<String>,
     pub dialog: Option<Dialog>,
     pub busy: bool,
@@ -1042,6 +1051,9 @@ impl Ui {
     pub fn rows(&self) -> Vec<Row> {
         let terms = self.terms();
         let mut rows = Vec::new();
+        if self.switching {
+            return self.switch_rows(&terms);
+        }
         if self.page == WORKSPACES {
             self.tree_rows(&terms, &mut rows);
         }
@@ -1049,6 +1061,91 @@ impl Ui {
             self.catalog_rows(&terms, &mut rows);
         } else {
             self.item_rows(&terms, &mut rows);
+        }
+        rows
+    }
+    fn switch_rows(&self, terms: &[String]) -> Vec<Row> {
+        let mut entries: Vec<_> = self
+            .snapshot
+            .tree
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                if n.kind != "pane" || n.tile.is_none() {
+                    return None;
+                }
+                let mut path = Vec::new();
+                let mut parent = n.parent.as_str();
+                let mut seen = HashSet::new();
+                while let Some(p) = self.snapshot.tree.iter().find(|p| p.id == parent) {
+                    if !seen.insert(&p.id) {
+                        break;
+                    }
+                    path.push(p.label.as_str());
+                    parent = &p.parent;
+                }
+                path.reverse();
+                let place = path.join(" › ");
+                let fields = n
+                    .fields
+                    .iter()
+                    .map(|f| f.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !matches(
+                    terms,
+                    &format!("{} {} {} {}", n.label, place, n.backend, fields),
+                ) {
+                    return None;
+                }
+                let pinned = self
+                    .snapshot
+                    .workspace
+                    .pins
+                    .iter()
+                    .position(|p| p.id == n.id && p.status == "live");
+                Some((i, n, place, pinned))
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            a.3.unwrap_or(usize::MAX)
+                .cmp(&b.3.unwrap_or(usize::MAX))
+                .then_with(|| b.1.usage.last_selected.total_cmp(&a.1.usage.last_selected))
+                .then_with(|| b.1.usage.visits.cmp(&a.1.usage.visits))
+                .then_with(|| a.1.id.cmp(&b.1.id))
+        });
+        let mut rows = vec![Row::header(
+            "Switch terminal",
+            "Pinned first · recent Herdr selections · type to filter",
+        )];
+        for (rank, (i, n, place, pin)) in entries.into_iter().enumerate() {
+            let mut note = format!("{} · {}", place, n.state);
+            if pin.is_some() {
+                note.push_str(" · pinned");
+            }
+            if n.usage.visits > 0 {
+                note.push_str(&format!(
+                    " · {:.1}m selected · {} visits",
+                    n.usage.seconds / 60.0,
+                    n.usage.visits
+                ));
+            }
+            if rank < 9 {
+                note = format!("Alt+{} · {note}", rank + 1);
+            }
+            rows.push(Row {
+                kind: Kind::Node,
+                id: n.id.clone(),
+                title: n.label.clone(),
+                note,
+                icon: "pane".into(),
+                source: i,
+                parent: String::new(),
+                branch: String::new(),
+                children: false,
+                expanded: false,
+                hint: String::new(),
+            });
         }
         rows
     }
@@ -1501,6 +1598,7 @@ impl Ui {
             self.paged_at = Some(Instant::now());
         }
         self.page = page;
+        self.switching = false;
         self.offset = 0;
         self.filter.clear();
         self.searching = false;
@@ -1949,6 +2047,49 @@ pub mod tests {
             pane("e", "two", 4_000.0, "status"),
         ];
         ui
+    }
+    #[test]
+    fn switcher_searches_parent_names_ranks_pins_then_recent_and_skips_stale_pins() {
+        let mut ui = busy_fixture();
+        ui.switching = true;
+        ui.snapshot.tree[1].label = "Project Alpha".into();
+        ui.snapshot.tree[4].label = "Project Beta".into();
+        ui.snapshot.tree[2].usage = WorkspaceUsage {
+            visits: 3,
+            seconds: 60.0,
+            last_selected: 100.0,
+        };
+        ui.snapshot.tree[5].usage = WorkspaceUsage {
+            visits: 5,
+            seconds: 120.0,
+            last_selected: 200.0,
+        };
+        ui.snapshot.workspace.pins = vec![
+            Pin {
+                id: "missing".into(),
+                status: "missing".into(),
+                ..Pin::default()
+            },
+            Pin {
+                id: "b".into(),
+                status: "live".into(),
+                ..Pin::default()
+            },
+        ];
+        let ids = || {
+            ui.rows()
+                .into_iter()
+                .filter(|r| r.kind == Kind::Node)
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(&ids()[..3], ["b", "c", "a"]);
+        ui.filter = "alpha".into();
+        let rows = ui.rows();
+        assert_eq!(rows.iter().filter(|r| r.kind == Kind::Node).count(), 2);
+        assert!(rows.iter().any(|r| r.note.contains("3 visits")));
+        ui.filter = "no-match".into();
+        assert!(ui.rows().iter().all(|r| r.kind == Kind::Header));
     }
     #[test]
     fn activity_order_puts_live_terminals_then_the_latest_first() {

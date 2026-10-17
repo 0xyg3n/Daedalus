@@ -63,3 +63,5 @@ pub mod workspace_actions;
 pub mod instances;
 
 pub mod update;
+
+pub mod workspace_usage;

@@ -2038,11 +2038,17 @@ impl Source for NativeSource {
             Ok(views) => snapshot["daedalus_views"] = json!(views),
             Err(_) => errors.push("Saved view identities could not be read"),
         }
-        self.last_snapshot = snapshot.clone();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "System clock is before epoch")?
             .as_secs_f64();
+        if self.directory.join("control.json").is_file() {
+            match super::workspace_usage::sample(&self.directory, &snapshot, now) {
+                Ok(usage) => snapshot["workspace_usage"] = usage,
+                Err(_) => errors.push("Local workspace usage is unavailable"),
+            }
+        }
+        self.last_snapshot = snapshot.clone();
         let (telegram, fallback_local, telegram_token_saved) =
             telegram_observation(&self.directory, config);
         let local = (|| -> Result<Value> {

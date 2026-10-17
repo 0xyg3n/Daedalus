@@ -113,3 +113,26 @@ same sizes. It does not resize only Daedalus's Details panel. Both exact termina
 identities and the captured layout are checked again before the native command;
 a changed layout is rejected and an uncertain result is not automatically retried.
 Small-pane limits and backend resize support still apply.
+
+## Quick terminal switcher and Herdr usage
+
+Press **Ctrl+K** from any page to search live terminals by workspace, tab, pane,
+agent or displayed details. Pinned live panes come first, then recent Herdr
+selections. Arrow keys select; **Enter** opens a read-only watch inside Daedalus.
+**Alt+1–9** opens the corresponding visible result. **Esc** returns to the tree.
+While attached, **Ctrl+] then K** opens the switcher without sending Ctrl+K to
+the agent. Use the existing attach control when you want to type.
+
+Herdr selection counts and sampled selected time appear in terminal Details and
+the switcher. These are **server selection observations**, not per-client viewing,
+human attention, AI tokens, billing or subscription limits. They accumulate only
+while the Daedalus backend refreshes. Gaps over 30 seconds, disconnected discovery,
+changed terminal generations and process restarts do not accrue time. Switching
+intervals are conservatively excluded because the exact switch time is unknown.
+
+History is stored privately in `<config-dir>/workspace-usage.sqlite3`. It contains
+hashed terminal/server identities, counters and timestamps, with no pane text,
+workspace paths, prompts or credentials. Instance import copies these local
+aggregates without activating tracking during preview. Configuration and runtime
+databases stay outside Git. Existing pin ordering is the shortcut priority; no
+background monitoring service is installed.

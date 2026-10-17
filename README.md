@@ -43,6 +43,11 @@ You run coding agents such as Claude Code, Codex or Grok in tmux or Herdr termin
 - **Hooks and goals.** Reviewed per-tool hook profiles report lifecycle, replies and progress. Goals continue a directive where the tool has a native way to do so.
 - **Optional extras.** Armonia keeps stable agent numbers and aliases; Hindsight adds scoped memory. Neither is needed for routing.
 
+On current `main` (not yet in beta.3), **Ctrl+K** opens a searchable terminal
+switcher with pinned and recent destinations; **Alt+1–9** opens a visible result.
+Herdr selection time and visit counts are private local aggregates, not token or
+billing measurements. See [quick switching and usage](docs/TUI.md#quick-terminal-switcher-and-herdr-usage).
+
 ## How it works
 
 <p align="center"><img src="assets/architecture.svg" alt="Daedalus architecture: TUI, CLI and Telegram frontends call the same shared operations, which recheck the exact target and act through tmux and Herdr adapters on agents whose hooks report back to the journal" width="900"></p>

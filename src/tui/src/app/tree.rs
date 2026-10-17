@@ -461,6 +461,13 @@ impl Tree {
                         && f.get("pane_id") == pane.get("pane_id")
                 });
             tree.nodes[pane_node].attributes=json!({"parts":label_parts(pane,&title,&context.hostname),"viewer":viewer,"views":views(pane,snapshot),"state":state,"activity_at":active_at,"activity":activity,"linked":linked,"viewed":viewed,"server_focused":focused}).as_object().unwrap().clone();
+            if let Some(key) = super::workspace_usage::key(pane)
+                && let Some(usage) = snapshot.get("workspace_usage").and_then(|u| u.get(&key))
+            {
+                tree.nodes[pane_node]
+                    .attributes
+                    .insert("usage".into(), usage.clone());
+            }
             for client in array(snapshot, "clients") {
                 if backend == "tmux"
                     && array(client, "outer_panes").iter().any(|outer| {
@@ -981,6 +988,16 @@ impl Tree {
         let [activity, tone] = activity_description(pane, context.now);
         rows.push(json!(["State", state, "state"]));
         rows.push(json!(["Activity", activity, tone]));
+        if let Some(usage) = node.attributes.get("usage")
+            && let (Some(seconds), Some(visits)) =
+                (usage["seconds"].as_f64(), usage["visits"].as_u64())
+        {
+            rows.push(json!([
+                "Herdr selection",
+                format!("{:.1} min sampled · {visits} visits", seconds / 60.0),
+                "muted"
+            ]));
+        }
         rows.push(if agent_here {
             json!(["Agent", agent, "harness"])
         } else if !agent.is_empty() {
@@ -1163,6 +1180,9 @@ impl Tree {
                     json!({"title":title(pane,&context.hostname),"place":place,"project":first(pane,&["session"]),"harness":first(pane,&["agent"]),"state":attr("state","".into()),"views":node.attr("views").get("count").cloned().unwrap_or(1.into()),"pinned":pin,"viewer":truth(&node.attr("viewer")),"split":attr("split",0.into())})
                 });
                 rows.push(json!({"id":id,"parent":node.parent.map(|p|tree.nodes[p].id()).unwrap_or_default(),"label":node.label,"parts":attr("parts",json!([])),"branch":format!("{prefix}{}",if last{"└─ "}else{"├─ "}),"kind":node.kind,"backend":node.key.first().map(text).unwrap_or_default(),"children":!node.children.is_empty(),"count":attr("pane_count",0.into()),"state":attr("state","".into()),"active_at":attr("activity_at",json!(0.0)),"activity":attr("activity","".into()),"linked":attr("linked",0.into()),"viewed":attr("viewed",false.into()),"server_focused":attr("server_focused",false.into()),"actionable":node.pane.is_some()||truth(&node.attr("checkpoint")),"fields":tree.fields(index,context),"tile":tile,"layout":node.attr("layout")}));
+                if let (Some(usage), Some(row)) = (node.attributes.get("usage"), rows.last_mut()) {
+                    row["usage"] = usage.clone();
+                }
                 if !filter.query.is_empty() || !filter.collapsed.contains(&id) {
                     walk(
                         tree,
