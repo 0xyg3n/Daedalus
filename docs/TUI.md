@@ -146,8 +146,10 @@ Branches collapse independently. Small terminals retain the terminal-only view.
 In Workspaces, **W** opens all terminals in Wall and **B** limits the Wall to
 terminals reporting working or blocked. The **All / Working / Pinned** buttons
 switch scope. Working terminals come first in activity order; pinned-only mode
-preserves pin order. Click a Wall terminal to open Focus. Crowded walls use compact
-rows when full previews cannot fit.
+preserves pin order. Click a preview card to open Focus. Crowded walls use a readable terminal list
+with status labels and one large selected screen: click to select, double-click
+to watch in Focus. Long lists keep the selection visible. Only that selected
+screen is captured in this mode, reducing background terminal reads.
 
 **Ctrl+U** opens release details. While attached, use **Ctrl+]**, then **U**.
 Updates require explicit approval; the startup check can be disabled with

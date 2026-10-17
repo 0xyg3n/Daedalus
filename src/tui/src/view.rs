@@ -385,6 +385,7 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         ],
     );
     header(f, rows[0], ui, wide);
+    ui.wall_roster = false;
     ui.tile_hits.clear();
     ui.pane_hits.clear();
     ui.quick_hits.clear();
@@ -1186,9 +1187,29 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let count = tiles.len();
     ui.tile = ui.tile.min(count.saturating_sub(1));
     grid_summary(f, area, ui, format!(" {count} terminals · overview"));
-    // Wall keeps a compact overview and a large selected screen side by side.
-    // Tiles instead spends its entire area on paged, readable previews.
-    let (grid, inspect) = if full_grid.width >= 110 && count > 1 {
+    // Never shrink a fleet into unreadable postage stamps. Keep all names
+    // visible and give the selected terminal most of the width instead.
+    let readable = usize::from((full_grid.width.saturating_mul(2) / 3 / 40).max(1))
+        * usize::from((full_grid.height / 8).max(1));
+    let dense = count > readable;
+    let (grid, inspect) = if dense && full_grid.width >= 84 {
+        let parts = split(
+            full_grid,
+            Direction::Horizontal,
+            vec![
+                Constraint::Length((full_grid.width / 3).clamp(32, 64)),
+                Constraint::Min(45),
+            ],
+        );
+        (parts[0], Some(parts[1]))
+    } else if dense && full_grid.height >= 20 {
+        let parts = split(
+            full_grid,
+            Direction::Vertical,
+            vec![Constraint::Percentage(45), Constraint::Percentage(55)],
+        );
+        (parts[0], Some(parts[1]))
+    } else if full_grid.width >= 110 && count > 1 {
         let width = (full_grid.width / 3).clamp(36, 64);
         let parts = split(
             full_grid,
@@ -1196,12 +1217,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
             vec![Constraint::Min(50), Constraint::Length(width)],
         );
         (parts[0], Some(parts[1]))
-    } else if count > 1
-        && full_grid.height >= 24
-        && count
-            <= usize::from((full_grid.width / WALL_CELL.0).max(1))
-                * usize::from((full_grid.height / 2 / WALL_CELL.1).max(1))
-    {
+    } else if count > 1 && full_grid.height >= 24 {
         let parts = split(
             full_grid,
             Direction::Vertical,
@@ -1234,6 +1250,14 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     }
     if tiles.is_empty() {
         no_tiles(f, grid, ui);
+        return;
+    }
+    if dense {
+        wall_roster(f, grid, ui, &tiles);
+        if selected_rows > 0 && !tiles[ui.tile].id.is_empty() {
+            ui.preview_targets.push(tiles[ui.tile].id.clone());
+            ui.preview_rows = selected_rows;
+        }
         return;
     }
     let fit_columns = (grid.width / WALL_CELL.0).max(1) as usize;
@@ -1416,6 +1440,122 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) 
     }
     preview_screen(f, inner, ui, &node.id);
     inner.height
+}
+
+/// A readable fleet list when simultaneous previews would be too small.
+fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileRow]) {
+    let theme = ui.theme;
+    ui.wall_roster = true;
+    let block = panel(&theme, Line::from(" TERMINALS "));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
+    let height = if tiles.len().saturating_mul(2) <= usize::from(inner.height) {
+        2
+    } else {
+        1
+    };
+    let capacity = (usize::from(inner.height) / height).max(1);
+    let first = ui.tile / capacity * capacity;
+    ui.tile_columns = 1;
+    ui.tiles_per_page = capacity;
+    for (index, row) in tiles.iter().enumerate().skip(first).take(capacity) {
+        let rect = Rect::new(
+            inner.x,
+            inner.y + ((index - first) * height) as u16,
+            inner.width,
+            height as u16,
+        );
+        let selected = index == ui.tile;
+        let node = row.source.and_then(|i| ui.snapshot.tree.get(i));
+        let (title, place, icon, status, tone) = match node {
+            Some(node) => {
+                let tile = node.tile.as_ref().unwrap();
+                let (status, tone) = terminal_status(node);
+                (
+                    tile.title.as_str(),
+                    tile.place.as_str(),
+                    theme.icon(&tile.harness),
+                    status,
+                    tone,
+                )
+            }
+            None => {
+                let pin = row.pin.and_then(|i| ui.snapshot.workspace.pins.get(i));
+                (
+                    pin.map_or("Missing terminal", |p| p.label.as_str()),
+                    pin.map_or("", |p| p.place.as_str()),
+                    theme.icon("missing"),
+                    "missing",
+                    Tone::Warn,
+                )
+            }
+        };
+        let base = if selected {
+            theme.selected(1.0)
+        } else {
+            theme.surface()
+        };
+        let prefix = format!(
+            "{} {icon} ",
+            if selected {
+                theme.glyph("▸", ">")
+            } else {
+                " "
+            }
+        );
+        let suffix = format!(" {status} ");
+        let room = usize::from(inner.width).saturating_sub(width(&prefix) + width(&suffix));
+        let title = fit(&clean(title), room, &theme);
+        let pad = room.saturating_sub(width(&title));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(prefix, base.fg(theme.rgb(tone.rgb()))),
+                Span::styled(title, base),
+                Span::styled(" ".repeat(pad), base),
+                Span::styled(suffix, base.fg(theme.rgb(tone.rgb()))),
+            ]))
+            .style(base),
+            Rect { height: 1, ..rect },
+        );
+        if height == 2 {
+            f.render_widget(
+                Paragraph::new(format!(
+                    "   {}",
+                    fit(
+                        &clean(place),
+                        usize::from(inner.width).saturating_sub(3),
+                        &theme
+                    )
+                ))
+                .style(base.fg(theme.rgb(Tone::Muted.rgb()))),
+                Rect {
+                    y: rect.y + 1,
+                    height: 1,
+                    ..rect
+                },
+            );
+        }
+        ui.tile_hits.push((rect, index));
+    }
+    let end = (first + capacity).min(tiles.len());
+    let label = format!(" {}–{end}/{} · click selects ", first + 1, tiles.len());
+    f.render_widget(
+        Paragraph::new(fit(
+            &label,
+            usize::from(area.width.saturating_sub(2)),
+            &theme,
+        ))
+        .style(theme.fg(Tone::Faint)),
+        Rect::new(
+            area.x + 1,
+            area.bottom() - 1,
+            area.width.saturating_sub(2),
+            1,
+        ),
+    );
 }
 
 /// Too many for screens: one line per terminal, in columns, with the
@@ -5501,15 +5641,16 @@ mod tests {
         ui.snapshot.tree[1].active_at = 1_000.0;
         ui.snapshot.tree[1].activity = "working".into();
         let rendered = text(&render(&mut ui, 160, 44));
-        // 24 live terminals and a missing pin, all on screen and all previewed.
+        // The full fleet stays readable; only the selected large screen is read.
         assert_eq!(ui.tile_hits.len(), 25);
-        assert_eq!(ui.preview_targets.len(), 24);
+        assert_eq!(ui.preview_targets, ["a"]);
+        assert!(ui.wall_roster);
         assert!(!rendered.contains("page"));
         assert!(rendered.contains("1 live"), "{rendered}");
         assert!(rendered.contains("preview-ok"));
         assert!(ui.tile_hits.iter().all(|(r, _)| r.width >= WALL_CELL.0));
-        // The working terminal's age shows on its frame.
-        assert!(rendered.contains(" now"));
+        // Status stays visible instead of squeezing another tiny screen.
+        assert!(rendered.contains("working"));
     }
     #[test]
     fn a_crowded_wall_lists_one_terminal_per_line() {
@@ -5522,7 +5663,11 @@ mod tests {
         }
         render(&mut ui, 100, 30);
         assert!(ui.tile_hits.iter().all(|(r, _)| r.height == 1));
-        assert!(ui.preview_targets.is_empty(), "lines are not previewed");
+        assert_eq!(
+            ui.preview_targets.len(),
+            1,
+            "only selected inspection is previewed"
+        );
         // The selection stays in sight past the first screenful.
         ui.select_tile(250);
         render(&mut ui, 100, 30);

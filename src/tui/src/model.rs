@@ -934,6 +934,7 @@ pub struct Ui {
     pub tile_columns: usize,
     pub pinned_only: bool,
     pub working_only: bool,
+    pub wall_roster: bool,
     pub previews: HashMap<String, Preview>,
     pub preview_pending: bool,
     pub last_preview: Option<Instant>,

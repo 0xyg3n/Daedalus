@@ -1497,7 +1497,7 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     .is_some_and(|(i, at)| i == index && at.elapsed() < Duration::from_millis(500));
                 ui.select_tile(index);
                 ui.clicked = Some((index, Instant::now()));
-                if again || ui.view == View::Wall {
+                if again || (ui.view == View::Wall && !ui.wall_roster) {
                     return switch_view(ui, View::Focus);
                 }
             } else if let Some(&(_, row)) = ui.list_hits.iter().find(|(r, _)| r.contains(p)) {
@@ -3256,5 +3256,36 @@ mod cli_tests {
         assert_eq!(request["action"], "terminal.watch");
         assert_eq!(ui.focus_target, "b");
         assert!(ui.focus_tree_reveal);
+    }
+    #[test]
+    fn crowded_wall_click_selects_then_double_click_opens_focus() {
+        let mut ui = workspace();
+        ui.view = View::Wall;
+        let template = ui.snapshot.tree[1].clone();
+        for i in 0..26 {
+            let mut node = template.clone();
+            node.id = format!("fleet-{i}");
+            ui.snapshot.tree.push(node);
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        assert!(ui.wall_roster);
+        let (rect, index) = *ui
+            .tile_hits
+            .iter()
+            .find(|(_, index)| *index > 0 && !ui.tiles()[*index].id.is_empty())
+            .unwrap();
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, event), Step::Continue));
+        assert_eq!(ui.view, View::Wall);
+        assert_eq!(ui.tile, index);
+        assert!(matches!(mouse_event(&mut ui, event), Step::Send(_)));
+        assert_eq!(ui.view, View::Focus);
     }
 }
