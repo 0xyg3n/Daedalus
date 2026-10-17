@@ -29,16 +29,16 @@
 </tr>
 </table>
 
-The Rust migration is still in beta. See the [migration audit](docs/ARCHITECTURE.md#python-migration-audit) for remaining differences from the Python version.
+The current release is [0.2.0-beta.3](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3), with Linux and Windows x86-64 binaries and SHA-256 checksums. The Rust migration is still in beta. See the [migration audit](docs/ARCHITECTURE.md#python-migration-audit) for remaining differences from the Python version.
 
 ## What it does
 
 You run coding agents such as Claude Code, Codex or Grok in tmux or Herdr terminals. Daedalus finds those terminals, shows them side by side and lets you watch, type into or message exactly the one you choose, from the terminal UI, the command line or a Telegram chat. It does not replace the agents or their sign-in. Everything ships as one Rust executable.
 
 - **See every terminal.** Tree, Tiles, Wall and Focus views over tmux and Herdr, with live colored previews of each pane.
-- **Watch or take over.** Observe a terminal read-only, or attach and type. Detaching (Ctrl+] then D) leaves the process running.
+- **Watch or take over.** Observe a terminal read-only, or attach and type. Detaching (Ctrl+] then D) leaves the process running. In Focus, drag split dividers or use Alt+arrows to resize the actual panes; while attached, press Ctrl+] first.
 - **Start and organize work.** Create projects, tabs and splits, start any installed agent in them, and sign in with each tool's own login flow.
-- **Keep sessions.** Save named checkpoints, resume or fork a conversation where the tool supports it, duplicate a view, hand context to another tool, and save layouts and workflows.
+- **Keep sessions.** Save named checkpoints or context-only excerpts from a terminal, resume or fork a conversation where the tool supports it, duplicate a view, hand context to another tool, and save layouts and workflows.
 - **Drive agents from Telegram.** An authorized chat is bound to one exact agent. Text, photos and files go in; replies and progress come back.
 - **Hooks and goals.** Reviewed per-tool hook profiles report lifecycle, replies and progress. Goals continue a directive where the tool has a native way to do so.
 - **Optional extras.** Armonia keeps stable agent numbers and aliases; Hindsight adds scoped memory. Neither is needed for routing.
@@ -63,22 +63,24 @@ You run coding agents such as Claude Code, Codex or Grok in tmux or Herdr termin
 
 The feeder connects one Telegram chat to one exact agent conversation. A message you send to your bot is typed into that agent's prompt, and the agent's reply comes back to the chat.
 
-1. **Admit.** `daedalus telegram serve` polls your bot. Only granted senders are accepted; forwarded commands are refused. In groups the bot reacts after `/listen`, a mention or a reply to it.
+1. **Admit.** `daedalus telegram serve` polls your bot. Only granted senders are accepted; forwarded commands are refused. In groups input requires `/listen`, a mention or a reply to the bot.
 2. **Store.** Photos (largest size) and documents up to 20 MiB are downloaded into the private configuration directory as `attachments/<sha256>.<ext>`. The original file name is never used as a path.
-3. **Queue.** The message joins a durable inbox bound to the chat's route: terminal, conversation and route revision.
+3. **Queue.** The message joins a durable inbox bound to the chat's route: terminal, conversation and route revision. A 👀 reaction confirms that it was saved, not that the agent has processed it.
 4. **Wait for idle.** It is typed only when the agent's hooks report the conversation idle. While the agent works, the message stays queued (`Waiting for verified agent readiness; input remains queued`). A changed or revoked route blocks it instead of sending it elsewhere.
 5. **Type.** The agent receives one inert line, `/usr/bin/false -- '{…}'`, holding a JSON envelope with the sender, chat, message text, attachment path, size and SHA-256, and a correlation ID. If that line ever reached a shell it would do nothing.
-6. **Report.** One progress message is edited in place (`Agent started responding`, `Agent activity observed`, `Agent turn finished`). When the turn ends, the agent's final reply is sent as plain text, split at Telegram's 4096-unit limit.
+6. **Report.** One progress message is edited in place (`Agent started responding`, `Agent activity observed`, `Agent turn finished`). Verified assistant replies are sent as plain text, split at Telegram's 4096 UTF-16-unit limit. Typing refreshes while the registered conversation reports Busy; it is not a task-completion signal.
 
 | Feature | Support |
 | --- | --- |
 | Text and captions | Yes |
 | Photos | Yes, largest size up to 20 MiB, saved with their image extension so the agent can open them |
-| Documents and files | Yes, up to 20 MiB, saved with their extension |
+| Documents and files | Incoming only, up to 20 MiB, saved with their extension; outbound file/media delivery is not yet available |
 | Voice, audio, video, stickers | Ignored; only the caption is used |
-| Replies | Final assistant text from the agent's Stop hook |
+| Replies | Verified assistant text from provider hooks; plain text, with no rich Markdown rendering yet |
+| Receipt and typing | 👀 after durable admission; typing while verified Busy. Cosmetic feedback is best effort and does not block delivery |
 | Progress | One message edited in place per binding |
-| Streaming | `/stream`, `/reason`, `/verbose` in private chats: assistant text or tool names, never tool arguments, results or hidden reasoning |
+| Streaming | `/stream`, `/reason`, `/verbose` in private chats where supported: assistant text or tool names. Grok live streaming remains unavailable. No tool arguments, results or hidden reasoning |
+| Command menu | Canonical commands are registered for Telegram autocomplete; legacy aliases use the same permissions and route checks |
 | Remote control | `/status`, `/windows`, `/use`, `/say`, `/capture`, `/interrupt`, `/stop`, `/new claude`, checkpoints, goals and Claude Code slash commands |
 | Group chats | `/listen` and `/quiet`, mentions and replies |
 
@@ -126,7 +128,7 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Stable release; tested locally | tmux and Herdr | [Linux release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.1.0) or source build below |
+| Linux x86-64 | Current beta; tested locally | tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3) or source build below |
 | Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
 
 Both platforms use the same Rust executable and Ratatui interface; no Python runtime is required. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
@@ -135,14 +137,15 @@ The Windows preview passes cross-compilation and Windows unit tests under Wine. 
 
 ## Install
 
-The stable Linux x86-64 release includes a binary and checksum:
+The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.1.0
-curl -fLO "$base/daedalus-0.1.0-x86_64-linux"
-curl -fLO "$base/daedalus-0.1.0-x86_64-linux.sha256"
-sha256sum -c daedalus-0.1.0-x86_64-linux.sha256
-install -m 0755 daedalus-0.1.0-x86_64-linux ~/.local/bin/daedalus
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.3
+curl -fLO "$base/daedalus-0.2.0-beta.3-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.3-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.3-x86_64-linux.sha256
+mkdir -p ~/.local/bin
+install -m 0755 daedalus-0.2.0-beta.3-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -165,7 +168,7 @@ if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum 
 
 For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
 
-Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) compares your version with the latest release and installs nothing. Details are in the [install guide](docs/INSTALL.md).
+Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. `daedalus update check` (or **AI tools → Check for updates**) checks the latest **stable** release and installs nothing. It does not select beta releases; use the [release list](https://github.com/0xyg3n/Daedalus/releases) for beta downloads. The older 0.1.0 remains the latest stable release. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

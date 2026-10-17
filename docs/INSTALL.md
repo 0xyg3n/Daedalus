@@ -207,7 +207,11 @@ Telegram service, stop it and hand over with `daedalus telegram cutover preview|
 ## Update and removal
 
 `daedalus update check [--json]`, or **AI tools → Check for updates** in the panel,
-reports whether a newer GitHub release exists. It installs nothing. To upgrade, run
+checks the latest stable GitHub release. It does not select prereleases or prove
+that a source build includes the latest commits. The current published beta is
+[0.2.0-beta.3](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.3);
+use its binaries and checksums for the beta features described in the README.
+It installs nothing. To upgrade, run
 the installer again. Older releases stay under `PREFIX/share/daedalus/native/`;
 installing an older revision relinks it. Restart a running Telegram service after
 switching binaries.
