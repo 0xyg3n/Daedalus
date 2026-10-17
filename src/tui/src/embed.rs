@@ -25,7 +25,8 @@ use std::{
 /// Bytes per `send-keys -H` command; keeps control-mode lines short.
 const CHUNK: usize = 96;
 /// Upper bound of stream data handled per frame, so input stays responsive.
-const BUDGET: usize = 4 * 1024 * 1024;
+const BUDGET: usize = 256 * 1024;
+const PUMP_SLICE: Duration = Duration::from_millis(4);
 const CHECK_EVERY: Duration = Duration::from_secs(2);
 /// Herdr refuses an attach while a pane read is running; it asks to retry.
 /// Retries wait a little longer each time.
@@ -277,7 +278,7 @@ fn launch(argv: &[String]) -> io::Result<Client> {
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("No stream"))?;
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(32);
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut line = Vec::new();
@@ -568,16 +569,20 @@ impl Embed {
             // Herdr releases the attach slot on request or on stdin EOF.
             let _ = writeln!(stdin, r#"{{"type":"terminal.release"}}"#);
         }
-        let deadline = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < deadline {
-            if matches!(client.child.try_wait(), Ok(Some(_))) {
-                return;
+        // Release/EOF has already been sent. Reap only this stream client in
+        // the background so pane switches and Observe/Attach never stall the UI.
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                if matches!(client.child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
             }
-            thread::sleep(Duration::from_millis(10));
-        }
-        // Ends the stream client process only; the terminal survives.
-        let _ = client.child.kill();
-        let _ = client.child.wait();
+            // Ends the stream client process only; the terminal survives.
+            let _ = client.child.kill();
+            let _ = client.child.wait();
+        });
     }
 
     pub fn detach(&mut self) {
@@ -603,7 +608,8 @@ impl Embed {
             self.end("No screen arrived in 8 seconds. Enter tries again; Esc returns.");
             return true;
         }
-        while used < BUDGET {
+        let started = Instant::now();
+        while used < BUDGET && (used == 0 || started.elapsed() < PUMP_SLICE) {
             let Some(client) = self.client.as_ref() else {
                 break;
             };
@@ -1842,7 +1848,18 @@ fn main() {
         embed.send(b"x");
         embed.resize(12, 60);
         embed.detach();
-        let text = std::fs::read_to_string(&log).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let text = loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text.lines().last().is_some_and(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|v| v["type"] == "terminal.release")
+            }) {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "missing release receipt");
+            thread::sleep(Duration::from_millis(10));
+        };
         let lines: Vec<serde_json::Value> = text
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -1902,5 +1919,30 @@ fn main() {
         // Leaving the alternate screen reveals the captured primary screen.
         parser.process(b"\x1b[?1049l");
         assert!(parser.screen().contents().starts_with("primary"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn detach_does_not_wait_for_a_stubborn_client_and_eventually_reaps_it() {
+        let plan = Plan {
+            adapter: "tmux-control".into(),
+            argv: vec![crate::test_support::path("/bin/sleep").into(), "30".into()],
+            terminal: "%1".into(),
+            mode: "observe".into(),
+            ..Plan::default()
+        };
+        let mut embed = Embed::start(plan, 10, 50).unwrap();
+        let pid = embed.client.as_ref().unwrap().child.id() as libc::pid_t;
+        embed.detach();
+        assert!(embed.client.is_none());
+        // Cleanup happens after return, rather than blocking the next pane.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "detached stream client was not reaped"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

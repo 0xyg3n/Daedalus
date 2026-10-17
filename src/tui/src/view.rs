@@ -489,7 +489,10 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     footer(f, rows[2], ui);
     // Before the page fade and any dialog, so both dim the background too.
     match ui.look {
-        Look::Glow => backdrop::glow(f.buffer_mut(), area, &theme, page_hue(ui)),
+        Look::Glow => {
+            let hue = page_hue(ui);
+            ui.backdrop.glow(f.buffer_mut(), area, &theme, hue);
+        }
         Look::Off => {}
         look => ui.backdrop.apply(f.buffer_mut(), area, &theme, look),
     }
@@ -584,6 +587,7 @@ struct SideTerminal {
     title: String,
     tone: Tone,
     age: String,
+    status: String,
 }
 
 /// Pinned terminals, and the most recently active others.
@@ -596,8 +600,9 @@ fn side_terminals(ui: &Ui) -> (Vec<SideTerminal>, Vec<SideTerminal>) {
             .map(|t| t.title.clone())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| node.label.clone()),
-        tone: heat(ui, node).unwrap_or(Tone::Faint),
+        tone: terminal_status(node).1,
         age: ui.ago(node),
+        status: terminal_status(node).0.into(),
     };
     let find = |id: &str| {
         ui.snapshot
@@ -615,8 +620,9 @@ fn side_terminals(ui: &Ui) -> (Vec<SideTerminal>, Vec<SideTerminal>) {
                 None => SideTerminal {
                     id: String::new(),
                     title: pin.label.clone(),
-                    tone: Tone::Faint,
+                    tone: Tone::Warn,
                     age: pin.status.clone(),
+                    status: "missing".into(),
                 },
             })
             .collect()
@@ -685,7 +691,7 @@ fn side_lists(f: &mut Frame, area: Rect, ui: &mut Ui) {
             } else {
                 theme.glyph("◌", "?")
             };
-            let age = fit(&item.age, 9, &theme);
+            let age = fit(&item.status, 9, &theme);
             let room = (area.width as usize).saturating_sub(6 + width(&age));
             let title = fit(&item.title, room, &theme);
             let pad = room.saturating_sub(width(&title)) + 1;
@@ -707,7 +713,7 @@ fn side_lists(f: &mut Frame, area: Rect, ui: &mut Ui) {
                         })),
                     ),
                     Span::styled(" ".repeat(pad), base),
-                    Span::styled(age, base.patch(theme.fg(Tone::Faint))),
+                    Span::styled(age, base.patch(theme.fg(item.tone))),
                     Span::styled(" ", base),
                 ])),
                 rect,
@@ -944,7 +950,14 @@ fn quick_bar(f: &mut Frame, area: Rect, ui: &mut Ui, tail: &[(&str, &str, &str)]
             .map(|(k, l, id)| (k.to_string(), l.to_string(), id.to_string())),
     );
     let mut x = area.x + 1;
+    let mut seen_actions = std::collections::HashSet::new();
+    let mut seen_keys = std::collections::HashSet::new();
     for (key, label, id) in items {
+        if seen_actions.contains(&id) || seen_keys.contains(&key) {
+            continue;
+        }
+        seen_actions.insert(id.clone());
+        seen_keys.insert(key.clone());
         let cap = format!(" {key} ");
         let text = format!(" {label} ");
         let w = (width(&cap) + width(&text)) as u16;
@@ -1268,11 +1281,34 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
 /// How warm a terminal's edge is: live ones in their state's color, the
 /// last five minutes violet, the last hour blue, the rest plain. Cyan is
 /// kept for the selection.
+fn terminal_status(node: &Node) -> (&'static str, Tone) {
+    let states = [
+        node.state.as_str(),
+        node.activity.as_str(),
+        node.tile.as_ref().map_or("", |t| t.state.as_str()),
+    ];
+    if states.contains(&"blocked") {
+        ("blocked", Tone::Warn)
+    } else if states.iter().any(|s| matches!(*s, "working" | "busy")) {
+        ("working", Tone::Ok)
+    } else if states
+        .iter()
+        .any(|s| matches!(*s, "idle" | "ready" | "done"))
+    {
+        ("idle", Tone::Muted)
+    } else if states
+        .iter()
+        .any(|s| matches!(*s, "failed" | "error" | "exited"))
+    {
+        ("error", Tone::Rose)
+    } else {
+        ("unknown", Tone::Faint)
+    }
+}
 fn heat(ui: &Ui, node: &Node) -> Option<Tone> {
-    match node.activity.as_str() {
-        "working" => return Some(Tone::Ok),
-        "blocked" => return Some(Tone::Warn),
-        _ => {}
+    let (status, tone) = terminal_status(node);
+    if matches!(status, "working" | "blocked" | "error") {
+        return Some(tone);
     }
     if node.active_at <= 0.0 || ui.snapshot.observed_at <= 0.0 {
         return None;
@@ -1318,7 +1354,7 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) 
         return 0;
     };
     let tile = node.tile.clone().unwrap_or_default();
-    let tone = node_tone(&tile.state, "pane");
+    let tone = terminal_status(node).1;
     let edge = if selected {
         Tone::Accent
     } else {
@@ -1515,7 +1551,7 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) 
         return 0;
     };
     let tile = node.tile.clone().unwrap_or_default();
-    let tone = node_tone(&tile.state, "pane");
+    let tone = terminal_status(node).1;
     let warm = heat(ui, node);
     let edge = if selected {
         Tone::Accent
@@ -1579,7 +1615,7 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) 
     if tile.viewer {
         facts.push("Daedalus view".into());
     }
-    let state = fit(&tile.state, 16, &theme);
+    let state = fit(terminal_status(node).0, 16, &theme);
     let left = fit(
         &facts.join(" · "),
         w.saturating_sub(width(&state) + 3),
@@ -1770,35 +1806,23 @@ fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
             theme.icon(harness)
         };
         let prefix = format!("{}{badge} {icon} ", row.branch);
+        let (status, status_tone) = terminal_status(node);
         let state = if branch {
-            ""
-        } else if node.live() {
-            if node.state == "blocked" || node.activity == "blocked" {
-                " !"
-            } else {
-                " +"
-            }
+            String::new()
         } else {
-            ""
+            format!(" {status}")
         };
-        let room = (inner.width as usize).saturating_sub(width(&prefix) + width(state));
+        let room = (inner.width as usize).saturating_sub(width(&prefix) + width(&state));
         let label = fit(&clean(&node.label), room, &theme);
         let pad =
-            (inner.width as usize).saturating_sub(width(&prefix) + width(&label) + width(state));
+            (inner.width as usize).saturating_sub(width(&prefix) + width(&label) + width(&state));
         let hit = Rect::new(inner.x, inner.y + line as u16, inner.width, 1);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(label, style),
                 Span::styled(" ".repeat(pad), style),
-                Span::styled(
-                    state,
-                    if active {
-                        style
-                    } else {
-                        theme.fg(heat(ui, node).unwrap_or(Tone::Muted))
-                    },
-                ),
+                Span::styled(state, style.fg(theme.rgb(status_tone.rgb()))),
             ]))
             .style(style),
             hit,
@@ -4013,7 +4037,12 @@ fn shortcut(i: usize) -> String {
 
 fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
     let theme = ui.theme;
-    let rows = ui.rows();
+    // Grid and Focus positions do not need a second cloned workspace forest.
+    let rows = if ui.page == WORKSPACES && ui.view != View::Tree {
+        Vec::new()
+    } else {
+        ui.rows()
+    };
     let position = rows
         .iter()
         .filter(|r| r.kind != Kind::Header)
@@ -4119,7 +4148,6 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
     let arrows = theme.glyph("↑↓", "Up/Dn");
     let fold = theme.glyph("←→", "Lt/Rt");
     let move4 = theme.glyph("↑↓←→", "Arrows");
-    let streaming = ui.embed.as_ref().is_some_and(|e| e.live());
     let control = ui
         .embed
         .as_ref()
@@ -4137,7 +4165,6 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
         }
     } else if ui.page == WORKSPACES && ui.view == View::Focus && control {
         vec![
-            ("^] D", "Detach"),
             ("^] O", "Observe"),
             ("^] F", "Fit size"),
             ("^] M", "More"),
@@ -4148,11 +4175,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
             .terminal_node(&ui.focus_target)
             .and_then(|n| ui.tab_layout(&n.id))
             .is_some();
-        let mut pairs = vec![
-            (enter, if streaming { "Attach" } else { "Watch" }),
-            ("a", "Attach"),
-            ("Esc", "Back"),
-        ];
+        let mut pairs = vec![("a", "Attach"), ("w", "Watch"), ("Esc", "Back")];
         if split {
             pairs.push((move4, "Pane"));
             pairs.push(("Z", if ui.zoomed { "Whole tab" } else { "Zoom" }));
@@ -4220,7 +4243,22 @@ fn footer(f: &mut Frame, area: Rect, ui: &Ui) {
         ]
     };
     let mut pairs = pairs;
-    if control {
+    // The local action bar owns actions already drawn with clickable targets.
+    // Keep footer fallbacks only when a narrow panel could not show the action.
+    pairs.retain(|(_, label)| {
+        let id = match *label {
+            "Attach" => "terminal.attach",
+            "Watch" => "terminal.watch",
+            "Back" => "detach",
+            "More" => "more",
+            _ => return true,
+        };
+        !ui.quick_hits.iter().any(|(_, drawn)| drawn == id)
+    });
+    if control && ui.embed.as_ref().is_some_and(|e| e.prefix) {
+        pairs.clear();
+    }
+    if control && !ui.embed.as_ref().is_some_and(|e| e.prefix) {
         pairs.insert(0, ("^] K", "Switch"));
     }
     if !ui.searching && !control {
@@ -5648,6 +5686,72 @@ mod tests {
             .map(|position| buffer[position].symbol())
             .collect();
         assert!(outline.contains(ui.theme.icon("claude")));
-        assert!(outline.contains('+'));
+        assert!(outline.contains("working"));
+    }
+    #[test]
+    fn focus_hotkeys_do_not_repeat_local_actions_or_alias_enter_to_attach() {
+        let mut ui = workspace(Theme::default(), View::Focus);
+        let mut repeated = ui
+            .snapshot
+            .terminal_actions
+            .iter()
+            .find(|a| a.id == "terminal.attach")
+            .unwrap()
+            .clone();
+        for action in &mut ui.snapshot.terminal_actions {
+            if action.id == "terminal.attach" {
+                action.short = "Attach".into();
+            }
+            if action.id == "terminal.watch" {
+                action.short = "Watch".into();
+            }
+        }
+        repeated.short = "Attach".into();
+        repeated.quick = "x".into();
+        ui.snapshot.terminal_actions.push(repeated);
+        let rendered = text(&render(&mut ui, 180, 40));
+        assert_eq!(rendered.matches("Attach").count(), 1, "{rendered}");
+        assert_eq!(
+            ui.quick_hits
+                .iter()
+                .filter(|(_, id)| id == "terminal.attach")
+                .count(),
+            1
+        );
+        let buffer = render(&mut ui, 180, 40);
+        let footer: String = (0..180).map(|x| buffer[(x, 39)].symbol()).collect();
+        assert!(
+            !footer.contains("Attach"),
+            "local action already has its shortcut"
+        );
+        assert!(!footer.contains("Watch"));
+    }
+    #[test]
+    fn terminal_status_colors_are_explicit_and_blocked_wins_over_working() {
+        let mut node = Node::default();
+        assert_eq!(terminal_status(&node), ("unknown", Tone::Faint));
+        node.state = "idle".into();
+        assert_eq!(terminal_status(&node), ("idle", Tone::Muted));
+        node.state = "working".into();
+        assert_eq!(terminal_status(&node), ("working", Tone::Ok));
+        node.activity = "blocked".into();
+        assert_eq!(terminal_status(&node), ("blocked", Tone::Warn));
+        let mut ui = workspace(Theme::default(), View::Focus);
+        ui.snapshot.tree[1].state = "working".into();
+        let buffer = render(&mut ui, 140, 40);
+        let hit = ui
+            .focus_tree_hits
+            .iter()
+            .find(|(_, id, _)| id == &ui.snapshot.tree[1].id)
+            .unwrap()
+            .0;
+        let row: String = (hit.left()..hit.right())
+            .map(|x| buffer[(x, hit.y)].symbol())
+            .collect();
+        assert!(row.contains("working"));
+        assert!(
+            (hit.left()..hit.right()).any(|x| buffer[(x, hit.y)].symbol() == "w"
+                && buffer[(x, hit.y)].fg == ui.theme.rgb(Tone::Ok.rgb()))
+        );
     }
 }

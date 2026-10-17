@@ -20,7 +20,7 @@ use crate::theme::{self, Rgb, Theme};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier},
+    style::{Color, Modifier, Style},
 };
 use std::sync::OnceLock;
 
@@ -150,6 +150,13 @@ pub struct Picture {
     /// Two sub-pixels per column and two per row of the whole screen, each
     /// with its coverage: 0 outside the picture, fading in at its edges.
     pixels: Vec<(Rgb, f32)>,
+    light: Option<Light>,
+}
+
+struct Light {
+    area: Rect,
+    hue: Rgb,
+    colors: Vec<(Color, Color)>,
 }
 
 fn to_linear(v: u8) -> f32 {
@@ -259,6 +266,48 @@ fn best_split(colors: &[Rgb; 4]) -> (usize, Rgb, Rgb) {
 }
 
 impl Picture {
+    /// Cache the static light field. A live Focus redraw must not recompute
+    /// exponentials and distances over the whole terminal on every output frame.
+    pub fn glow(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme, hue: Rgb) {
+        if !theme.backdrop || area.is_empty() {
+            return;
+        }
+        let base = Color::Rgb(theme::BG.0, theme::BG.1, theme::BG.2);
+        let surface = Color::Rgb(theme::SURFACE.0, theme::SURFACE.1, theme::SURFACE.2);
+        if self
+            .light
+            .as_ref()
+            .is_none_or(|cached| cached.area != area || cached.hue != hue)
+        {
+            let mut a = Buffer::empty(area);
+            let mut b = Buffer::empty(area);
+            a.set_style(area, Style::default().bg(base));
+            b.set_style(area, Style::default().bg(surface));
+            glow(&mut a, area, theme, hue);
+            glow(&mut b, area, theme, hue);
+            let colors = a
+                .content()
+                .iter()
+                .zip(b.content())
+                .map(|(a, b)| (a.bg, b.bg))
+                .collect();
+            self.light = Some(Light { area, hue, colors });
+        }
+        let colors = &self.light.as_ref().unwrap().colors;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buf[(x, y)];
+                let pair = colors
+                    [usize::from(y - area.y) * usize::from(area.width) + usize::from(x - area.x)];
+                if cell.bg == base {
+                    cell.bg = pair.0;
+                } else if cell.bg == surface {
+                    cell.bg = pair.1;
+                }
+            }
+        }
+    }
+
     /// Scale the artwork to fit `frame` on a screen of `cols` by `rows`.
     /// Shrinking averages every source pixel under a sub-pixel instead of
     /// picking one.
@@ -966,6 +1015,36 @@ mod tests {
                     (theme::mix(theme::BG, color, cover), cover)
                 );
             }
+        }
+    }
+    #[test]
+    fn cached_glow_is_pixel_identical_and_invalidates_on_resize_and_hue() {
+        let theme = Theme {
+            backdrop: true,
+            ..Theme::default()
+        };
+        let mut picture = Picture::default();
+        for (area, hue) in [
+            (Rect::new(0, 0, 100, 30), theme::CYAN),
+            (Rect::new(0, 0, 100, 30), theme::CYAN),
+            (Rect::new(2, 3, 140, 40), theme::VIOLET),
+        ] {
+            let mut a = Buffer::empty(area);
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    a[(x, y)].bg = if x % 3 == 0 {
+                        Color::Rgb(theme::SURFACE.0, theme::SURFACE.1, theme::SURFACE.2)
+                    } else if x % 3 == 1 {
+                        Color::Rgb(theme::BG.0, theme::BG.1, theme::BG.2)
+                    } else {
+                        Color::Red
+                    };
+                }
+            }
+            let mut b = a.clone();
+            glow(&mut a, area, &theme, hue);
+            picture.glow(&mut b, area, &theme, hue);
+            assert_eq!(a, b);
         }
     }
 }

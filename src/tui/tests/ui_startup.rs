@@ -289,3 +289,17 @@ fn finish_setup_persists_local_configuration() {
     assert_eq!(fs::read(config).unwrap(), before);
     ui.quit();
 }
+
+#[test]
+fn rapid_navigation_and_search_preserve_input_order() {
+    let mut ui = Ui::start(true);
+    ui.wait_text("project-alpha");
+    ui.master
+        .write_all(b"]]/burst-preserves-every-keystroke")
+        .unwrap();
+    ui.wait_text("burst-preserves-every-keystroke");
+    ui.master.write_all(b"\x1b").unwrap();
+    ui.wait_presence("burst-preserves-every-keystroke", false);
+    ui.quit();
+    assert_eq!(fs::read_dir(&ui.directory).unwrap().count(), 0);
+}

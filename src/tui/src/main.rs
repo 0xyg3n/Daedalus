@@ -335,7 +335,7 @@ fn main() -> io::Result<()> {
         EnableFocusChange
     )?;
     let result = (|| -> io::Result<()> {
-        loop {
+        'ui: loop {
             loop {
                 match rx.try_recv() {
                     Ok(value) => {
@@ -464,7 +464,21 @@ fn main() -> io::Result<()> {
                 updater.draw(f, area, &ui.theme);
             })?;
             show_picture(&mut ui, &mut io::stdout())?;
-            if event::poll(frame_interval(&ui))? {
+            // Drain ready input before repainting. Mouse motion and fast typing
+            // must not queue one full rendering interval per event.
+            let mut input_started: Option<Instant> = None;
+            for batch in 0..64 {
+                if input_started.is_some_and(|at| at.elapsed() >= Duration::from_millis(4)) {
+                    break;
+                }
+                if !event::poll(if batch == 0 {
+                    frame_interval(&ui)
+                } else {
+                    Duration::ZERO
+                })? {
+                    break;
+                }
+                input_started.get_or_insert_with(Instant::now);
                 if let Some(id) = ui.selected_terminal() {
                     ui.last_selected = id;
                 }
@@ -538,7 +552,7 @@ fn main() -> io::Result<()> {
                         {
                             host.wait_exit(QUIT_WAIT);
                         }
-                        break;
+                        break 'ui;
                     }
                     Step::Send(_) if ui.action_pending => {
                         ui.status = "Still working on the previous action".into();

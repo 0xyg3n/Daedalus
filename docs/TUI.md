@@ -157,4 +157,11 @@ Tiles uses the full workspace width for larger paged previews; `+` and `-` adjus
 their size. Wall uses compact previews for the overview and, on wide terminals,
 a separate enlarged screen for the selected terminal. Its overview cards stay
 compact even when only a few terminals exist. Focus shows harness icons and
-working (`+`) or blocked (`!`) markers in its persistent workspace outline.
+explicit colored status labels in its persistent workspace outline.
+
+Terminal status labels use green for working, amber for blocked, muted text for
+idle, rose for errors and faint text for unknown state. Status and recency are
+separate: a recently selected terminal is not necessarily working. Focus and
+sidebar entries show these labels, and terminal cards use the same state colors.
+The local action bar owns Attach/Watch shortcuts; the footer supplies navigation
+and only adds an action shortcut when it could not fit in the local bar.
