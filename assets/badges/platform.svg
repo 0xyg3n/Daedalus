@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="222" height="20" role="img" aria-label="platform: Linux and Windows preview">
+<title>platform: Linux and Windows preview</title>
+<clipPath id="r"><rect width="222" height="20" rx="3"/></clipPath>
+<g clip-path="url(#r)"><rect width="63" height="20" fill="#2f3a45"/><rect x="63" width="159" height="20" fill="#1aa9c7"/></g>
+<g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+<text x="31.5" y="14">platform</text><text x="142.5" y="14">Linux · Windows preview</text></g>
+</svg>

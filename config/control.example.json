@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "agent_name": "agent",
+  "agent_home": "/absolute/project",
+  "subscriptions": [],
+  "telegram": {},
+  "profiles": {},
+  "tmux_sockets": [],
+  "discovery": {
+    "automatic": true,
+    "herdr_sessions": [],
+    "herdr_sockets": {}
+  }
+}

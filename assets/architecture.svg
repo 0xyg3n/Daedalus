@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 940" width="1200" height="940">
+<defs><marker id="m39c5cf" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#39c5cf"/></marker><marker id="mff4f9a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ff4f9a"/></marker><marker id="mf2c14e" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#f2c14e"/></marker><marker id="m7ee787" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7ee787"/></marker><marker id="m8b949e" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker></defs>
+<rect width="1200" height="940" rx="18" fill="#0d1117"/>
+<text x="600.0" y="44" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="24" font-weight="800" fill="#e6edf3" text-anchor="middle">How Daedalus works</text>
+<text x="600.0" y="68" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="400" fill="#8b949e" text-anchor="middle">one Rust executable · three frontends · one set of operations · every action rechecks its exact target</text>
+<rect x="40" y="86" width="1040" height="128" rx="14" fill="none" stroke="#39c5cf" stroke-opacity="0.55" stroke-width="1.4"/>
+<text x="58" y="110" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#39c5cf" text-anchor="start">FRONTENDS</text>
+<rect x="60" y="118" width="320" height="80" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
+<text x="220.0" y="145" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">TUI</text>
+<text x="220.0" y="167" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Tree · Tiles · Wall · Focus</text>
+<text x="220.0" y="186" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">talks to the backend over stdio</text>
+<line x1="220" y1="198" x2="220" y2="250" stroke="#39c5cf" stroke-width="2.2" marker-end="url(#m39c5cf)"/>
+<rect x="400" y="118" width="320" height="80" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
+<text x="560.0" y="145" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">CLI</text>
+<text x="560.0" y="167" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">daedalus &lt;command&gt;</text>
+<text x="560.0" y="186" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">scripts and automation</text>
+<line x1="560" y1="198" x2="560" y2="250" stroke="#39c5cf" stroke-width="2.2" marker-end="url(#m39c5cf)"/>
+<rect x="740" y="118" width="320" height="80" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
+<text x="900.0" y="145" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Telegram service</text>
+<text x="900.0" y="167" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">daedalus telegram serve</text>
+<text x="900.0" y="186" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">granted senders, one exact agent</text>
+<line x1="900" y1="198" x2="900" y2="250" stroke="#39c5cf" stroke-width="2.2" marker-end="url(#m39c5cf)"/>
+<rect x="40" y="252" width="1040" height="196" rx="14" fill="none" stroke="#ff4f9a" stroke-opacity="0.55" stroke-width="1.4"/>
+<text x="58" y="276" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#ff4f9a" text-anchor="start">SHARED OPERATIONS</text>
+<rect x="60" y="286" width="240" height="140" rx="10" fill="#1c2430" stroke="#ff4f9a" stroke-width="1.6"/>
+<text x="180.0" y="313" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Typed operations</text>
+<text x="180.0" y="335" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">observe · attach · send</text>
+<text x="180.0" y="354" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">launch · sign-in · layouts</text>
+<text x="180.0" y="373" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">checkpoint · resume · fork</text>
+<rect x="315" y="286" width="240" height="140" rx="10" fill="#1c2430" stroke="#ff4f9a" stroke-width="1.6"/>
+<text x="435.0" y="313" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Identity recheck</text>
+<text x="435.0" y="335" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">backend · pane generation</text>
+<text x="435.0" y="354" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">process start · conversation</text>
+<text x="435.0" y="373" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">rechecked right before acting</text>
+<rect x="570" y="286" width="240" height="140" rx="10" fill="#1c2430" stroke="#ff4f9a" stroke-width="1.6"/>
+<text x="690.0" y="313" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Telegram feeder</text>
+<text x="690.0" y="335" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">durable inbox → wait for idle</text>
+<text x="690.0" y="354" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">→ submit → outbox</text>
+<text x="690.0" y="373" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">unknown outcome never re-sent</text>
+<rect x="825" y="286" width="240" height="140" rx="10" fill="#1c2430" stroke="#ff4f9a" stroke-width="1.6"/>
+<text x="945.0" y="313" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Hook runtime</text>
+<text x="945.0" y="335" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">lifecycle · final replies</text>
+<text x="945.0" y="354" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">progress · tool policy</text>
+<text x="945.0" y="373" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">goal continuation</text>
+<line x1="300" y1="448" x2="300" y2="488" stroke="#ff4f9a" stroke-width="2.2" marker-end="url(#mff4f9a)"/>
+<line x1="820" y1="448" x2="820" y2="488" stroke="#ff4f9a" stroke-width="2.2" marker-end="url(#mff4f9a)"/>
+<rect x="40" y="490" width="505" height="170" rx="14" fill="none" stroke="#7ee787" stroke-opacity="0.55" stroke-width="1.4"/>
+<text x="58" y="514" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#7ee787" text-anchor="start">PRIVATE STORES</text>
+<rect x="60" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#7ee787" stroke-width="1.6"/>
+<text x="172.5" y="551" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Config</text>
+<text x="172.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">routes · sender grants</text>
+<text x="172.5" y="592" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">profiles · settings</text>
+<rect x="300" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#7ee787" stroke-width="1.6"/>
+<text x="412.5" y="551" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Journal</text>
+<text x="412.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">queued · submitted</text>
+<text x="412.5" y="592" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">delivered · uncertain</text>
+<text x="412.5" y="611" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">checkpoints · goals</text>
+<rect x="575" y="490" width="505" height="170" rx="14" fill="none" stroke="#39c5cf" stroke-opacity="0.55" stroke-width="1.4"/>
+<text x="593" y="514" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#39c5cf" text-anchor="start">ADAPTERS</text>
+<rect x="595" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
+<text x="707.5" y="551" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Terminals + tools</text>
+<text x="707.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">tmux · Herdr</text>
+<text x="707.5" y="592" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">launch · profiles</text>
+<text x="707.5" y="611" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">hook install</text>
+<rect x="835" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
+<text x="947.5" y="551" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">External services</text>
+<text x="947.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Telegram Bot API</text>
+<text x="947.5" y="592" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Hindsight memory</text>
+<text x="947.5" y="611" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">(optional)</text>
+<line x1="707" y1="660" x2="707" y2="700" stroke="#f2c14e" stroke-width="2.2" marker-end="url(#mf2c14e)"/>
+<line x1="947" y1="660" x2="947" y2="700" stroke="#f2c14e" stroke-width="2.2" marker-end="url(#mf2c14e)"/>
+<rect x="40" y="702" width="1040" height="150" rx="14" fill="none" stroke="#f2c14e" stroke-opacity="0.55" stroke-width="1.4"/>
+<text x="58" y="726" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#f2c14e" text-anchor="start">YOUR MACHINE</text>
+<rect x="60" y="740" width="320" height="92" rx="10" fill="#161b22" stroke="#f2c14e" stroke-width="1.6"/>
+<text x="220.0" y="767" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Agent hooks</text>
+<text x="220.0" y="789" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">lifecycle · replies · progress</text>
+<text x="220.0" y="808" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">registered per tool</text>
+<rect x="400" y="740" width="420" height="92" rx="10" fill="#161b22" stroke="#f2c14e" stroke-width="1.6"/>
+<text x="610.0" y="767" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">tmux servers · Herdr sessions</text>
+<text x="610.0" y="789" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Claude Code · Codex · Grok · Hermes</text>
+<text x="610.0" y="808" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Cursor · Pi · OpenCode, with their own sign-in</text>
+<rect x="835" y="740" width="225" height="92" rx="10" fill="#161b22" stroke="#f2c14e" stroke-width="1.6"/>
+<text x="947.5" y="767" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Telegram chat</text>
+<text x="947.5" y="789" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">text · photos · files in</text>
+<text x="947.5" y="808" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">progress · replies out</text>
+<path d="M 220 832 L 220 880 L 1130 880 L 1130 356 L 1082 356" fill="none" stroke="#7ee787" stroke-width="2.2" marker-end="url(#m7ee787)"/>
+<text x="1124" y="872" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#7ee787" text-anchor="end">hooks report back to the hook runtime</text>
+<rect x="1116" y="560" width="28" height="160" fill="#0d1117"/>
+<text x="1135" y="640" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#7ee787" text-anchor="middle" transform="rotate(-90 1135 640)">hook events</text>
+<line x1="1130" y1="560" x2="1130" y2="600" stroke="#7ee787" stroke-width="2.2"/><line x1="1130" y1="680" x2="1130" y2="720" stroke="#7ee787" stroke-width="2.2"/>
+</svg>

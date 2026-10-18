@@ -1,0 +1,296 @@
+{
+  "context": {
+    "home": "/home/example",
+    "hostname": "fixture-host",
+    "now": 1120,
+    "pins": [
+      {
+        "backend": "tmux",
+        "pane_id": "%1",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "terminal_id": "v2:10:100:20:200%1"
+      }
+    ]
+  },
+  "health": {
+    "bindings": [
+      {
+        "backend": "herdr",
+        "display": "agent1",
+        "server": "work",
+        "terminal_id": "uuid1"
+      }
+    ],
+    "checkpoints": [
+      {
+        "created_at": "2026-01-01T00:00:00Z",
+        "harness": "claude",
+        "key": "dashboard-checkpoints.json:0",
+        "name": "Before tests",
+        "sid": "session-1234567890"
+      }
+    ],
+    "hooks": {
+      "tools": [
+        {
+          "herdr": {
+            "note": "Version changed",
+            "state": "outdated"
+          },
+          "tool": "codex"
+        }
+      ]
+    },
+    "routes": {
+      "12345": "agent1"
+    }
+  },
+  "snapshot": {
+    "clients": [
+      {
+        "backend": "tmux",
+        "client": "client1",
+        "flags": "",
+        "pane_id": "%1",
+        "session_id": "$2",
+        "socket": "/tmp/example.sock",
+        "tty": "/dev/pts/4"
+      },
+      {
+        "backend": "tmux",
+        "client": "client2",
+        "flags": "read-only",
+        "pane_id": "%2",
+        "session_id": "$3",
+        "socket": "/tmp/example.sock",
+        "tty": "/dev/pts/5"
+      },
+      {
+        "backend": "tmux",
+        "client": "nested",
+        "flags": "control-mode",
+        "outer_panes": [
+          {
+            "pane_id": "%2",
+            "socket": "/tmp/example.sock"
+          }
+        ],
+        "pane_id": "%9",
+        "session_id": "$9",
+        "socket": "/tmp/nested.sock",
+        "tty": "/dev/pts/6"
+      }
+    ],
+    "daedalus_views": [
+      {
+        "backend": "tmux",
+        "label": "Viewer",
+        "mechanism": "tmux client",
+        "pane_id": "%2",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "source": "herdr/work/w1:p1/uuid1",
+        "source_label": "Compiler"
+      }
+    ],
+    "herdr_focus": [
+      {
+        "pane_id": "w1:p2",
+        "session": "work"
+      }
+    ],
+    "layouts": [
+      {
+        "area": {
+          "height": 40,
+          "width": 120
+        },
+        "panes": [
+          {
+            "pane_id": "w1:p1",
+            "rect": {
+              "height": 40,
+              "width": 59,
+              "x": 61,
+              "y": 0
+            }
+          },
+          {
+            "focused": true,
+            "pane_id": "w1:p2",
+            "rect": {
+              "height": 40,
+              "width": 60,
+              "x": 0,
+              "y": 0
+            }
+          }
+        ],
+        "session": "work"
+      }
+    ],
+    "panes": [
+      {
+        "active": "1",
+        "activity": "input",
+        "activity_at": 1000,
+        "agent": "codex",
+        "backend": "tmux",
+        "cwd": "/home/example/project",
+        "height": "24",
+        "herdr_session": "work",
+        "left": "0",
+        "pane_id": "%1",
+        "pid": "20",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "session": "main-view",
+        "session_group": "main",
+        "session_id": "$2",
+        "socket": "/tmp/example.sock",
+        "terminal_id": "v2:10:100:20:200%1",
+        "terminal_title_stripped": "Checking tests",
+        "title": "Project · Codex · default",
+        "top": "0",
+        "width": "60",
+        "window": "Editor",
+        "window_id": "@1",
+        "window_index": "0"
+      },
+      {
+        "activity": "blocked",
+        "activity_at": 1120,
+        "agent": "codex",
+        "agent_status": "blocked",
+        "backend": "herdr",
+        "cwd": "/home/example/work",
+        "pane_id": "w1:p2",
+        "server": "work",
+        "session": "work",
+        "tab_id": "tab1",
+        "terminal_id": "uuid2",
+        "title": "Δ Project · Claude · model",
+        "workspace_id": "w1"
+      },
+      {
+        "active": "1",
+        "activity": "input",
+        "activity_at": 1000,
+        "agent": "codex",
+        "backend": "tmux",
+        "cwd": "/home/example/project",
+        "height": "24",
+        "herdr_session": "work",
+        "left": "0",
+        "pane_id": "%1",
+        "pid": "20",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "session": "main",
+        "session_group": "main",
+        "session_id": "$1",
+        "socket": "/tmp/example.sock",
+        "terminal_id": "v2:10:100:20:200%1",
+        "terminal_title_stripped": "Checking tests",
+        "title": "Project · Codex · default",
+        "top": "0",
+        "width": "60",
+        "window": "Editor",
+        "window_id": "@1",
+        "window_index": "0"
+      },
+      {
+        "activity": "working",
+        "activity_at": 1120,
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "value": "session-1234567890"
+        },
+        "agent_status": "working",
+        "backend": "herdr",
+        "cwd": "/home/example/work",
+        "pane_id": "w1:p1",
+        "server": "work",
+        "session": "work",
+        "tab_id": "tab1",
+        "terminal_id": "uuid1",
+        "title": "Δ Project · Claude · model",
+        "workspace_id": "w1"
+      },
+      {
+        "active": "0",
+        "activity": "",
+        "activity_at": 0,
+        "agent": "bash",
+        "backend": "tmux",
+        "cwd": "/home/example/project",
+        "height": "24",
+        "left": "61",
+        "pane_id": "%2",
+        "pid": "20",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "session": "main",
+        "session_group": "main",
+        "session_id": "$1",
+        "socket": "/tmp/example.sock",
+        "terminal_id": "v2:10:100:20:200%2",
+        "title": "fixture-host",
+        "top": "0",
+        "width": "59",
+        "window": "Editor",
+        "window_id": "@1",
+        "window_index": "0"
+      },
+      {
+        "active": "1",
+        "activity": "input",
+        "activity_at": 1000,
+        "agent": "codex",
+        "backend": "tmux",
+        "cwd": "/home/example/project",
+        "height": "24",
+        "left": "0",
+        "pane_id": "%1",
+        "pid": "20",
+        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "session": "linked",
+        "session_group": "",
+        "session_id": "$3",
+        "socket": "/tmp/example.sock",
+        "terminal_id": "v2:10:100:20:200%1",
+        "terminal_title_stripped": "Checking tests",
+        "title": "Project · Codex · default",
+        "top": "0",
+        "width": "60",
+        "window": "Linked",
+        "window_id": "@1",
+        "window_index": "0"
+      }
+    ],
+    "tabs": [
+      {
+        "label": "Review",
+        "session": "work",
+        "tab_id": "tab1",
+        "workspace_id": "w1"
+      },
+      {
+        "label": "Empty tab",
+        "session": "work",
+        "tab_id": "empty:tab",
+        "workspace_id": "empty"
+      }
+    ],
+    "workspaces": [
+      {
+        "label": "Workspace",
+        "session": "work",
+        "workspace_id": "w1"
+      },
+      {
+        "label": "Empty workspace",
+        "session": "work",
+        "workspace_id": "empty"
+      }
+    ]
+  }
+}

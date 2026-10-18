@@ -1,0 +1,1397 @@
+[
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "├─ ",
+    "children": true,
+    "count": 2,
+    "fields": [
+      [
+        "Scope",
+        "Server",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "2",
+        "info"
+      ],
+      [
+        "Server",
+        "work",
+        "herdr"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\"]",
+    "kind": "server",
+    "label": "HERDR · work",
+    "layout": null,
+    "linked": 0,
+    "parent": "",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│  ├─ ",
+    "children": true,
+    "count": 2,
+    "fields": [
+      [
+        "Scope",
+        "Workspace",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "2",
+        "info"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\"]",
+    "kind": "workspace",
+    "label": "Workspace",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│  │  └─ ",
+    "children": true,
+    "count": 2,
+    "fields": [
+      [
+        "Scope",
+        "Tab",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "2",
+        "info"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\"]",
+    "kind": "tab",
+    "label": "Review",
+    "layout": {
+      "height": 40,
+      "panes": [
+        {
+          "focused": true,
+          "h": 40,
+          "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p2\", \"uuid2\"]",
+          "w": 60,
+          "x": 0,
+          "y": 0
+        },
+        {
+          "focused": false,
+          "h": 40,
+          "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\"]",
+          "w": 59,
+          "x": 61,
+          "y": 0
+        }
+      ],
+      "width": 120,
+      "zoomed": false
+    },
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1120.0,
+    "activity": "blocked",
+    "backend": "herdr",
+    "branch": "│  │     ├─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "State",
+        "blocked",
+        "state"
+      ],
+      [
+        "Activity",
+        "Waiting for you now",
+        "warn"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "work",
+        "herdr"
+      ],
+      [
+        "Tab · pane",
+        "tab1 · w1:p2 · 2 terminals split here",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "uuid2",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/work",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · Herdr hook outdated (Version changed)",
+        "faint"
+      ],
+      [
+        "To fix",
+        "Hooks (6) → Codex → Update Herdr hook",
+        "warn"
+      ],
+      [
+        "Views",
+        "1 known · Herdr workspace w1 · tab1",
+        ""
+      ],
+      [
+        "Input",
+        "One attach slot · asks before takeover",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p2\", \"uuid2\"]",
+    "kind": "pane",
+    "label": "w1:p2 · Δ Project · Claude · model",
+    "layout": null,
+    "linked": 1,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\"]",
+    "parts": [
+      [
+        "w1:p2",
+        "id"
+      ],
+      [
+        "Δ Project",
+        "title"
+      ],
+      [
+        "Claude",
+        "harness"
+      ],
+      [
+        "model",
+        "model"
+      ]
+    ],
+    "server_focused": true,
+    "state": "blocked",
+    "tile": {
+      "harness": "codex",
+      "pinned": false,
+      "place": "work / w1 / w1:p2",
+      "project": "work",
+      "split": 2,
+      "state": "blocked",
+      "title": "Δ Project · Claude · model",
+      "viewer": false,
+      "views": 1
+    },
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1120.0,
+    "activity": "blocked",
+    "backend": "herdr",
+    "branch": "│  │     │  └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "State",
+        "blocked",
+        "state"
+      ],
+      [
+        "Activity",
+        "Waiting for you now",
+        "warn"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "work",
+        "herdr"
+      ],
+      [
+        "Tab · pane",
+        "tab1 · w1:p2",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "uuid2",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/work",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · Herdr hook outdated (Version changed)",
+        "faint"
+      ],
+      [
+        "To fix",
+        "Hooks (6) → Codex → Update Herdr hook",
+        "warn"
+      ],
+      [
+        "Views",
+        "1 known",
+        ""
+      ],
+      [
+        "Input",
+        "One attach slot · asks before takeover",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p2\", \"uuid2\", \"agent\", \"codex\", \"\"]",
+    "kind": "agent session",
+    "label": "codex · session ID not reported",
+    "layout": null,
+    "linked": 1,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p2\", \"uuid2\"]",
+    "parts": [
+      [
+        "codex",
+        "harness"
+      ],
+      [
+        "no session ID",
+        "muted"
+      ],
+      [
+        "Herdr hook outdated",
+        "warn"
+      ]
+    ],
+    "server_focused": false,
+    "state": "blocked",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1120.0,
+    "activity": "working",
+    "backend": "herdr",
+    "branch": "│  │     └─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "State",
+        "working",
+        "state"
+      ],
+      [
+        "Activity",
+        "Working now",
+        "ok"
+      ],
+      [
+        "Agent",
+        "claude",
+        "harness"
+      ],
+      [
+        "Server",
+        "work",
+        "herdr"
+      ],
+      [
+        "Tab · pane",
+        "tab1 · w1:p1 · 2 terminals split here",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "uuid1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/work",
+        ""
+      ],
+      [
+        "Agent session",
+        "session-1234567890",
+        "id"
+      ],
+      [
+        "Views",
+        "2 known · Herdr workspace w1 · tab1; Daedalus viewer pane Viewer",
+        ""
+      ],
+      [
+        "Input",
+        "One attach slot · asks before takeover",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\"]",
+    "kind": "pane",
+    "label": "w1:p1 · Δ Project · Claude · model",
+    "layout": null,
+    "linked": 1,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\"]",
+    "parts": [
+      [
+        "w1:p1",
+        "id"
+      ],
+      [
+        "Δ Project",
+        "title"
+      ],
+      [
+        "Claude",
+        "harness"
+      ],
+      [
+        "model",
+        "model"
+      ]
+    ],
+    "server_focused": false,
+    "state": "working",
+    "tile": {
+      "harness": "claude",
+      "pinned": false,
+      "place": "work / w1 / w1:p1",
+      "project": "work",
+      "split": 2,
+      "state": "working",
+      "title": "Δ Project · Claude · model",
+      "viewer": false,
+      "views": 2
+    },
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1120.0,
+    "activity": "working",
+    "backend": "herdr",
+    "branch": "│  │        ├─ ",
+    "children": true,
+    "count": 0,
+    "fields": [
+      [
+        "State",
+        "working",
+        "state"
+      ],
+      [
+        "Activity",
+        "Working now",
+        "ok"
+      ],
+      [
+        "Agent",
+        "claude",
+        "harness"
+      ],
+      [
+        "Server",
+        "work",
+        "herdr"
+      ],
+      [
+        "Tab · pane",
+        "tab1 · w1:p1",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "uuid1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/work",
+        ""
+      ],
+      [
+        "Agent session",
+        "session-1234567890",
+        "id"
+      ],
+      [
+        "Views",
+        "1 known",
+        ""
+      ],
+      [
+        "Input",
+        "One attach slot · asks before takeover",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\", \"agent\", \"claude\", \"session-1234567890\"]",
+    "kind": "agent session",
+    "label": "claude · session-1234",
+    "layout": null,
+    "linked": 1,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\"]",
+    "parts": [
+      [
+        "claude",
+        "harness"
+      ],
+      [
+        "session-1234",
+        "sid"
+      ]
+    ],
+    "server_focused": false,
+    "state": "working",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│  │        │  └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "Checkpoint",
+        "Before tests",
+        "rose"
+      ],
+      [
+        "Harness",
+        "Claude",
+        "harness"
+      ],
+      [
+        "Saved",
+        "2026-01-01T00:00:00Z",
+        "muted"
+      ],
+      [
+        "Enter",
+        "View, fork, resume or hand off",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\", \"agent\", \"claude\", \"session-1234567890\", \"checkpoint\", \"dashboard-checkpoints.json:0\"]",
+    "kind": "checkpoint",
+    "label": "Checkpoint · Before tests",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\", \"agent\", \"claude\", \"session-1234567890\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│  │        └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "Route",
+        "Telegram chat · 12345",
+        "accent"
+      ],
+      [
+        "Meaning",
+        "Saved route, not a delivery receipt",
+        "muted"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\", \"telegram\", \"12345\"]",
+    "kind": "saved route",
+    "label": "Telegram chat · 12345",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\", \"project\", \"w1\", \"group\", \"tab1\", \"pane\", \"w1:p1\", \"uuid1\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│  └─ ",
+    "children": true,
+    "count": 0,
+    "fields": [
+      [
+        "Scope",
+        "Workspace",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "0",
+        "info"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"empty\"]",
+    "kind": "workspace",
+    "label": "Empty workspace",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "herdr",
+    "branch": "│     └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "Scope",
+        "Tab",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "0",
+        "info"
+      ]
+    ],
+    "id": "[\"herdr\", \"work\", \"project\", \"empty\", \"group\", \"empty:tab\"]",
+    "kind": "tab",
+    "label": "Empty tab",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"herdr\", \"work\", \"project\", \"empty\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "└─ ",
+    "children": true,
+    "count": 3,
+    "fields": [
+      [
+        "Scope",
+        "Server",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "3",
+        "info"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\"]",
+    "kind": "server",
+    "label": "TMUX · /tmp/example.sock",
+    "layout": null,
+    "linked": 0,
+    "parent": "",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "   ├─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "Scope",
+        "Tmux Session",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "1",
+        "info"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\"]",
+    "kind": "tmux session",
+    "label": "linked",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "   │  └─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "Scope",
+        "Window",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "1",
+        "info"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
+    "kind": "window",
+    "label": "Linked",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1000.0,
+    "activity": "input",
+    "backend": "tmux",
+    "branch": "   │     └─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "State",
+        "process present",
+        "state"
+      ],
+      [
+        "Activity",
+        "Last input 2 min ago",
+        "muted"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ],
+      [
+        "tmux session",
+        "linked",
+        "tmux"
+      ],
+      [
+        "Window · pane",
+        "Linked · %1",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "v2:10:100:20:200%1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/project",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · tmux reports none",
+        "faint"
+      ],
+      [
+        "Process",
+        "pid 20 · shared by every view",
+        "muted"
+      ],
+      [
+        "Views",
+        "3 · tmux session main-view · window 0; tmux session main · window 0; tmux session linked · window 0",
+        ""
+      ],
+      [
+        "Input",
+        "Shared · 1 typing, 1 watching",
+        "warn"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "kind": "pane",
+    "label": "%1 · Project · Codex · default",
+    "layout": null,
+    "linked": 2,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
+    "parts": [
+      [
+        "%1",
+        "id"
+      ],
+      [
+        "Project",
+        "title"
+      ],
+      [
+        "Codex",
+        "harness"
+      ],
+      [
+        "default",
+        "model"
+      ],
+      [
+        "Checking tests",
+        "topic"
+      ]
+    ],
+    "server_focused": false,
+    "state": "process present",
+    "tile": {
+      "harness": "codex",
+      "pinned": true,
+      "place": "linked / Linked / %1",
+      "project": "linked",
+      "split": 0,
+      "state": "process present",
+      "title": "Project · Codex · default",
+      "viewer": false,
+      "views": 3
+    },
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1000.0,
+    "activity": "input",
+    "backend": "tmux",
+    "branch": "   │        └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "State",
+        "process present",
+        "state"
+      ],
+      [
+        "Activity",
+        "Last input 2 min ago",
+        "muted"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ],
+      [
+        "tmux session",
+        "linked",
+        "tmux"
+      ],
+      [
+        "Window · pane",
+        "Linked · %1",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "v2:10:100:20:200%1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/project",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · tmux reports none",
+        "faint"
+      ],
+      [
+        "Process",
+        "pid 20 · shared by every view",
+        "muted"
+      ],
+      [
+        "Views",
+        "1",
+        ""
+      ],
+      [
+        "Input",
+        "Shared · nobody else typing",
+        "ok"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
+    "kind": "agent session",
+    "label": "codex · session ID not reported",
+    "layout": null,
+    "linked": 2,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parts": [
+      [
+        "codex",
+        "harness"
+      ],
+      [
+        "session ID not reported",
+        "muted"
+      ]
+    ],
+    "server_focused": false,
+    "state": "process present",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "   └─ ",
+    "children": true,
+    "count": 2,
+    "fields": [
+      [
+        "Scope",
+        "Tmux Session",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "2",
+        "info"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\"]",
+    "kind": "tmux session",
+    "label": "main (+1 grouped)",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "      └─ ",
+    "children": true,
+    "count": 2,
+    "fields": [
+      [
+        "Scope",
+        "Window",
+        "muted"
+      ],
+      [
+        "Terminals",
+        "2",
+        "info"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "kind": "window",
+    "label": "Editor",
+    "layout": {
+      "height": 24,
+      "panes": [
+        {
+          "focused": true,
+          "h": 24,
+          "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+          "w": 60,
+          "x": 0,
+          "y": 0
+        },
+        {
+          "focused": false,
+          "h": 24,
+          "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+          "w": 59,
+          "x": 61,
+          "y": 0
+        }
+      ],
+      "width": 120,
+      "zoomed": false
+    },
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1000.0,
+    "activity": "input",
+    "backend": "tmux",
+    "branch": "         ├─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "State",
+        "process present",
+        "state"
+      ],
+      [
+        "Activity",
+        "Last input 2 min ago",
+        "muted"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ],
+      [
+        "tmux session",
+        "main",
+        "tmux"
+      ],
+      [
+        "Window · pane",
+        "Editor · %1 · 2 terminals split here",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "v2:10:100:20:200%1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/project",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · tmux reports none",
+        "faint"
+      ],
+      [
+        "Process",
+        "pid 20 · shared by every view",
+        "muted"
+      ],
+      [
+        "Views",
+        "3 · tmux session main-view · window 0; tmux session main · window 0; tmux session linked · window 0",
+        ""
+      ],
+      [
+        "Input",
+        "Shared · 1 typing, 1 watching",
+        "warn"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "kind": "pane",
+    "label": "%1 · Project · Codex · default",
+    "layout": null,
+    "linked": 2,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "parts": [
+      [
+        "%1",
+        "id"
+      ],
+      [
+        "Project",
+        "title"
+      ],
+      [
+        "Codex",
+        "harness"
+      ],
+      [
+        "default",
+        "model"
+      ],
+      [
+        "Checking tests",
+        "topic"
+      ]
+    ],
+    "server_focused": false,
+    "state": "process present",
+    "tile": {
+      "harness": "codex",
+      "pinned": true,
+      "place": "main / Editor / %1",
+      "project": "main",
+      "split": 2,
+      "state": "process present",
+      "title": "Project · Codex · default",
+      "viewer": false,
+      "views": 3
+    },
+    "viewed": true
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "         │  ├─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "View",
+        "Herdr view → work",
+        "info"
+      ],
+      [
+        "Source",
+        "Reported by the backend, not inferred",
+        "muted"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"herdr-view\", \"work\"]",
+    "kind": "declared view",
+    "label": "Herdr view → work",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 1000.0,
+    "activity": "input",
+    "backend": "tmux",
+    "branch": "         │  └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "State",
+        "process present",
+        "state"
+      ],
+      [
+        "Activity",
+        "Last input 2 min ago",
+        "muted"
+      ],
+      [
+        "Agent",
+        "codex",
+        "harness"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ],
+      [
+        "tmux session",
+        "main",
+        "tmux"
+      ],
+      [
+        "Window · pane",
+        "Editor · %1",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "v2:10:100:20:200%1",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/project",
+        ""
+      ],
+      [
+        "Agent session",
+        "not reported · tmux reports none",
+        "faint"
+      ],
+      [
+        "Process",
+        "pid 20 · shared by every view",
+        "muted"
+      ],
+      [
+        "Views",
+        "1",
+        ""
+      ],
+      [
+        "Input",
+        "Shared · nobody else typing",
+        "ok"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
+    "kind": "agent session",
+    "label": "codex · session ID not reported",
+    "layout": null,
+    "linked": 2,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parts": [
+      [
+        "codex",
+        "harness"
+      ],
+      [
+        "session ID not reported",
+        "muted"
+      ]
+    ],
+    "server_focused": false,
+    "state": "process present",
+    "tile": null,
+    "viewed": false
+  },
+  {
+    "actionable": true,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "         └─ ",
+    "children": true,
+    "count": 1,
+    "fields": [
+      [
+        "View of",
+        "Compiler via tmux client; closing it closes only the view",
+        "info"
+      ],
+      [
+        "State",
+        "shell",
+        "state"
+      ],
+      [
+        "Activity",
+        "Not observed yet",
+        "faint"
+      ],
+      [
+        "Program",
+        "bash",
+        "muted"
+      ],
+      [
+        "Server",
+        "/tmp/example.sock",
+        "tmux"
+      ],
+      [
+        "tmux session",
+        "main",
+        "tmux"
+      ],
+      [
+        "Window · pane",
+        "Editor · %2 · 2 terminals split here",
+        "muted"
+      ],
+      [
+        "Terminal",
+        "v2:10:100:20:200%2",
+        "id"
+      ],
+      [
+        "Folder",
+        "~/project",
+        ""
+      ],
+      [
+        "Process",
+        "pid 20 · shared by every view",
+        "muted"
+      ],
+      [
+        "Views",
+        "1 · tmux session main · window 0",
+        ""
+      ],
+      [
+        "Input",
+        "Shared · nobody else typing",
+        "ok"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+    "kind": "pane",
+    "label": "%2 · View of Compiler",
+    "layout": null,
+    "linked": 1,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "parts": [
+      [
+        "%2",
+        "id"
+      ],
+      [
+        "View of Compiler",
+        "title"
+      ]
+    ],
+    "server_focused": false,
+    "state": "shell",
+    "tile": {
+      "harness": "bash",
+      "pinned": false,
+      "place": "main / Editor / %2",
+      "project": "main",
+      "split": 2,
+      "state": "shell",
+      "title": "bash",
+      "viewer": true,
+      "views": 1
+    },
+    "viewed": false
+  },
+  {
+    "actionable": false,
+    "active_at": 0.0,
+    "activity": "",
+    "backend": "tmux",
+    "branch": "            └─ ",
+    "children": false,
+    "count": 0,
+    "fields": [
+      [
+        "View",
+        "Nested tmux view → /tmp/nested.sock / $9",
+        "info"
+      ],
+      [
+        "Source",
+        "Reported by the backend, not inferred",
+        "muted"
+      ]
+    ],
+    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\", \"nested\", \"/tmp/nested.sock\", \"nested\"]",
+    "kind": "nested view",
+    "label": "Nested tmux view → /tmp/nested.sock / $9",
+    "layout": null,
+    "linked": 0,
+    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+    "parts": [],
+    "server_focused": false,
+    "state": "",
+    "tile": null,
+    "viewed": false
+  }
+]

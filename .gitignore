@@ -1,0 +1,35 @@
+# Build output
+target/
+
+# Secrets and local instance configuration (never commit)
+*.env
+.env.*
+!*.env.example
+!*.example
+*.token
+*.key
+*.pem
+secrets/
+auth.json
+token.txt
+
+# Runtime state
+*.log
+*.jsonl
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+
+# Local tooling
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.omc/
+audits/
+node_modules/
+*.bak
+*.bak-*
+*.bak.*

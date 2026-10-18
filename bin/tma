@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)"
+native="$root/src/tui/target/release/daedalus-tui"
+if [[ ! -x "$native" ]]; then
+  printf 'Build Daedalus first: cargo build --release --locked --manifest-path %q\n' "$root/src/tui/Cargo.toml" >&2
+  exit 1
+fi
+exec "$native" tma "$@"

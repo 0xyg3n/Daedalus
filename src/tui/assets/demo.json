@@ -1,0 +1,185 @@
+{
+  "snapshot": {
+    "panes": [
+      {
+        "backend": "tmux",
+        "socket": "/tmp/demo-projects.sock",
+        "session": "project-alpha",
+        "window": "build",
+        "pane_id": "%1",
+        "terminal_id": "demo-1",
+        "pid": "demo",
+        "agent": "claude",
+        "active": "1",
+        "activity_at": 999870,
+        "activity": "input"
+      },
+      {
+        "backend": "tmux",
+        "socket": "/tmp/demo-projects.sock",
+        "session": "project-alpha",
+        "window": "review",
+        "pane_id": "%2",
+        "terminal_id": "demo-2",
+        "pid": "demo",
+        "agent": "codex",
+        "active": "0",
+        "activity_at": 997180,
+        "activity": "input"
+      },
+      {
+        "backend": "tmux",
+        "socket": "/tmp/demo-projects.sock",
+        "session": "project-alpha",
+        "window": "explain",
+        "pane_id": "%4",
+        "terminal_id": "demo-4",
+        "pid": "demo",
+        "agent": "cursor",
+        "active": "0",
+        "activity_at": 999820,
+        "activity": "input"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p1",
+        "terminal_id": "demo",
+        "agent": "grok",
+        "agent_status": "idle",
+        "label": "review-agent",
+        "activity_at": 999640,
+        "activity": "status"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p2",
+        "terminal_id": "demo-docs",
+        "agent": "claude",
+        "agent_status": "working",
+        "label": "docs-agent",
+        "activity_at": 1000000,
+        "activity": "working"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t2",
+        "pane_id": "w1:p3",
+        "terminal_id": "demo-migrate",
+        "agent": "codex",
+        "agent_status": "blocked",
+        "label": "migration-agent",
+        "activity_at": 1000000,
+        "activity": "blocked"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t2",
+        "pane_id": "w1:p4",
+        "terminal_id": "demo-api",
+        "agent": "opencode",
+        "agent_status": "working",
+        "label": "api-agent",
+        "activity_at": 999996,
+        "activity": "working"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w2",
+        "tab_id": "w2:t1",
+        "pane_id": "w2:p1",
+        "terminal_id": "demo-research",
+        "agent": "hermes",
+        "agent_status": "idle",
+        "label": "research-agent",
+        "activity_at": 999280,
+        "activity": "status"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w2",
+        "tab_id": "w2:t1",
+        "pane_id": "w2:p2",
+        "terminal_id": "demo-refactor",
+        "agent": "pi",
+        "agent_status": "working",
+        "label": "refactor-agent",
+        "activity_at": 999991,
+        "activity": "working"
+      },
+      {
+        "backend": "tmux",
+        "socket": "/tmp/demo-projects.sock",
+        "session": "project-alpha",
+        "window": "logs",
+        "pane_id": "%3",
+        "terminal_id": "demo-3",
+        "pid": "demo",
+        "agent": "bash",
+        "active": "0",
+        "activity_at": 999980,
+        "activity": "output"
+      }
+    ],
+    "layouts": [
+      {
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "area": {
+          "x": 0,
+          "y": 0,
+          "width": 160,
+          "height": 48
+        },
+        "zoomed": false,
+        "panes": [
+          {
+            "pane_id": "w1:p1",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "width": 96,
+              "height": 48
+            },
+            "focused": true
+          },
+          {
+            "pane_id": "w1:p2",
+            "rect": {
+              "x": 96,
+              "y": 0,
+              "width": 64,
+              "height": 48
+            },
+            "focused": false
+          }
+        ]
+      }
+    ],
+    "errors": []
+  },
+  "previews": {
+    "demo-1": "\u001b[1m> \u001b[0mReview the failing integration test\n\n\u001b[38;5;215m●\u001b[0m Reading \u001b[36mtests/test_routes.py\u001b[0m\n\u001b[38;5;215m●\u001b[0m The fixture closes the socket before the retry.\n\u001b[2m  Proposed fix: keep the socket open for the retry window.\u001b[0m\n\n\u001b[32m✓ 42 passed\u001b[0m\u001b[2m in 3.1s\u001b[0m",
+    "demo-2": "\u001b[36m›\u001b[0m summarize the diff in \u001b[34msrc/api\u001b[0m\n\n\u001b[32m•\u001b[0m Updated request validation \u001b[2m(3 files)\u001b[0m\n\u001b[32m•\u001b[0m Added regression test for empty payloads\n\n\u001b[1m  Ready for review.\u001b[0m",
+    "demo-4": "\u001b[1m→ \u001b[0mexplain the retry policy in \u001b[36msrc/retry.ts\u001b[0m\n\n\u001b[2m  Read src/retry.ts, src/client.ts\u001b[0m\n  Retries back off 200 ms → 3.2 s and stop after 5 tries.\n  Idempotent requests only; POST is never retried.",
+    "demo": "\u001b[2m$\u001b[0m cargo test --locked\n\u001b[32m\u001b[1m   Compiling\u001b[0m demo v0.1.0\n\u001b[32m\u001b[1m    Finished\u001b[0m test profile\nrunning 19 tests\ntest result: \u001b[32mok\u001b[0m. 19 passed; 0 failed",
+    "demo-docs": "\u001b[1m> \u001b[0mDocument the new export flags\n\n\u001b[38;5;215m●\u001b[0m Writing \u001b[36mdocs/EXPORT.md\u001b[0m\n\u001b[38;5;215m●\u001b[0m Added examples for --since and --format\n\u001b[35m✻ Working…\u001b[0m\u001b[2m (38s · esc to interrupt)\u001b[0m",
+    "demo-migrate": "\u001b[36m›\u001b[0m migrate the settings schema to v3\n\n\u001b[32m•\u001b[0m Planned 3 changes in \u001b[34msrc/settings\u001b[0m\n\u001b[38;5;215m\u001b[1m  Approval needed:\u001b[0m run \u001b[36mmake migrate\u001b[0m?\n\u001b[2m  y yes · n no · a always\u001b[0m",
+    "demo-api": "\u001b[1m> \u001b[0madd pagination to the jobs endpoint\n\n\u001b[36m◇\u001b[0m Edit \u001b[34msrc/api/jobs.ts\u001b[0m\u001b[2m +38 −6\u001b[0m\n\u001b[36m◇\u001b[0m Bash \u001b[2mnpm test -- jobs\u001b[0m\n\u001b[32m✓ 31 passed\u001b[0m",
+    "demo-research": "\u001b[1m❯ \u001b[0msummarise this week's incident notes\n\n\u001b[38;5;215m⚕\u001b[0m Read 4 files in \u001b[36mnotes/incidents\u001b[0m\n  Two outages, both from expired certificates.\n\u001b[2m  Suggested: renew 30 days before expiry.\u001b[0m",
+    "demo-refactor": "\u001b[1m> \u001b[0mrename the config loader to load_settings\n\n\u001b[32medit\u001b[0m src/config.py \u001b[2m(4 call sites)\u001b[0m\n\u001b[32mbash\u001b[0m\u001b[2m pytest -q\u001b[0m\n\u001b[32m✓ 27 passed\u001b[0m\u001b[2m · π working\u001b[0m",
+    "demo-3": "\u001b[2m12:04:31\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m\n\u001b[2m12:04:36\u001b[0m GET /api/jobs \u001b[32m200\u001b[0m\u001b[2m 14ms\u001b[0m\n\u001b[2m12:04:41\u001b[0m POST /api/jobs \u001b[31m429\u001b[0m\u001b[2m rate limited\u001b[0m\n\u001b[2m12:04:46\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m"
+  }
+}
