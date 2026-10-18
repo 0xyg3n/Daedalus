@@ -986,7 +986,44 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         ui.status = "Pane resize cancelled".into();
         return Step::Continue;
     }
-    // An attached terminal gets every key except the Ctrl+] prefix.
+    // A hidden grid terminal cannot consume navigation. Keep text blocked, but
+    // allow the user to select another face, enlarge it or leave input mode.
+    if ui.page == WORKSPACES
+        && ui.view.grid()
+        && ui.inline_screen.is_none()
+        && ui
+            .embed
+            .as_ref()
+            .is_some_and(|e| e.mode == Mode::Control && !e.prefix)
+    {
+        if key.code == KeyCode::Esc {
+            close_focus(ui);
+            return Step::Continue;
+        }
+        if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return open_switcher(ui);
+        }
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+            && (matches!(
+                key.code,
+                KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Char('[' | ']')
+            ) || (ui.view == View::Cube
+                && matches!(key.code, KeyCode::Char('<' | '>' | '+' | '-' | '_' | '='))))
+        {
+            return prefix_command(ui, key);
+        }
+    }
+    // A visible attached terminal gets every key except the Ctrl+] prefix.
     if ui.page == WORKSPACES
         && let Some(embed) = ui.embed.as_mut()
     {
@@ -1547,6 +1584,14 @@ fn quick_action(ui: &mut Ui, action: &str) -> Step {
         ui.status_error = true;
         return Step::Continue;
     };
+    if ui.view == View::Cube
+        && action == "terminal.attach"
+        && !ui.pane_hits.iter().any(|(_, id)| id == &node)
+    {
+        ui.status = "Cube face too small to type. Enlarge it or select another terminal.".into();
+        ui.status_error = false;
+        return Step::Continue;
+    }
     if let Some(embed) = ui.embed.as_ref()
         && embed.plan.node == node
         && embed.phase == embed::Phase::Connecting
@@ -1725,7 +1770,11 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     },
                     _ => quick_action(ui, &action),
                 };
-            } else if let Some((_, id)) = ui.pane_hits.iter().find(|(r, _)| r.contains(p)) {
+            } else if let Some((_, id)) = ui
+                .pane_hits
+                .iter()
+                .find(|(r, _)| ui.view != View::Cube && r.contains(p))
+            {
                 // Another terminal of the tab shown in Focus: move to it.
                 let id = id.clone();
                 if ui.view.grid() {
@@ -2935,6 +2984,42 @@ mod cli_tests {
     }
 
     #[test]
+    fn cube_click_selects_without_attaching_and_small_faces_reject_input() {
+        let mut ui = workspace();
+        ui.set_view(View::Cube);
+        ui.reveal("a");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let (screen, _) = ui.pane_hits.iter().find(|(_, id)| id == "a").unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: screen.x + 1,
+            row: screen.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, click), Step::Continue));
+        assert!(ui.embed.is_none());
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let Step::Send(request) = mouse_event(&mut ui, click) else {
+            panic!("A deliberate double-click attaches a readable face");
+        };
+        assert_eq!(request["action"], "terminal.attach");
+        assert_eq!(request["node"], "a");
+
+        let mut tiny = ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 10)).unwrap();
+        tiny.draw(|f| view::draw(f, &mut ui)).unwrap();
+        assert!(ui.pane_hits.is_empty());
+        assert!(matches!(
+            quick_action(&mut ui, "terminal.attach"),
+            Step::Continue
+        ));
+        assert!(ui.status.contains("too small"));
+        assert!(ui.embed.is_none());
+        assert_eq!(ui.view, View::Cube);
+    }
+
+    #[test]
     fn cube_alt_arrows_switch_workspaces_and_front_terminals_independently() {
         let mut ui = workspace();
         ui.snapshot.workspace.pins.clear();
@@ -3212,6 +3297,7 @@ mod cli_tests {
     fn live_input_keeps_each_layout_and_detaches_before_selection_changes() {
         for layout in [View::Cube, View::Tiles, View::Wall, View::Focus] {
             let mut ui = workspace();
+            ui.snapshot.workspace.pins.clear();
             ui.view = layout;
             ui.reveal("a");
             let plan = json!({
@@ -3291,6 +3377,21 @@ mod cli_tests {
             assert!(ui.status.contains("paused"));
             paste(&mut ui, "do not submit\n");
             assert!(ui.status.contains("Paste paused"));
+            if layout.grid() {
+                // A hidden input surface must not trap ordinary navigation.
+                key_event(&mut ui, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+                assert!(ui.embed.is_none(), "{layout:?} must release hidden input");
+                assert_eq!(ui.selected_terminal().as_deref(), Some("b"), "{layout:?}");
+                assert_eq!(ui.view, layout);
+                ui.reveal("a");
+                open_embed(&mut ui, &plan);
+                key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                assert!(
+                    ui.embed.is_none(),
+                    "Esc cancels input even before the stream connects"
+                );
+                open_embed(&mut ui, &plan);
+            }
             // Detach remains usable even when no screen can be rendered.
             key_event(
                 &mut ui,

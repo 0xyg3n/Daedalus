@@ -4982,6 +4982,11 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
     // In Focus the input mode is the status; it can never go stale.
     let held;
     let status = match ui.embed.as_ref() {
+        Some(embed)
+            if embed.mode == Mode::Control && ui.inline_screen.is_none() && ui.view.grid() =>
+        {
+            "Input paused · arrows switch terminals · Esc detaches"
+        }
         Some(embed) if embed.mode == Mode::Control && ui.inline_screen.is_none() => {
             "Input paused · selected pane is not visible · Ctrl+] then D detaches"
         }

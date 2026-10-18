@@ -189,8 +189,10 @@ Hierarchy connectors continue through the extra metadata lines.
 
 ## Type without changing layouts (source builds from main)
 
-In Cube, Tiles and Wall, select a terminal and press **a**, double-click its card,
-or click inside its selected screen. Input and live output stay in that layout;
+In Cube, Tiles and Wall, select a terminal and press **a** or double-click its card.
+A single click in Cube only selects; faces too small to type into refuse attachment.
+Tiles and Wall also allow clicking inside the selected screen to attach.
+Input and live output stay in that layout;
 Daedalus does not substitute the backend's native split layout. **w** opens a
 read-only stream in the same place. **z** explicitly opens Focus.
 
@@ -198,11 +200,14 @@ The selected screen shows **INPUT HERE** while controlling. Ordinary keys go to
 that terminal. Press **Ctrl+]**, then **D** to detach, **O** to observe, or **[** / **]**
 to switch layout. In preview layouts, **Ctrl+]** followed by an arrow detaches and
 navigates using that layout's directions. Selecting another terminal stops the old
-stream; it does not silently send input to the new terminal. Click its screen or
-press **a** when ready to type there. Detached terminal processes keep running.
+stream; it does not silently send input to the new terminal. Press **a** when
+ready to type there. Detached terminal processes keep running.
 
-Input pauses if the window is too small to show the selected screen. Enlarge the
-window or use **Ctrl+] then D** to detach. tmux keeps its native size by default
+Input pauses if the window is too small to show the selected screen. In Cube,
+Tiles and Wall, arrows then switch terminals directly, **Esc** detaches, and
+**Ctrl+K** opens the terminal switcher. Cube resize keys also work while paused.
+Enlarge the window to continue typing, or use **Ctrl+] then D** to detach.
+tmux keeps its native size by default
 and follows the cursor inside the available viewport; **Ctrl+] then F** explicitly
 enables size fitting, which affects other viewers of that tmux window. Herdr's
 controller sizes the selected terminal to its visible screen.
