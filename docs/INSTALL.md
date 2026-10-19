@@ -36,7 +36,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-The [0.2.0-beta.8 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) provides `daedalus-0.2.0-beta.8-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. The built-in terminal backend requires no separate multiplexer. Stable update checks do not select prereleases.
+The [0.2.0-beta.9 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.9) provides `daedalus-0.2.0-beta.9-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash`, install with `install.ps1` as shown in the README, then run `setup` from the installed command. The built-in terminal backend requires no separate multiplexer. Stable update checks do not select prereleases.
 
 
 Use native PowerShell and Windows Terminal. The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
