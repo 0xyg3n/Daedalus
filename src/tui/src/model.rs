@@ -1095,6 +1095,7 @@ pub struct Ui {
     /// Reduced motion asked for by the environment; Options cannot undo it.
     pub still: bool,
     pub options: Option<OptionsMenu>,
+    pub updates_requested: bool,
     /// Rows of the Options panel drawn in the last frame, and the panel,
     /// for clicks.
     pub option_hits: Vec<(ratatui::layout::Rect, usize)>,

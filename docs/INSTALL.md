@@ -36,7 +36,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-The [0.2.0-beta.6 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.6) provides `daedalus-0.2.0-beta.6-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. Install Herdr or a compatible native multiplexer separately. Stable update checks do not select prereleases.
+The [0.2.0-beta.7 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) provides `daedalus-0.2.0-beta.7-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. Install Herdr or a compatible native multiplexer separately. Stable update checks do not select prereleases.
 
 
 Use native PowerShell and Windows Terminal. **Herdr** is the default backend.
@@ -206,10 +206,16 @@ Telegram service, stop it and hand over with `daedalus telegram cutover preview|
 
 ## Update and removal
 
-The TUI performs one background release check at launch. A newer compatible release
+The TUI checks releases in the background at launch and before exit. A newer compatible release
 opens a prompt when no terminal or dialog owns input; **Later** is selected by
-default. **Ctrl+U** opens the notice again (**Ctrl+]**, then **U** while attached).
-Set `DAEDALUS_UPDATE_CHECK=0` to disable the startup check. Stable installations
+default. **Options → Application → Check for updates** or **Ctrl+U** checks again
+and opens update details (**Ctrl+]**, then **U**
+while attached). A declined version stays in the status bar. There are no periodic checks.
+On exit, **Exit** is the default; **Esc** can skip a slow check. If you choose
+**Update**, Daedalus stays open to show the installation result.
+The screensaver yields to an update prompt; terminal input and other dialogs keep
+priority. **R** retries a check from the update dialog.
+Set `DAEDALUS_UPDATE_CHECK=0` to disable automatic checks; manual checks still work. Stable installations
 select stable releases; beta installations can select newer betas or stable releases.
 
 `daedalus update check --json` returns a review with version, platform, checksum
@@ -222,6 +228,10 @@ daedalus update install --version VERSION --approve APPROVAL_SHA256
 The installer rechecks the release and approval against the running binary,
 verifies SHA-256 and native architecture, and preserves the previous executable.
 Linux activation is atomic; the running session continues until you restart it.
+After installation, a confirmation shows the installed version and restart
+instructions, even if you closed the dialog while it was downloading. A status
+notice remains visible until restart. Failed checks and installations also show
+a notice with details available through **Ctrl+U**.
 Windows downloads and verifies a staged executable but does **not** activate it:
 close the application and follow the returned manual activation instructions.
 Neither path restarts Telegram or changes private configuration.

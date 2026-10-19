@@ -442,6 +442,9 @@ fn main() -> io::Result<()> {
                 ui.busy = true;
                 ui.action_pending = true;
             }
+            if std::mem::take(&mut ui.updates_requested) {
+                updater.open();
+            }
             updater.poll(
                 inventory
                     && ui.splash.is_none()
@@ -449,9 +452,22 @@ fn main() -> io::Result<()> {
                     && ui.options.is_none()
                     && ui.embed.is_none()
                     && !ui.searching
-                    && !ui.busy
-                    && ui.saver.since.is_none(),
+                    && !ui.busy,
             );
+            if updater.should_quit() {
+                // The backend remembers the view, then exits.
+                if host
+                    .send(json!({"op":"quit","view":view_state(&ui)}))
+                    .is_ok()
+                {
+                    host.wait_exit(QUIT_WAIT);
+                }
+                break 'ui;
+            }
+            if updater.visible() {
+                wake(&mut ui);
+                ui.saver.last_input = Instant::now();
+            }
             if !updater.visible()
                 && may_rest(&ui)
                 && ui.saver.due(ui.theme.screensaver, Instant::now())
@@ -549,14 +565,8 @@ fn main() -> io::Result<()> {
                 };
                 match step {
                     Step::Quit => {
-                        // The backend remembers the view, then exits.
-                        if host
-                            .send(json!({"op":"quit","view":view_state(&ui)}))
-                            .is_ok()
-                        {
-                            host.wait_exit(QUIT_WAIT);
-                        }
-                        break 'ui;
+                        updater.request_exit();
+                        break;
                     }
                     Step::Send(_) if ui.action_pending => {
                         ui.status = "Still working on the previous action".into();
@@ -2271,6 +2281,10 @@ fn change_option(ui: &mut Ui, item: Item, forward: bool) {
             ui.sizes.set(Split::Tiles, value);
             resized(ui, Split::Tiles);
         }
+        Item::Updates => {
+            ui.options = None;
+            ui.updates_requested = true;
+        }
         Item::Reset => {
             ui.sizes = Sizes::default();
             ui.sizes_changed = Some(Instant::now());
@@ -3592,10 +3606,13 @@ mod cli_tests {
         option_key(&mut ui, KeyCode::Char('o'));
         assert_eq!(ui.order, Order::Layout);
         assert_eq!(ui.options.as_ref().unwrap().selected, 0);
-        // Up from the first wraps to the last: Reset.
+        // Up wraps to the Application update command, which opens the updater.
         option_key(&mut ui, KeyCode::Up);
+        option_key(&mut ui, KeyCode::Enter);
+        assert!(ui.options.is_none() && ui.updates_requested);
+        open_options(&mut ui);
         ui.sizes.details = 70;
-        option_key(&mut ui, KeyCode::Right);
+        option_key(&mut ui, KeyCode::Char('='));
         assert_eq!(ui.sizes, Sizes::default());
         // Motion off holds everything still; the environment's choice wins.
         let motion = Item::ALL.iter().position(|i| *i == Item::Motion).unwrap();

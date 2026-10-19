@@ -28,7 +28,7 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.6](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.6), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.7](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
@@ -142,8 +142,8 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.6) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.6) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
+| Linux x86-64 | Current beta; tested locally | tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -154,12 +154,12 @@ The Windows preview passes cross-compilation and Windows unit tests under Wine. 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.6
-curl -fLO "$base/daedalus-0.2.0-beta.6-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.6-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.6-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.7
+curl -fLO "$base/daedalus-0.2.0-beta.7-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.7-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.7-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.6-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.7-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -171,10 +171,10 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.6) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
 
 ```powershell
-$exe = 'daedalus-0.2.0-beta.6-x86_64-windows.exe'
+$exe = 'daedalus-0.2.0-beta.7-x86_64-windows.exe'
 $expected = (Get-Content "$exe.sha256").Split(' ')[0]
 if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
 & ".\$exe" setup
@@ -182,7 +182,9 @@ if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum 
 
 For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
 
-Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot. The TUI checks releases in the background at launch and offers an update when one is available (**Later** is the default). **Ctrl+U** opens update details; inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums and architecture. Linux activates the verified binary while retaining the previous one; Windows stages it for manual activation after closing the application. `DAEDALUS_UPDATE_CHECK=0` disables the startup check. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
+Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
+
+The TUI checks releases in the background at launch and before exit, and offers an update when one is available (**Later** at launch; **Exit** when closing). There are no periodic checks. **Options → Application → Check for updates** checks on demand (**Ctrl+U**); inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums and architecture. Linux activates the verified binary while retaining the previous one; Windows stages it for manual activation after closing the application. Install completion opens a confirmation when the interface is free and keeps a status notice visible until restart. `DAEDALUS_UPDATE_CHECK=0` disables automatic checks; manual checks remain available. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

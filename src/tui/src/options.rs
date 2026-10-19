@@ -18,10 +18,11 @@ pub enum Item {
     Motion,
     Keys,
     Reset,
+    Updates,
 }
 
 impl Item {
-    pub const ALL: [Item; 14] = [
+    pub const ALL: [Item; 15] = [
         Item::Order,
         Item::Details,
         Item::Screen,
@@ -36,6 +37,7 @@ impl Item {
         Item::Motion,
         Item::Keys,
         Item::Reset,
+        Item::Updates,
     ];
     /// The heading the item is listed under.
     pub fn group(self) -> &'static str {
@@ -44,6 +46,7 @@ impl Item {
             Item::Sidebar | Item::Pinned | Item::Recent | Item::Badges | Item::Vitals => "Sidebar",
             Item::Look | Item::Saver | Item::Motion | Item::Keys => "Look and feel",
             Item::Reset => "",
+            Item::Updates => "Application",
         }
     }
     pub fn label(self) -> &'static str {
@@ -62,6 +65,7 @@ impl Item {
             Item::Motion => "Neon motion and glitches",
             Item::Keys => "Key bar",
             Item::Reset => "Reset panel sizes",
+            Item::Updates => "Check for updates",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -80,6 +84,7 @@ impl Item {
             Item::Motion => "motion",
             Item::Keys => "keys",
             Item::Reset => "reset",
+            Item::Updates => "refresh",
         }
     }
     /// The key that makes the same change outside Options, if any.
@@ -92,6 +97,7 @@ impl Item {
             Item::Saver => "s",
             Item::Keys => "?",
             Item::Reset => "=",
+            Item::Updates => "Ctrl+U",
             _ => "",
         }
     }
@@ -143,6 +149,10 @@ pub fn value(ui: &Ui, item: Item) -> String {
         Item::Motion => "Still".into(),
         Item::Keys => shown(!ui.hide_keys),
         Item::Reset => "Every border back to its default".into(),
+        Item::Updates => format!(
+            "Installed {} · check GitHub releases",
+            env!("CARGO_PKG_VERSION")
+        ),
         _ => shown(item.switch().and_then(|s| ui.prefs.get(s)).unwrap_or(true)),
     }
 }

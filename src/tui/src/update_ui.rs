@@ -1,4 +1,4 @@
-//! Optional launch check and explicit, reviewed update consent. Workers never own UI state.
+//! Launch, exit and manual update checks with explicit consent. Workers never own UI state.
 use crate::theme::{Theme, Tone};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use daedalus_tui::app::update::{self, InstallReceipt, UpdateReview, UpdateStatus};
@@ -9,12 +9,21 @@ use ratatui::{
 };
 use std::sync::mpsc::{self, Receiver};
 
+type Check = fn() -> Result<UpdateStatus, String>;
+
 enum Completion {
     Check(Result<Box<UpdateStatus>, String>),
     Install(Result<InstallReceipt, String>),
 }
 pub struct Controller {
     worker: Option<Receiver<Completion>>,
+    automatic: bool,
+    exiting: bool,
+    quit: bool,
+    offered_version: Option<String>,
+    banner: Option<String>,
+    installed: bool,
+    install_result: bool,
     review: Option<UpdateReview>,
     notice: String,
     visible: bool,
@@ -28,6 +37,13 @@ impl Controller {
     pub fn new(enabled: bool) -> Self {
         let mut this = Self {
             worker: None,
+            automatic: enabled,
+            exiting: false,
+            quit: false,
+            offered_version: None,
+            banner: None,
+            installed: false,
+            install_result: false,
             review: None,
             notice: if enabled {
                 "Checking for updates…"
@@ -43,19 +59,40 @@ impl Controller {
             update_hit: Rect::default(),
         };
         if enabled {
-            let (tx, rx) = mpsc::channel();
-            this.worker = Some(rx);
-            std::thread::spawn(move || {
-                let _ = tx.send(Completion::Check(update::check().map(Box::new)));
-            });
+            this.start_check(update::check);
         }
         this
+    }
+    fn start_check(&mut self, check: Check) {
+        if self.worker.is_some() || self.installing || self.installed {
+            return;
+        }
+        self.install_result = false;
+        self.review = None;
+        self.banner = None;
+        self.notice = "Checking for updates…".into();
+        let (tx, rx) = mpsc::channel();
+        self.worker = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(Completion::Check(check().map(Box::new)));
+        });
     }
     pub fn visible(&self) -> bool {
         self.visible
     }
     /// Caller must defer opening while another dialog, embedded terminal or splash owns input.
     pub fn open(&mut self) {
+        self.open_with(update::check);
+    }
+    fn open_with(&mut self, check: Check) {
+        self.show();
+        // Keep installation results available until reviewed or explicitly retried.
+        if self.install_result {
+            return;
+        }
+        self.start_check(check);
+    }
+    fn show(&mut self) {
         self.visible = true;
         self.pending_prompt = false;
         self.update_selected = false;
@@ -69,42 +106,115 @@ impl Controller {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.worker = None;
+                    let was_installing = self.installing;
                     self.installing = false;
                     self.review = None;
                     self.notice = "Update worker stopped unexpectedly. Check the installed version before retrying.".into();
+                    self.banner = Some(self.notice.clone());
+                    self.install_result = was_installing;
+                    self.pending_prompt = was_installing && !self.visible;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         if allow_prompt && self.pending_prompt {
-            self.open();
+            self.show();
         }
+    }
+    pub fn request_exit(&mut self) {
+        self.exit_with(update::check);
+    }
+    fn exit_with(&mut self, check: Check) {
+        if (!self.automatic && !self.installing) || self.installed {
+            self.quit = true;
+            return;
+        }
+        self.exiting = true;
+        self.show();
+        self.start_check(check);
+    }
+    pub fn should_quit(&self) -> bool {
+        self.quit
+    }
+    fn dismiss(&mut self) {
+        // A download must finish before exit; Escape returns to the interface.
+        self.quit = self.exiting && !self.installing;
+        self.exiting = false;
+        self.visible = false;
     }
     fn complete(&mut self, result: Completion) {
         match result {
             Completion::Check(Ok(status)) => {
-                self.notice = format!("{} (installed {})", status.message, status.current_version);
+                self.notice = if status.status == "up_to_date" {
+                    format!(
+                        "You’re up to date. Daedalus {} is installed.",
+                        status.current_version
+                    )
+                } else {
+                    format!("{} (installed {})", status.message, status.current_version)
+                };
+                self.pending_prompt =
+                    status.review.as_ref().is_some_and(|review| {
+                        self.offered_version.as_ref() != Some(&review.version)
+                    }) && !self.visible;
+                if let Some(review) = &status.review {
+                    self.offered_version = Some(review.version.clone());
+                }
                 self.review = status.review;
-                self.pending_prompt = self.review.is_some() && !self.visible;
+                self.banner = None;
+                if self.exiting && self.review.is_none() {
+                    self.quit = true;
+                }
             }
-            Completion::Check(Err(error)) => self.notice = format!("Update check failed: {error}"),
+            Completion::Check(Err(error)) => {
+                self.review = None;
+                self.notice = format!("Update check failed: {error}");
+                self.banner = Some("Update check failed · Ctrl+U to retry".into());
+            }
             Completion::Install(result) => {
+                self.install_result = true;
                 self.installing = false;
                 self.review = None;
                 self.notice = match result {
-                    Ok(receipt) => format!(
-                        "{}{}",
-                        receipt.message,
-                        if receipt.restart_required {
-                            " Restart Daedalus when ready; this session stays open."
+                    Ok(receipt) => {
+                        // This process still runs the old executable. Keep the receipt
+                        // until restart instead of offering the same update again.
+                        self.installed = true;
+                        self.banner = Some(if receipt.activated {
+                            format!(
+                                "Updated to {} · Restart Daedalus to use it",
+                                receipt.version
+                            )
                         } else {
-                            ""
-                        }
-                    ),
+                            format!(
+                                "Downloaded {} · Manual activation required",
+                                receipt.version
+                            )
+                        });
+                        format!(
+                            "{} {}. {}{}",
+                            if receipt.activated {
+                                "Updated to"
+                            } else {
+                                "Downloaded"
+                            },
+                            receipt.version,
+                            receipt.message,
+                            if receipt.restart_required && receipt.activated {
+                                " Restart Daedalus when ready to use the new version; your terminals stay open."
+                            } else {
+                                ""
+                            }
+                        )
+                    }
                     Err(error) => format!(
                         "Update failed: {error}. Check the installed version before retrying."
                     ),
                 };
+                if !self.installed {
+                    self.banner = Some("Update failed · Ctrl+U details".into());
+                }
+                self.pending_prompt = !self.visible;
             }
         }
     }
@@ -114,6 +224,7 @@ impl Controller {
         }
         let review = self.review.take()?;
         self.installing = true;
+        self.exiting = false;
         self.update_selected = false;
         self.notice = format!(
             "Installing {}… You can close this dialog and keep working.",
@@ -141,13 +252,14 @@ impl Controller {
             return true;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('n' | 'N') => self.visible = false,
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => self.dismiss(),
             KeyCode::Char('y' | 'Y') => self.install(),
+            KeyCode::Char('r' | 'R') => self.start_check(update::check),
             KeyCode::Left | KeyCode::Right | KeyCode::Tab if self.review.is_some() => {
                 self.update_selected = !self.update_selected;
             }
             KeyCode::Enter if self.update_selected && self.review.is_some() => self.install(),
-            KeyCode::Enter => self.visible = false,
+            KeyCode::Enter => self.dismiss(),
             _ => {}
         }
         true
@@ -159,9 +271,13 @@ impl Controller {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let point = ratatui::layout::Position::new(mouse.column, mouse.row);
             if self.later_hit.contains(point) {
-                self.visible = false;
-            } else if self.update_hit.contains(point) && self.review.is_some() {
-                self.install();
+                self.dismiss();
+            } else if self.update_hit.contains(point) {
+                if self.review.is_some() {
+                    self.install();
+                } else {
+                    self.start_check(update::check);
+                }
             }
         }
         true
@@ -173,13 +289,15 @@ impl Controller {
             return;
         }
         if !self.visible {
-            if self.review.is_some() || self.installing {
+            if self.review.is_some() || self.installing || self.banner.is_some() {
                 let text = if self.installing {
                     "Updating… · Ctrl+U details".to_owned()
+                } else if let Some(review) = &self.review {
+                    format!("Update {} available · Ctrl+U", review.version)
                 } else {
                     format!(
-                        "Update {} available · Ctrl+U",
-                        self.review.as_ref().unwrap().version
+                        "{} · Ctrl+U details",
+                        self.banner.as_deref().unwrap_or_default()
                     )
                 };
                 let toast = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
@@ -197,7 +315,11 @@ impl Controller {
         );
         frame.render_widget(Clear, popup);
         let block = Block::default()
-            .title(" Daedalus updates ")
+            .title(if self.exiting {
+                " Check for updates before exit "
+            } else {
+                " Daedalus updates "
+            })
             .borders(Borders::ALL)
             .border_set(theme.border())
             .border_style(theme.fg(Tone::Accent))
@@ -225,7 +347,9 @@ impl Controller {
         );
         if inner.height >= 2 {
             self.later_hit = Rect::new(inner.x, inner.bottom() - 1, inner.width.min(17), 1);
-            let later = if self.review.is_some() {
+            let later = if self.exiting && !self.installing {
+                " Exit [Esc] "
+            } else if self.review.is_some() {
                 " Later [Esc] "
             } else {
                 " Close [Esc] "
@@ -238,6 +362,13 @@ impl Controller {
                 active
             };
             frame.render_widget(Paragraph::new(later).style(later_style), self.later_hit);
+            if self.review.is_none() && !self.installing && !self.installed && inner.width > 18 {
+                self.update_hit = Rect::new(inner.x + 18, inner.bottom() - 1, inner.width - 18, 1);
+                frame.render_widget(
+                    Paragraph::new(" Recheck [R] ").style(inactive),
+                    self.update_hit,
+                );
+            }
             if self.review.is_some() && inner.width > 18 {
                 self.update_hit = Rect::new(inner.x + 18, inner.bottom() - 1, inner.width - 18, 1);
                 let style = if self.update_selected {
@@ -254,6 +385,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
@@ -290,7 +422,7 @@ mod tests {
         let mut ui = Controller::new(false);
         ui.complete(available());
         assert!(ui.consent().is_none());
-        ui.open();
+        ui.show();
         let review = ui.consent().unwrap();
         assert_eq!(review.approval_sha256, "c".repeat(64));
         assert!(ui.consent().is_none());
@@ -302,14 +434,14 @@ mod tests {
             activated: false,
             message: "Staged".into(),
         })));
-        assert!(ui.notice.contains("Restart"));
+        assert!(ui.notice.contains("Downloaded 1.1.0"));
         assert!(!ui.installing);
     }
     #[test]
     fn errors_and_current_release_are_visible_without_install_offer() {
         let mut ui = Controller::new(false);
         ui.complete(Completion::Check(Err("offline".into())));
-        ui.open();
+        ui.show();
         assert!(ui.notice.contains("offline"));
         assert!(ui.consent().is_none());
         let Completion::Check(Ok(mut status)) = available() else {
@@ -321,5 +453,160 @@ mod tests {
         ui.complete(Completion::Check(Ok(status)));
         assert!(ui.notice.contains("No compatible release"));
         assert!(ui.consent().is_none());
+    }
+    fn check_available() -> Result<UpdateStatus, String> {
+        let Completion::Check(result) = available() else {
+            unreachable!()
+        };
+        result.map(|status| *status)
+    }
+    fn no_network() -> Result<UpdateStatus, String> {
+        panic!("Unexpected release request")
+    }
+    fn drain(ui: &mut Controller, allow_prompt: bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while ui.worker.is_some() {
+            ui.poll(allow_prompt);
+            assert!(Instant::now() < deadline, "update worker timed out");
+            std::thread::yield_now();
+        }
+    }
+    fn screen(ui: &mut Controller) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
+        terminal
+            .draw(|frame| ui.draw(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    #[test]
+    fn manual_open_checks_again_after_startup_was_current_or_offline() {
+        let mut ui = Controller::new(false);
+        ui.notice = "Already up to date".into();
+        ui.open_with(check_available);
+        assert!(screen(&mut ui).contains("Checking for updates"));
+        drain(&mut ui, true);
+        let rendered = screen(&mut ui);
+        assert!(rendered.contains("Version: 1.1.0"));
+        assert!(rendered.contains("Update [Y]"));
+        assert!(!ui.update_selected);
+        ui.key(key(KeyCode::Enter)); // Default is Later, never installs.
+        assert!(!ui.visible && !ui.installing);
+        assert!(screen(&mut ui).contains("Update 1.1.0 available"));
+
+        ui.complete(Completion::Check(Err("offline".into())));
+        assert!(screen(&mut ui).contains("Ctrl+U to retry"));
+        ui.open_with(check_available);
+        drain(&mut ui, true);
+        assert!(screen(&mut ui).contains("Update [Y]"));
+    }
+    #[test]
+    fn exit_checks_again_and_offers_update_or_exit() {
+        let mut ui = Controller::new(false);
+        ui.automatic = true;
+        ui.exit_with(check_available);
+        assert!(ui.visible && !ui.should_quit());
+        assert!(screen(&mut ui).contains("Check for updates before exit"));
+        drain(&mut ui, true);
+        assert!(screen(&mut ui).contains("Update [Y]"));
+        assert!(screen(&mut ui).contains("Exit [Esc]"));
+        ui.key(key(KeyCode::Enter));
+        assert!(ui.should_quit());
+        assert!(!ui.installing);
+    }
+    #[test]
+    fn exit_respects_disabled_checks_and_does_not_install_implicitly() {
+        let mut ui = Controller::new(false);
+        ui.exit_with(no_network);
+        assert!(ui.should_quit());
+        let mut ui = Controller::new(false);
+        ui.automatic = true;
+        ui.exit_with(check_available);
+        drain(&mut ui, true);
+        assert!(ui.consent().is_some());
+        assert!(!ui.exiting && !ui.should_quit());
+        ui.key(key(KeyCode::Esc));
+        assert!(
+            !ui.should_quit(),
+            "installation stays running after dialog closes"
+        );
+    }
+    #[test]
+    fn exit_check_is_skippable_and_current_release_exits_without_a_prompt() {
+        let mut ui = Controller::new(false);
+        ui.automatic = true;
+        ui.exit_with(check_available);
+        ui.key(key(KeyCode::Esc));
+        assert!(ui.should_quit());
+        drain(&mut ui, false);
+        let mut ui = Controller::new(false);
+        ui.exiting = true;
+        let mut status = check_available().unwrap();
+        status.review = None;
+        status.status = "up_to_date".into();
+        ui.complete(Completion::Check(Ok(Box::new(status))));
+        assert!(ui.should_quit());
+        assert!(ui.notice.contains("up to date"));
+    }
+    #[test]
+    fn closing_during_install_still_shows_completion_and_keeps_receipt() {
+        let mut ui = Controller::new(false);
+        ui.complete(available());
+        ui.show();
+        ui.consent().unwrap();
+        ui.key(key(KeyCode::Esc));
+        let (tx, rx) = mpsc::channel();
+        ui.worker = Some(rx);
+        tx.send(Completion::Install(Ok(InstallReceipt {
+            version: "1.1.0".into(),
+            installed_path: "test".into(),
+            previous_path: "old".into(),
+            restart_required: true,
+            activated: true,
+            message: "Verified executable installed.".into(),
+        })))
+        .unwrap();
+        drain(&mut ui, false); // Attached terminal owns input.
+        assert!(!ui.visible);
+        assert!(screen(&mut ui).contains("Updated to 1.1.0"));
+        ui.poll(true);
+        assert!(ui.visible);
+        assert!(screen(&mut ui).contains("Restart Daedalus"));
+        ui.key(key(KeyCode::Esc));
+        ui.automatic = true;
+        ui.poll(true);
+        ui.open_with(no_network);
+        assert!(screen(&mut ui).contains("Updated to 1.1.0"));
+        assert!(!screen(&mut ui).contains("Update [Y]"));
+    }
+    #[test]
+    fn failed_or_disconnected_install_is_reported_after_closing_dialog() {
+        for disconnected in [false, true] {
+            let mut ui = Controller::new(false);
+            ui.installing = true;
+            let (tx, rx) = mpsc::channel();
+            ui.worker = Some(rx);
+            if !disconnected {
+                tx.send(Completion::Install(Err("checksum mismatch".into())))
+                    .unwrap();
+            }
+            drop(tx);
+            drain(&mut ui, false);
+            assert!(!ui.visible && !ui.installing);
+            ui.open_with(no_network);
+            assert!(screen(&mut ui).contains(if disconnected {
+                "worker stopped unexpectedly"
+            } else {
+                "checksum mismatch"
+            }));
+            assert!(screen(&mut ui).contains("Recheck [R]"));
+            assert!(ui.consent().is_none());
+        }
     }
 }
