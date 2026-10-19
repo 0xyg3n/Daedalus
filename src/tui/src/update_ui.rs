@@ -7,6 +7,8 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 
 type Check = fn() -> Result<UpdateStatus, String>;
@@ -30,6 +32,8 @@ pub struct Controller {
     pending_prompt: bool,
     update_selected: bool,
     installing: bool,
+    #[cfg(any(windows, test))]
+    pending_installer: Option<PathBuf>,
     later_hit: Rect,
     update_hit: Rect,
 }
@@ -55,6 +59,8 @@ impl Controller {
             pending_prompt: false,
             update_selected: false,
             installing: false,
+            #[cfg(any(windows, test))]
+            pending_installer: None,
             later_hit: Rect::default(),
             update_hit: Rect::default(),
         };
@@ -177,10 +183,20 @@ impl Controller {
                 self.review = None;
                 self.notice = match result {
                     Ok(receipt) => {
+                        if receipt.installer_ready {
+                            #[cfg(any(windows, test))]
+                            {
+                                self.pending_installer =
+                                    Some(PathBuf::from(&receipt.installed_path));
+                            }
+                            self.quit = true;
+                        }
                         // This process still runs the old executable. Keep the receipt
                         // until restart instead of offering the same update again.
                         self.installed = true;
-                        self.banner = Some(if receipt.activated {
+                        self.banner = Some(if receipt.installer_ready {
+                            format!("Installing {} · closing Daedalus", receipt.version)
+                        } else if receipt.activated {
                             format!(
                                 "Updated to {} · Restart Daedalus to use it",
                                 receipt.version
@@ -193,7 +209,9 @@ impl Controller {
                         });
                         format!(
                             "{} {}. {}{}",
-                            if receipt.activated {
+                            if receipt.installer_ready {
+                                "Starting installer for"
+                            } else if receipt.activated {
                                 "Updated to"
                             } else {
                                 "Downloaded"
@@ -218,6 +236,10 @@ impl Controller {
             }
         }
     }
+    #[cfg(any(windows, test))]
+    pub fn take_installer(&mut self) -> Option<PathBuf> {
+        self.pending_installer.take()
+    }
     fn consent(&mut self) -> Option<UpdateReview> {
         if !self.visible || self.installing {
             return None;
@@ -226,10 +248,7 @@ impl Controller {
         self.installing = true;
         self.exiting = false;
         self.update_selected = false;
-        self.notice = format!(
-            "Installing {}… You can close this dialog and keep working.",
-            review.version
-        );
+        self.notice = format!("Preparing verified update {}…", review.version);
         Some(review)
     }
     fn install(&mut self) {
@@ -329,7 +348,15 @@ impl Controller {
         let detail = match &self.review {
             Some(review) => format!(
                 "{}\n\nVersion: {} · {}\nDownload: {} bytes\nInstall: {}\n\nExisting binary is retained. Update only with your approval.",
-                self.notice, review.version, review.platform, review.size, review.install_path
+                self.notice,
+                review.version,
+                review.platform,
+                review.size,
+                if review.platform.ends_with("windows") {
+                    "Current-user Windows installation"
+                } else {
+                    &review.install_path
+                }
             ),
             None => self.notice.clone(),
         };
@@ -432,10 +459,30 @@ mod tests {
             previous_path: "old".into(),
             restart_required: true,
             activated: false,
+            installer_ready: false,
             message: "Staged".into(),
         })));
         assert!(ui.notice.contains("Downloaded 1.1.0"));
         assert!(!ui.installing);
+    }
+    #[test]
+    fn verified_windows_installer_closes_tui_for_activation() {
+        let mut ui = Controller::new(false);
+        ui.complete(Completion::Install(Ok(InstallReceipt {
+            version: "1.1.0".into(),
+            installed_path: "C:/private/Daedalus-setup.exe".into(),
+            previous_path: "C:/private/previous.exe".into(),
+            restart_required: true,
+            activated: false,
+            installer_ready: true,
+            message: "Verified installer ready".into(),
+        })));
+        assert!(ui.should_quit());
+        assert_eq!(
+            ui.take_installer(),
+            Some(PathBuf::from("C:/private/Daedalus-setup.exe"))
+        );
+        assert!(ui.take_installer().is_none());
     }
     #[test]
     fn errors_and_current_release_are_visible_without_install_offer() {
@@ -569,6 +616,7 @@ mod tests {
             previous_path: "old".into(),
             restart_required: true,
             activated: true,
+            installer_ready: false,
             message: "Verified executable installed.".into(),
         })))
         .unwrap();

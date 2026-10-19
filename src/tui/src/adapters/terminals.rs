@@ -78,9 +78,13 @@ impl Default for Terminals {
 }
 impl Terminals {
     pub(crate) fn query(&self, executable: &Path, args: &[&str]) -> Result<String> {
-        let output =
-            process::run_terminal(Command::new(executable).args(args), self.timeout, LIMIT)
-                .map_err(|e| format!("Terminal query failed ({:?})", e.kind()))?;
+        let mut command = Command::new(executable);
+        command.args(args);
+        if let Some(home) = user_home() {
+            command.current_dir(home);
+        }
+        let output = process::run_terminal(&mut command, self.timeout, LIMIT)
+            .map_err(|e| format!("Terminal query failed ({:?})", e.kind()))?;
         if !output.status.success() {
             return Err("Terminal server rejected discovery query".into());
         }
@@ -582,10 +586,17 @@ fn binary_in(name: &str, paths: &[PathBuf], home: Option<&Path>) -> Option<PathB
     } else {
         name.to_owned()
     };
-    let known = home
-        .into_iter()
-        .filter(|p| p.is_absolute())
-        .flat_map(|p| [p.join(".local/bin"), p.join(".cargo/bin")]);
+    let known = home.into_iter().filter(|p| p.is_absolute()).flat_map(|p| {
+        #[allow(unused_mut)]
+        let mut dirs = vec![p.join(".local/bin"), p.join(".cargo/bin")];
+        #[cfg(windows)]
+        dirs.extend([
+            p.join("AppData/Local/Microsoft/WinGet/Links"),
+            p.join("AppData/Local/Programs/Herdr"),
+            p.join("AppData/Local/Programs/Herdr/bin"),
+        ]);
+        dirs
+    });
     paths
         .iter()
         .filter(|p| p.is_absolute())
@@ -599,15 +610,23 @@ fn search_paths() -> Vec<PathBuf> {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default()
 }
+fn user_home() -> Option<PathBuf> {
+    let home = if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    };
+    home.map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+}
 fn default_herdr_binary() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    if let Some(binary) = std::env::var_os("DAEDALUS_HERDR_BIN")
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-        });
+        .filter(|p| p.is_absolute() && executable_file(p))
+    {
+        return binary;
+    }
+    let home = user_home();
     binary_in("herdr", &search_paths(), home.as_deref()).unwrap_or_else(|| "herdr".into())
 }
 /// Optional backends are not probed when absent. Explicit endpoints still query
@@ -634,13 +653,9 @@ fn default_mux_binary() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        for name in ["tmux.exe", "psmux.exe"] {
-            if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .filter(|p| p.is_absolute())
-                    .map(|p| p.join(name))
-                    .find(|p| p.is_file())
-            }) {
+        let home = user_home();
+        for name in ["tmux", "psmux"] {
+            if let Some(path) = binary_in(name, &search_paths(), home.as_deref()) {
                 return path;
             }
         }
@@ -696,6 +711,14 @@ fn windows_harness_labels(mut panes: Vec<Value>) -> Vec<Value> {
 #[cfg(test)]
 mod binary_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn adapter_queries_use_a_stable_home_instead_of_launch_directory() {
+        let Some(home) = user_home() else { return };
+        let terminals = Terminals::default();
+        let observed = terminals.query(Path::new("/bin/pwd"), &[]).unwrap();
+        assert_eq!(Path::new(observed.trim()), home);
+    }
     #[test]
     fn resolves_known_user_install_when_path_is_missing() {
         let root = std::env::temp_dir().join(format!(

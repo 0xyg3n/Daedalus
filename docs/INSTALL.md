@@ -36,7 +36,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-Download **Daedalus-0.2.0-beta.11-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
+Download **Daedalus-0.2.0-beta.12-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
 
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
@@ -182,6 +182,8 @@ Daedalus uses the first of: `--config-dir`, `DAEDALUS_CONFIG_DIR`,
 `$XDG_CONFIG_HOME/daedalus`, then the platform default (`%APPDATA%\Daedalus`
 on Windows, `~/.config/daedalus` on Linux). Keep it outside Git. The files
 are described in [config/README.md](../config/README.md).
+If `DAEDALUS_CONFIG_DIR` is relative, Daedalus resolves it under your user
+profile so changing the launch directory does not switch configurations.
 
 To copy an existing instance into a new directory, run
 `daedalus config import-instance --config-dir NEW --from OLD` (preview; `--apply`
@@ -231,9 +233,11 @@ After installation, a confirmation shows the installed version and restart
 instructions, even if you closed the dialog while it was downloading. A status
 notice remains visible until restart. Failed checks and installations also show
 a notice with details available through **Ctrl+U**.
-Windows downloads and verifies a staged executable but does **not** activate it:
-close the application and follow the returned manual activation instructions.
-Neither path restarts Telegram or changes private configuration.
+On Windows, approving an update in the TUI verifies the setup package, closes
+Daedalus and runs that installer. The installer waits for the old process to exit,
+then replaces the current-user installation and opens Daedalus. The command-line
+`update install` returns the verified installer path for manual launch after
+closing Daedalus. Neither path restarts Telegram or changes private configuration.
 
 On Windows, close Daedalus and stop its Telegram service before deleting its
 installation prefix; private configuration remains separate.

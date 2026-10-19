@@ -45,6 +45,7 @@ pub struct InstallReceipt {
     pub previous_path: String,
     pub restart_required: bool,
     pub activated: bool,
+    pub installer_ready: bool,
     pub message: String,
 }
 #[derive(Clone, Deserialize)]
@@ -85,6 +86,9 @@ fn platform() -> Result<&'static str, String> {
     }
 }
 fn asset_name(version: &Version, platform: &str) -> String {
+    if platform == "x86_64-windows" {
+        return format!("Daedalus-{version}-setup.exe");
+    }
     format!(
         "daedalus-{version}-{platform}{}",
         if platform.ends_with("windows") {
@@ -277,7 +281,7 @@ fn checked_file(path: &Path) -> Result<Vec<u8>, String> {
     };
     #[cfg(windows)]
     let file = crate::platform::open_native_profile(path, false, false)
-        .map_err(|_| "Unsafe executable permissions. Install Daedalus with install.ps1 in a private user directory, then relaunch it")?;
+        .map_err(|_| "Unsafe stored release permissions")?;
     let mut bytes = Vec::new();
     file.take(BINARY_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -305,7 +309,7 @@ fn directory(path: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     crate::platform::validate_native_profile_dir(path)
-        .map_err(|_| "Unsafe update directory permissions. Install Daedalus with install.ps1 in a private user directory, then relaunch it")?;
+        .map_err(|_| "Unsafe private update directory permissions")?;
     Ok(())
 }
 fn target() -> Result<PathBuf, String> {
@@ -348,21 +352,37 @@ fn target() -> Result<PathBuf, String> {
     Ok(executable)
 }
 fn target_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    directory(path.parent().ok_or("Missing executable directory")?)?;
-    let meta = fs::symlink_metadata(path).map_err(|_| "Installed executable disappeared")?;
-    if meta.file_type().is_symlink() {
-        let destination = fs::read_link(path).map_err(|_| "Cannot inspect executable link")?;
-        if !destination.is_absolute() {
-            return Err("Executable link must have an absolute target".into());
+    #[cfg(windows)]
+    {
+        let file = crate::platform::open_regular(path)
+            .map_err(|_| "Cannot read the running Daedalus executable")?;
+        let mut bytes = Vec::new();
+        file.take(BINARY_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read the running Daedalus executable")?;
+        if bytes.len() as u64 > BINARY_LIMIT {
+            return Err("Running executable exceeds update size limit".into());
         }
-        directory(
-            destination
-                .parent()
-                .ok_or("Missing executable target directory")?,
-        )?;
-        checked_file(&destination)
-    } else {
-        checked_file(path)
+        return Ok(bytes);
+    }
+    #[cfg(unix)]
+    {
+        directory(path.parent().ok_or("Missing executable directory")?)?;
+        let meta = fs::symlink_metadata(path).map_err(|_| "Installed executable disappeared")?;
+        if meta.file_type().is_symlink() {
+            let destination = fs::read_link(path).map_err(|_| "Cannot inspect executable link")?;
+            if !destination.is_absolute() {
+                return Err("Executable link must have an absolute target".into());
+            }
+            directory(
+                destination
+                    .parent()
+                    .ok_or("Missing executable target directory")?,
+            )?;
+            checked_file(&destination)
+        } else {
+            checked_file(path)
+        }
     }
 }
 fn review_at(client: &Client, current: &str, executable: &Path) -> Result<UpdateStatus, String> {
@@ -441,7 +461,7 @@ fn executable_format(bytes: &[u8], platform: &str) -> Result<(), String> {
         bytes.get(..2) == Some(b"MZ")
             && bytes.get(60..64).is_some_and(|value| {
                 let offset = u32::from_le_bytes(value.try_into().unwrap()) as usize;
-                bytes.get(offset..offset.saturating_add(6)) == Some(&[b'P', b'E', 0, 0, 0x64, 0x86])
+                bytes.get(offset..offset.saturating_add(6)) == Some(&[b'P', b'E', 0, 0, 0x4c, 0x01])
             })
     } else {
         false
@@ -539,34 +559,36 @@ fn activate(review: &UpdateReview, bytes: &[u8]) -> Result<InstallReceipt, Strin
     if hash(&old) != review.current_sha256 {
         return Err("Installed executable changed after review; check again".into());
     }
-    let parent = target.parent().ok_or("Missing executable directory")?;
-    let root = parent.join(".daedalus-updates");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        if !root.exists() {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&root)
-                .map_err(|_| "Cannot create private update directory")?;
-        }
-    }
     #[cfg(windows)]
-    crate::platform::ensure_private_dir(&root)
-        .map_err(|_| "Cannot create private update directory")?;
-    directory(&root)?;
-    let _lock = update_lock(&root)?;
-    if hash(&target_bytes(target)?) != review.current_sha256 {
-        return Err("Installed executable changed while acquiring update lock".into());
-    }
-    let previous = store_file(&root, &old, true)?;
-    let installed = store_file(&root, bytes, true)?;
-    // Revalidate immediately before switching; preserve both content-addressed binaries.
-    if hash(&target_bytes(target)?) != review.current_sha256 {
-        return Err("Installed executable changed during installation".into());
-    }
+    return stage_windows(review, bytes, &old, target);
     #[cfg(unix)]
     {
+        let parent = target.parent().ok_or("Missing executable directory")?;
+        let root = parent.join(".daedalus-updates");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            if !root.exists() {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&root)
+                    .map_err(|_| "Cannot create private update directory")?;
+            }
+        }
+        #[cfg(windows)]
+        crate::platform::ensure_private_dir(&root)
+            .map_err(|_| "Cannot create private update directory")?;
+        directory(&root)?;
+        let _lock = update_lock(&root)?;
+        if hash(&target_bytes(target)?) != review.current_sha256 {
+            return Err("Installed executable changed while acquiring update lock".into());
+        }
+        let previous = store_file(&root, &old, true)?;
+        let installed = store_file(&root, bytes, true)?;
+        // Revalidate immediately before switching; preserve both content-addressed binaries.
+        if hash(&target_bytes(target)?) != review.current_sha256 {
+            return Err("Installed executable changed during installation".into());
+        }
         let mut random = [0; 16];
         crate::platform::random_bytes(&mut random).map_err(|_| "Cannot create update nonce")?;
         let temporary = parent.join(format!(".daedalus-update-{}", hash(&random)));
@@ -579,22 +601,60 @@ fn activate(review: &UpdateReview, bytes: &[u8]) -> Result<InstallReceipt, Strin
         crate::platform::sync_directory(parent).map_err(
             |_| "Release activated but directory synchronization failed; inspect installation",
         )?;
+        Ok(InstallReceipt {
+            version: review.version.clone(),
+            installed_path: installed.display().to_string(),
+            previous_path: previous.display().to_string(),
+            restart_required: true,
+            activated: true,
+            installer_ready: false,
+            message: "Update installed. Restart Daedalus when ready. Existing sessions and services were not restarted; the previous executable is retained.".into(),
+        })
     }
-    let activated = cfg!(unix);
+}
+
+#[cfg(windows)]
+fn stage_windows(
+    review: &UpdateReview,
+    bytes: &[u8],
+    old: &[u8],
+    target: &Path,
+) -> Result<InstallReceipt, String> {
+    let base = crate::platform::user_local_data_directory()
+        .map_err(|_| "Windows local data directory unavailable")?
+        .join("Daedalus");
+    crate::platform::secure_owned_dir(&base)
+        .map_err(|_| "Cannot secure Daedalus update directory")?;
+    let root = base.join(".daedalus-updates");
+    crate::platform::ensure_private_dir(&root)
+        .map_err(|_| "Cannot create private update directory")?;
+    let _lock = update_lock(&root)?;
+    if hash(&target_bytes(target)?) != review.current_sha256 {
+        return Err("Running executable changed during update".into());
+    }
+    let previous = store_file(&root, old, true)?;
+    let package_dir = root.join(hash(bytes));
+    crate::platform::ensure_private_dir(&package_dir)
+        .map_err(|_| "Cannot create private installer directory")?;
+    let installer = package_dir.join("Daedalus-setup.exe");
+    if installer.exists() {
+        if checked_file(&installer)? != bytes {
+            return Err("Stored installer content changed".into());
+        }
+    } else {
+        crate::core::layouts::write_private_limit(&installer, bytes, BINARY_LIMIT)?;
+    }
+    if hash(&target_bytes(target)?) != review.current_sha256 {
+        return Err("Running executable changed while staging update".into());
+    }
     Ok(InstallReceipt {
         version: review.version.clone(),
-        installed_path: installed.display().to_string(),
+        installed_path: installer.display().to_string(),
         previous_path: previous.display().to_string(),
         restart_required: true,
-        activated,
-        message: if activated {
-            "Update installed. Restart Daedalus when ready. Existing sessions and services were not restarted; the previous executable is retained.".into()
-        } else {
-            format!(
-                "Verified update staged at {}. Windows cannot replace this running executable safely; close Daedalus and launch the staged executable. The existing command is unchanged.",
-                installed.display()
-            )
-        },
+        activated: false,
+        installer_ready: true,
+        message: "Verified installer ready. The TUI closes and runs it; command-line users can run the returned installer path after closing Daedalus. Existing terminals stay open.".into(),
     })
 }
 pub fn install(version: &str, approved: &str) -> Result<InstallReceipt, String> {
@@ -659,6 +719,13 @@ mod tests {
         bytes[18] = 62;
         bytes
     }
+    fn windows_installer() -> Vec<u8> {
+        let mut bytes = vec![0; 128];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[60] = 64;
+        bytes[64..70].copy_from_slice(&[b'P', b'E', 0, 0, 0x4c, 0x01]);
+        bytes
+    }
     fn release(version: &str, prerelease: bool) -> serde_json::Value {
         let name = format!("daedalus-{version}-x86_64-linux");
         let url = format!("{RELEASES}/download/v{version}/{name}");
@@ -703,6 +770,27 @@ mod tests {
                 .cmp_precedence(&Version::parse("1.0.0+two").unwrap()),
             std::cmp::Ordering::Equal
         );
+    }
+    #[test]
+    fn windows_update_selects_verified_setup_package() {
+        let version = Version::parse("0.2.0-beta.12").unwrap();
+        let name = asset_name(&version, "x86_64-windows");
+        assert_eq!(name, "Daedalus-0.2.0-beta.12-setup.exe");
+        let url = format!("{RELEASES}/download/v{version}/{name}");
+        let release = json!([{"tag_name":format!("v{version}"),"draft":false,"prerelease":true,"assets":[
+            {"name":name,"size":128,"browser_download_url":url,"digest":format!("sha256:{}",hash(&windows_installer()))},
+            {"name":format!("{name}.sha256"),"size":100,"browser_download_url":format!("{url}.sha256"),"digest":null}
+        ]}]);
+        let selected = select(
+            &serde_json::to_vec(&release).unwrap(),
+            &Version::parse("0.2.0-beta.11").unwrap(),
+            "x86_64-windows",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.2.name, name);
+        assert!(executable_format(&windows_installer(), "x86_64-windows").is_ok());
+        assert!(executable_format(&elf(), "x86_64-windows").is_err());
     }
     #[test]
     fn rejects_untrusted_ambiguous_and_undigested_assets() {

@@ -12,9 +12,12 @@ pub(crate) fn preference_directory(
     cwd: &Path,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<PathBuf> {
-    let home = env("HOME")
-        .or_else(|| env("USERPROFILE"))
-        .map(PathBuf::from);
+    let home = if cfg!(windows) {
+        env("USERPROFILE").or_else(|| env("HOME"))
+    } else {
+        env("HOME").or_else(|| env("USERPROFILE"))
+    }
+    .map(PathBuf::from);
     let mut directory = if let Some(path) = env("DAEDALUS_CONFIG_DIR") {
         PathBuf::from(path)
     } else if let Some(root) = env("XDG_CONFIG_HOME") {
@@ -39,6 +42,7 @@ pub(crate) fn preference_directory(
     }
     if directory.starts_with("~") {
         directory = home
+            .clone()
             .ok_or("HOME required to expand configuration path")?
             .join(
                 directory
@@ -47,7 +51,13 @@ pub(crate) fn preference_directory(
             );
     }
     if !directory.is_absolute() {
-        directory = cwd.join(directory);
+        directory = if env("DAEDALUS_CONFIG_DIR").is_some() {
+            home.as_ref()
+                .ok_or("HOME required for a relative DAEDALUS_CONFIG_DIR")?
+                .join(directory)
+        } else {
+            cwd.join(directory)
+        };
     }
     validate(&directory)?;
     Ok(directory)
@@ -85,9 +95,12 @@ impl Launch {
                 workspace: cwd.into(),
             });
         }
-        let home = env("HOME")
-            .or_else(|| env("USERPROFILE"))
-            .map(PathBuf::from);
+        let home = if cfg!(windows) {
+            env("USERPROFILE").or_else(|| env("HOME"))
+        } else {
+            env("HOME").or_else(|| env("USERPROFILE"))
+        }
+        .map(PathBuf::from);
         let mut directory = match explicit.as_ref() {
             Some(path) => path.clone(),
             None => preference_directory(cwd, &env)?,
@@ -97,6 +110,7 @@ impl Launch {
         }
         if directory.starts_with("~") {
             directory = home
+                .clone()
                 .ok_or("HOME required to expand configuration path")?
                 .join(
                     directory
@@ -118,13 +132,20 @@ impl Launch {
             super::config::ControlConfig::parse(bytes)?;
         }
         let first_run = config.is_none();
+        // Start Menu and installer launches inherit an arbitrary working
+        // directory. Use the user's profile as the initial Windows workspace.
+        let workspace = if cfg!(windows) {
+            home.as_deref().filter(|p| p.is_absolute()).unwrap_or(cwd)
+        } else {
+            cwd
+        };
         if first_run {
-            validate(cwd)?;
+            validate(workspace)?;
         }
         Ok(Self {
             directory: Some(directory),
             first_run,
-            workspace: cwd.into(),
+            workspace: workspace.into(),
         })
     }
     /// The frontend and backend are the same installed executable, never PATH resolution.
@@ -159,6 +180,27 @@ fn validate(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relative_config_override_is_stable_across_launch_directories() {
+        let home = PathBuf::from(crate::test_support::path("/tmp/daedalus-profile"));
+        let env = |key: &str| match key {
+            "HOME" | "USERPROFILE" => Some(home.as_os_str().to_owned()),
+            "DAEDALUS_CONFIG_DIR" => Some(OsString::from("my-daedalus")),
+            _ => None,
+        };
+        let first = preference_directory(
+            Path::new(crate::test_support::path("/tmp/project-one")),
+            env,
+        )
+        .unwrap();
+        let second = preference_directory(
+            Path::new(crate::test_support::path("/tmp/project-two")),
+            env,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first, home.join("my-daedalus"));
+    }
     #[test]
     fn remembered_instance_is_used_only_without_an_explicit_override() {
         use std::sync::atomic::{AtomicU64, Ordering};

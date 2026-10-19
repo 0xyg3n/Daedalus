@@ -19,7 +19,32 @@ pub fn destination() -> Result<PathBuf, String> {
     Ok(base.join("Daedalus/bin/daedalus.exe"))
 }
 
-pub fn install_current() -> Result<PathBuf, String> {
+fn wait_for_parent(pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Storage::FileSystem::SYNCHRONIZE,
+        System::Threading::{OpenProcess, WaitForSingleObject},
+    };
+    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            return Ok(());
+        }
+        return Err("Cannot wait for the previous Daedalus process".into());
+    }
+    let result = unsafe { WaitForSingleObject(handle, 45_000) };
+    unsafe { CloseHandle(handle) };
+    match result {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err("Close the previous Daedalus window and retry installation".into()),
+        _ => Err("Cannot confirm previous Daedalus process exited".into()),
+    }
+}
+
+pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
+    if let Some(pid) = wait_pid {
+        wait_for_parent(pid)?;
+    }
     let source = std::env::current_exe().map_err(|e| e.to_string())?;
     let destination = destination()?;
     let base = destination

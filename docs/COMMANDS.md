@@ -28,7 +28,7 @@ digest where one is required.
 | `agent-identity` | Optional Armonia rename: `preview`, `apply`, `status` |
 | `diagnostics --json` | Queue, route, registration and configuration health |
 | `update check [--json]` | Review a compatible GitHub release; installs nothing |
-| `update install --version VERSION --approve SHA [--json]` | Verify and install the exact reviewed release; Windows stages for manual activation |
+| `update install --version VERSION --approve SHA [--json]` | Verify and install the exact reviewed release; Windows CLI returns the verified installer path, while TUI launches it after closing |
 | `job` | Short aliases for terminal, checkpoint, route and diagnostics operations |
 | `tma` | Open an independent view of an exact terminal |
 

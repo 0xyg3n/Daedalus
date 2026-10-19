@@ -28,7 +28,7 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.11](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.12](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
@@ -105,6 +105,13 @@ project or configuration directory. Linux stores it under
 `~/.local/share/daedalus/terminals`; Windows uses
 `%LOCALAPPDATA%\Daedalus\terminals`. It contains private local connection state
 and must stay outside version control.
+
+With automatic discovery enabled, Daedalus queries running Herdr sessions and
+configured or discoverable tmux endpoints independently of the directory from
+which you start the TUI. It searches `PATH` and common per-user locations for
+Herdr; set `DAEDALUS_HERDR_BIN` to an absolute executable path for a custom
+installation. The first Windows setup uses your user profile as its workspace,
+not the installer's temporary directory.
 
 **Already-open shells:** Linux discovery identifies your controlling terminals
 in the current process namespace. Windows discovery lists owned shell and terminal
@@ -184,8 +191,8 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) |
+| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12) |
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, the Start Menu shortcut opens Daedalus in a console; Windows Terminal is recommended for the best display. No additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -196,12 +203,12 @@ The Windows preview is cross-compiled; platform-independent tests have also run 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.11
-curl -fLO "$base/daedalus-0.2.0-beta.11-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.11-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.11-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.12
+curl -fLO "$base/daedalus-0.2.0-beta.12-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.12-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.12-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.11-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.12-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -213,11 +220,11 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, download **Daedalus-0.2.0-beta.11-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
+On Windows, download **Daedalus-0.2.0-beta.12-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
 
 Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 
-The TUI checks releases in the background at launch and before exit, and offers an update when one is available (**Later** at launch; **Exit** when closing). There are no periodic checks. **Options → Application → Check for updates** checks on demand (**Ctrl+U**); inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums and architecture. Linux activates the verified binary while retaining the previous one; Windows stages it for manual activation after closing the application. Install completion opens a confirmation when the interface is free and keeps a status notice visible until restart. `DAEDALUS_UPDATE_CHECK=0` disables automatic checks; manual checks remain available. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
+The TUI checks releases in the background at launch and before exit, and offers an update when one is available (**Later** at launch; **Exit** when closing). There are no periodic checks. **Options → Application → Check for updates** checks on demand (**Ctrl+U**); inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums. Linux activates the verified binary while retaining the previous one. On Windows, Daedalus downloads the verified setup package, closes its TUI, and runs the installer after the old process exits. `DAEDALUS_UPDATE_CHECK=0` disables automatic checks; manual checks remain available. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
 
 ## Documentation
 

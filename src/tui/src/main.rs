@@ -108,11 +108,24 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     if args.first().is_some_and(|arg| arg == "install") {
-        if args != ["install", "--yes"] {
-            return Err(io::Error::other("Usage: daedalus install --yes"));
-        }
-        let installed =
-            daedalus_tui::app::windows_install::install_current().map_err(io::Error::other)?;
+        let wait_pid = match args.as_slice() {
+            [install, yes] if install == "install" && yes == "--yes" => None,
+            [install, yes, wait, pid]
+                if install == "install" && yes == "--yes" && wait == "--wait-pid" =>
+            {
+                Some(
+                    pid.parse::<u32>()
+                        .map_err(|_| io::Error::other("Invalid parent PID"))?,
+                )
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "Usage: daedalus install --yes [--wait-pid PID]",
+                ));
+            }
+        };
+        let installed = daedalus_tui::app::windows_install::install_current(wait_pid)
+            .map_err(io::Error::other)?;
         println!("Installed Daedalus at {}", installed.display());
         return Ok(());
     }
@@ -655,6 +668,14 @@ fn main() -> io::Result<()> {
         DisableBracketedPaste
     );
     ratatui::restore();
+    #[cfg(windows)]
+    if result.is_ok() {
+        if let Some(installer) = updater.take_installer() {
+            std::process::Command::new(installer)
+                .arg(format!("/PARENT_PID={}", std::process::id()))
+                .spawn()?;
+        }
+    }
     result
 }
 

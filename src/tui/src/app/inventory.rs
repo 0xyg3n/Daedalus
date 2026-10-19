@@ -32,13 +32,22 @@ pub fn run(args: &[String], output: &mut impl std::io::Write) -> Result<(), Stri
     let bytes = crate::core::layouts::read_private(&directory.join("control.json"))?
         .ok_or("Configuration missing; run config init or config import")?;
     let config = ControlConfig::parse(&bytes)?;
-    let mut roots = vec![PathBuf::from("/tmp")];
-    if let Some(root) = std::env::var_os("TMUX_TMPDIR") {
-        roots.push(root.into());
-    }
-    let result = collect(&config, &Terminals::default(), &roots);
+    let result = collect(&config, &Terminals::default(), &socket_roots());
     serde_json::to_writer(&mut *output, &result).map_err(|_| "Cannot write inventory")?;
     writeln!(output).map_err(|_| "Cannot write inventory".into())
+}
+
+pub fn socket_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/tmp")];
+    for key in ["TMUX_TMPDIR", "XDG_RUNTIME_DIR"] {
+        if let Some(root) = std::env::var_os(key).map(PathBuf::from)
+            && root.is_absolute()
+            && !roots.contains(&root)
+        {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 #[derive(Clone)]

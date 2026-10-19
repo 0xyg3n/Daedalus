@@ -1999,11 +1999,7 @@ impl Source for NativeSource {
     }
 
     fn refresh(&mut self, config: &ControlConfig) -> Result<Observations> {
-        let mut roots = vec![PathBuf::from("/tmp")];
-        if let Some(root) = std::env::var_os("TMUX_TMPDIR") {
-            roots.push(root.into());
-        }
-        let mut snapshot = inventory::collect(config, &self.terminals, &roots);
+        let mut snapshot = inventory::collect(config, &self.terminals, &inventory::socket_roots());
         let mut errors = Vec::new();
         if super::hook_runtime::enrich_native_sessions(
             &self.directory,
