@@ -63,6 +63,8 @@ pub mod workspace_actions;
 pub mod instances;
 
 pub mod update;
+#[cfg(windows)]
+pub mod windows_install;
 
 pub mod workspace_usage;
 

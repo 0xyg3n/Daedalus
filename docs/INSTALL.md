@@ -36,10 +36,10 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-The [0.2.0-beta.9 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.9) provides `daedalus-0.2.0-beta.9-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash`, install with `install.ps1` as shown in the README, then run `setup` from the installed command. The built-in terminal backend requires no separate multiplexer. Stable update checks do not select prereleases.
+Download **Daedalus-0.2.0-beta.10-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.10), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
 
 
-Use native PowerShell and Windows Terminal. The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
+The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
 Native Windows multiplexers such as [tmux-windows](https://github.com/arndawg/tmux-windows)
 and [PSMux](https://github.com/psmux/psmux) can be selected through explicitly
 configured compatible endpoints; command and identity contracts require validation
@@ -52,7 +52,7 @@ through `-S` for the selected implementation. Every candidate still needs fresh
 identity evidence before mutation. For the optional Herdr adapter, install a Windows-compatible Herdr build. Install the Windows versions of the harnesses you choose. Provider support depends on
 each upstream CLI; Linux shell installers are not run on Windows.
 
-From a reviewed checkout, build the committed revision:
+For an optional source build, use a reviewed checkout in native PowerShell:
 
 ```powershell
 git clone https://github.com/0xyg3n/Daedalus.git
@@ -80,7 +80,7 @@ the installer does not assume a Windows artifact exists for an older release.
 Redirects and URLs with embedded credentials are rejected. Checksums prove byte
 integrity, not publisher identity when both come from an untrusted source.
 
-The installer checks SHA-256 and PE x64 architecture, keeps versioned binaries
+The PowerShell source installer checks SHA-256 and PE x64 architecture, keeps versioned binaries
 under `PREFIX\share\daedalus\native\SHA256`, and copies the selected binary to
 `PREFIX\bin\daedalus.exe`. It restricts the installed executable and its directory to the current Windows user, as required by the updater. If an older installation reports unsafe update directory permissions, close Daedalus and rerun the installer from the verified release binary. A standalone executable run directly from Downloads should be installed before using in-app updates. The default prefix is `%LOCALAPPDATA%\Daedalus`;
 `-Prefix ABS` overrides it. Existing commands without an installer receipt, or
@@ -258,6 +258,5 @@ private state and platform boundaries.
 
 On Linux, missing selected tools use the reviewed installation plan. On Windows,
 setup uses installed native backends and gives installation guidance when a
-selected backend is missing; it does not run Linux shell installers. Running the
-Linux installer from Git Bash, MSYS or Cygwin directs you to `install.ps1` in
-native PowerShell. WSL is detected as Linux and uses Linux dependencies.
+selected backend is missing; it does not run Linux shell installers. Use the
+Windows setup executable on native Windows. WSL is a separate Linux environment.

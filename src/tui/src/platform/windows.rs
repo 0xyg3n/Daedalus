@@ -731,6 +731,53 @@ pub fn secure_owned_dir(path: &Path) -> io::Result<()> {
     }
     validate_acl(&file, false)
 }
+/// Explicit install-only repair for a user-owned executable or receipt.
+/// Never relax this check for ordinary state reads.
+pub fn secure_owned_file(path: &Path) -> io::Result<()> {
+    let file = open_handle(path, FILE_READ_ATTRIBUTES | WRITE_DAC, OPEN_EXISTING, false)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(denied("Expected an owned file without hard links"));
+    }
+    unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(file.as_raw_handle(), &mut info) == 0 {
+            return Err(last());
+        }
+        if info.nNumberOfLinks != 1 {
+            return Err(denied("Expected an owned file without hard links"));
+        }
+        let mut owner = ptr::null_mut();
+        let mut sd = ptr::null_mut();
+        let status = GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut sd,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let _guard = Local(sd);
+        if owner.is_null() || sid_string(owner)? != current_identity()? {
+            return Err(denied("File owner does not match current user"));
+        }
+        let descriptor = descriptor()?;
+        if SetKernelObjectSecurity(
+            file.as_raw_handle(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        ) == 0
+        {
+            return Err(last());
+        }
+    }
+    validate_private_file(&file)
+}
 pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
     use windows_sys::Win32::Security::Cryptography::{
         BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,

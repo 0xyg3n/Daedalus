@@ -106,6 +106,16 @@ enum Step {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if args.first().is_some_and(|arg| arg == "install") {
+        if args != ["install", "--yes"] {
+            return Err(io::Error::other("Usage: daedalus install --yes"));
+        }
+        let installed =
+            daedalus_tui::app::windows_install::install_current().map_err(io::Error::other)?;
+        println!("Installed Daedalus at {}", installed.display());
+        return Ok(());
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "terminal-native" || arg == "shell")
