@@ -481,7 +481,7 @@ pub struct ProcessIdentity {
 pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     process_identity_with_parent(pid, None)
 }
-fn process_parents() -> io::Result<std::collections::BTreeMap<u32, u32>> {
+fn process_snapshot() -> io::Result<Vec<(u32, u32, String)>> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
@@ -490,17 +490,97 @@ fn process_parents() -> io::Result<std::collections::BTreeMap<u32, u32>> {
         let snapshot = File::from_raw_handle(snap);
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of_val(&entry) as u32;
-        let mut parents = std::collections::BTreeMap::new();
+        let mut result = Vec::new();
         let mut more = Process32FirstW(snapshot.as_raw_handle(), &mut entry);
+        if more == 0 && last().raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            return Err(last());
+        }
         while more != 0 {
-            if parents.len() >= 65536 {
+            if result.len() >= 65536 {
                 return Err(io::Error::other("Process snapshot exceeds bound"));
             }
-            parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+            let length = entry
+                .szExeFile
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            result.push((
+                entry.th32ProcessID,
+                entry.th32ParentProcessID,
+                String::from_utf16_lossy(&entry.szExeFile[..length]),
+            ));
             more = Process32NextW(snapshot.as_raw_handle(), &mut entry);
         }
-        Ok(parents)
+        if last().raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            return Err(last());
+        }
+        Ok(result)
     }
+}
+fn process_parents() -> io::Result<std::collections::BTreeMap<u32, u32>> {
+    Ok(process_snapshot()?
+        .into_iter()
+        .map(|(pid, parent, _)| (pid, parent))
+        .collect())
+}
+pub struct TerminalProcesses {
+    pub processes: Vec<ProcessIdentity>,
+    pub parents: std::collections::BTreeMap<u32, u32>,
+}
+/// Owned shell/host process observations only: no console attachment or argument reads.
+pub fn terminal_processes() -> io::Result<TerminalProcesses> {
+    let snapshot = process_snapshot()?;
+    let parents = snapshot
+        .iter()
+        .map(|(pid, parent, _)| (*pid, *parent))
+        .collect();
+    let owner = current_identity()?;
+    let mut processes = Vec::new();
+    let mut queried = 0;
+    let started = std::time::Instant::now();
+    for (pid, parent, name) in snapshot {
+        if started.elapsed() > std::time::Duration::from_secs(2) {
+            return Err(io::Error::other(
+                "Terminal process discovery exceeded its time bound",
+            ));
+        }
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "cmd.exe"
+                | "powershell.exe"
+                | "pwsh.exe"
+                | "bash.exe"
+                | "sh.exe"
+                | "zsh.exe"
+                | "fish.exe"
+                | "nu.exe"
+                | "dash.exe"
+                | "ksh.exe"
+                | "wsl.exe"
+                | "wslhost.exe"
+                | "git-bash.exe"
+                | "windowsterminal.exe"
+                | "openconsole.exe"
+                | "conhost.exe"
+                | "mintty.exe"
+                | "alacritty.exe"
+                | "wezterm-gui.exe"
+                | "kitty.exe"
+        ) {
+            continue;
+        }
+        queried += 1;
+        if queried > 512 {
+            return Err(io::Error::other("Terminal process snapshot exceeds bound"));
+        }
+        let Ok(process) = process_identity_with_parent(pid, Some(parent)) else {
+            continue;
+        };
+        if process.owner == owner {
+            processes.push(process);
+        }
+    }
+    Ok(TerminalProcesses { processes, parents })
 }
 /// Display-only descendant evidence, never terminal ownership authorization.
 /// One snapshot is queried; only the bounded subtree has tokens/images opened.

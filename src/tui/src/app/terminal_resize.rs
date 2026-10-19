@@ -176,6 +176,11 @@ pub fn apply(
     let plan = prepare(&tree, node, &request)?;
     terminals.verify(&plan.pane)?;
     terminals.verify(&plan.peer)?;
+    if plan.backend == Backend::Native {
+        return Err(
+            "Resize the native terminal view; its PTY follows the attached view size".into(),
+        );
+    }
     let success = if plan.backend == Backend::Herdr {
         let amount = format!("{:.8}", plan.fraction.min(0.5));
         let reply = terminals.herdr_result(

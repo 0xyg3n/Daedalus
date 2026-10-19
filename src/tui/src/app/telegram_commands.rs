@@ -1084,7 +1084,15 @@ impl NativeOperations {
         if let Some(path) = self.environment.get("TMUX_TMPDIR") {
             roots.push(path.into());
         }
-        let snapshot = super::inventory::collect(&self.config, &self.terminals, &roots);
+        let mut snapshot = super::inventory::collect(&self.config, &self.terminals, &roots);
+        super::hook_runtime::enrich_native_sessions(
+            &self.directory,
+            &mut snapshot,
+            &self.terminals,
+        )
+        .map_err(
+            |_| "Native conversation discovery could not be verified; inspect hook diagnostics",
+        )?;
         if snapshot["errors"]
             .as_array()
             .is_some_and(|errors| !errors.is_empty())

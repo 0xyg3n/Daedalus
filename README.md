@@ -1,5 +1,5 @@
 <p align="center"><img src="assets/daedalus.png" alt="Daedalus" width="440"></p>
-<p align="center"><b>Daedalus</b> is a terminal control panel for AI coding agents running in tmux and Herdr, with a Telegram bridge.</p>
+<p align="center"><b>Daedalus</b> runs persistent terminals and brings your shells, AI coding agents and Telegram controls into one workspace.</p>
 <p align="center">
 <img src="assets/badges/platform.svg" alt="Linux and Windows preview">
 <img src="assets/badges/interface.svg" alt="Rust · Ratatui">
@@ -28,15 +28,15 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.7](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.8](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
-You run coding agents such as Claude Code, Codex or Grok in tmux or Herdr terminals. Daedalus finds those terminals, shows them side by side and lets you watch, type into or message exactly the one you choose, from the terminal UI, the command line or a Telegram chat. It does not replace the agents or their sign-in. Everything ships as one Rust executable.
+Start a shell or coding agent directly in Daedalus, then keep working across terminal views without stopping the process. Its built-in terminal backend uses Linux PTYs and Windows ConPTY; tmux and Herdr are optional adapters for existing sessions. The TUI, CLI and Telegram bridge share the same operations. Agents keep their own accounts and sign-in.
 
 - **Choose your layout.** Browse the hierarchy in Tree, work within a project in Tiles, scan the fleet in Wall, rotate and resize terminal faces in Cube, or use Focus with its workspace tree. [Compare the layouts below](#layouts).
 - **Watch or take over.** Observe a terminal read-only, or attach and type. Detaching (Ctrl+] then D) leaves the process running. In Focus, drag split dividers or use Alt+arrows to resize the actual panes; while attached, press Ctrl+] first.
-- **Start and organize work.** Create projects, tabs and splits, start any installed agent in them, and sign in with each tool's own login flow.
+- **Start and organize work.** Create native workspaces and terminals without installing a multiplexer. Existing tmux and Herdr sessions keep their backend-specific tabs and split controls.
 - **Keep sessions.** Save named checkpoints or context-only excerpts from a terminal, resume or fork a conversation where the tool supports it, duplicate a view, hand context to another tool, and save layouts and workflows.
 - **Drive agents from Telegram.** An authorized chat is bound to one exact agent. Text, photos and files go in; replies and progress come back.
 - **Hooks and goals.** Reviewed per-tool hook profiles report lifecycle, replies and progress. Goals continue a directive where the tool has a native way to do so.
@@ -49,9 +49,9 @@ billing measurements. See [quick switching and usage](docs/TUI.md#quick-terminal
 
 ## How it works
 
-<p align="center"><img src="assets/architecture.svg" alt="Daedalus architecture: TUI, CLI and Telegram frontends call the same shared operations, which recheck the exact target and act through tmux and Herdr adapters on agents whose hooks report back to the journal" width="900"></p>
+<p align="center"><img src="assets/architecture.svg" alt="Daedalus architecture: TUI, CLI and Telegram frontends call the same shared operations, which recheck the exact target and act through native PTY, tmux and Herdr adapters on agents whose hooks report back to the journal" width="900"></p>
 
-1. **Discovery.** Daedalus reads the tmux servers and Herdr sessions you configure. Each terminal gets an exact identity: backend, server, pane, generation, process start and, where known, the agent's conversation. Display names are only labels.
+1. **Discovery.** Daedalus discovers its own native terminals across launch directories, plus available tmux servers and Herdr sessions. External shell processes appear in a separate read-only group. Each terminal gets an exact identity: backend, server, pane, generation, process start and, where known, the agent's conversation. Display names are only labels.
 2. **One set of operations.** The TUI, the CLI and Telegram call the same operations. Each one rechecks the identity just before it acts, so a terminal that was replaced or renamed is never targeted by mistake.
 3. **Hooks report back.** A registered agent's hooks send its lifecycle events to a durable journal. That is how Daedalus knows a turn has finished and what to deliver.
 4. **Receipts, not guesses.** Queued, submitted, delivered and uncertain are recorded separately. A send with an unknown outcome stays uncertain and is never retried as a new message.
@@ -79,6 +79,47 @@ Proportions persist in your local layout.
 These captures use built-in sample data. See the [TUI guide](docs/TUI.md)
 for attachment, resizing, saved layouts and reduced-motion settings.
 
+## Built-in terminals
+
+Run a persistent shell without installing tmux or Herdr:
+
+```sh
+daedalus shell --workspace my-project --name dev
+```
+
+Or start an installed agent directly, using its normal arguments:
+
+```sh
+daedalus shell --workspace my-project --name agent -- claude
+```
+
+**Ctrl+] then D** disconnects your view and leaves the process running. Open
+Daedalus from another terminal to find it under **Native terminals**, then
+**Watch** or **Attach**. One client controls input and terminal size at a time;
+other views can observe. Closing the terminal ends its process. Sessions survive
+detaching the UI, not a machine restart.
+
+The native registry is shared by your local user, independently of the current
+project or configuration directory. Linux stores it under
+`~/.local/share/daedalus/terminals`; Windows uses
+`%LOCALAPPDATA%\Daedalus\terminals`. It contains private local connection state
+and must stay outside version control.
+
+**Already-open shells:** Linux discovery identifies your controlling terminals
+in the current process namespace. Windows discovery lists owned shell and terminal
+host processes; it does not reconstruct every application's windows or virtual
+desktops. An arbitrary existing Bash, CMD or PowerShell process cannot be safely
+reattached to a new PTY. These entries are read-only; start future work through
+`daedalus shell` for capture, input and resize. WSL and native Windows are separate
+environments. Windows ConPTY is compiled in; real Windows runtime validation is
+still required.
+
+Native terminals support capture, input, resize, rename, workspace grouping and
+close. A native workspace groups independent terminals; it is not an OS desktop.
+Backend-specific physical split trees and duplicate-view launchers remain
+separate capabilities. Checkpoints and Telegram require a supported harness and
+verified hooks; seeing a shell in the inventory does not establish agent readiness.
+
 ## Telegram feeder
 
 The feeder connects one Telegram chat to one exact agent conversation. A message you send to your bot is typed into that agent's prompt, and the agent's reply comes back to the chat.
@@ -104,7 +145,7 @@ The feeder connects one Telegram chat to one exact agent conversation. A message
 | Remote control | `/status`, `/windows`, `/use`, `/say`, `/capture`, `/interrupt`, `/stop`, `/new claude`, checkpoints, goals and Claude Code slash commands |
 | Group chats | `/listen` and `/quiet`, mentions and replies |
 
-Requirements and limits: the agent must run in a Herdr pane with Herdr's agent integration installed (for Claude Code, `herdr integration install claude`), because Herdr reports the conversation ID that routing needs. tmux panes do not report one, so the feeder cannot route to agents in tmux. The chat's route and reply binding are set in the TUI (**Telegram**) or with `daedalus telegram config import`. See [Commands](docs/COMMANDS.md#telegram) for every command.
+Requirements and limits: routing needs a verified terminal, process and conversation ID. Native Daedalus terminals obtain conversation identity from their registered agent hooks. Herdr can report it through its agent integration (for Claude Code, `herdr integration install claude`). A shell or tmux pane without verified conversation evidence is not a feeder destination. The chat's route and reply binding are set in the TUI (**Telegram**) or with `daedalus telegram config import`. See [Commands](docs/COMMANDS.md#telegram) for every command.
 
 ## Terminal backends
 
@@ -142,24 +183,24 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
+| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [Windows executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) or [PowerShell installer](docs/INSTALL.md#native-windows-install) |
 
-Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, use PowerShell in Windows Terminal and install a native backend separately. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
+Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, use PowerShell in Windows Terminal; no additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
-The Windows preview passes cross-compilation and Windows unit tests under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
+The Windows preview is cross-compiled; platform-independent tests have also run under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
 
 ## Install
 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.7
-curl -fLO "$base/daedalus-0.2.0-beta.7-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.7-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.7-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.8
+curl -fLO "$base/daedalus-0.2.0-beta.8-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.8-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.8-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.7-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.8-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -171,10 +212,10 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
 
 ```powershell
-$exe = 'daedalus-0.2.0-beta.7-x86_64-windows.exe'
+$exe = 'daedalus-0.2.0-beta.8-x86_64-windows.exe'
 $expected = (Get-Content "$exe.sha256").Split(' ')[0]
 if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
 & ".\$exe" setup
@@ -182,7 +223,7 @@ if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum 
 
 For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
 
-Setup chooses available terminal backends and the agent tools you use, and lists anything it would install for review. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
+Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 
 The TUI checks releases in the background at launch and before exit, and offers an update when one is available (**Later** at launch; **Exit** when closing). There are no periodic checks. **Options → Application → Check for updates** checks on demand (**Ctrl+U**); inside an attached terminal use **Ctrl+]**, then **U**. Beta installations include newer betas; stable installations select stable releases. Installation requires your approval and verifies checksums and architecture. Linux activates the verified binary while retaining the previous one; Windows stages it for manual activation after closing the application. Install completion opens a confirmation when the interface is free and keeps a status notice visible until restart. `DAEDALUS_UPDATE_CHECK=0` disables automatic checks; manual checks remain available. `daedalus update check --json` only checks. Details are in the [install guide](docs/INSTALL.md).
 

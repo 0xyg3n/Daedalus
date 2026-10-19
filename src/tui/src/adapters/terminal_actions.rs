@@ -134,6 +134,10 @@ impl Terminals {
         let lines = lines.clamp(1, 500).to_string();
         let start = format!("-{lines}");
         let (binary, mut args) = match id.backend {
+            Backend::Native => {
+                let capture = crate::app::native_terminal::capture(&id.endpoint, &id.generation)?;
+                return Ok(if ansi { capture.ansi } else { capture.text });
+            }
             Backend::Tmux => (
                 &self.tmux,
                 vec![
@@ -181,6 +185,31 @@ impl Terminals {
         }
         let actual = self.verify(saved)?;
         let id = identity(&actual)?;
+        if id.backend == Backend::Native {
+            use crate::app::native_terminal as native;
+            let result = match action {
+                Action::Send(text) => {
+                    native::input(&id.endpoint, &id.generation, format!("{text}\r").as_bytes())
+                }
+                Action::Keys(keys) => {
+                    native::input(&id.endpoint, &id.generation, &super::native::keys(&keys)?)
+                }
+                Action::Interrupt => native::input(&id.endpoint, &id.generation, &[3]),
+                Action::Close => native::close(&id.endpoint, &id.generation),
+                Action::Rename(name) => native::rename(
+                    &id.endpoint,
+                    &id.generation,
+                    &name,
+                    field(&actual, "workspace_id")?,
+                ),
+                Action::Focus => {
+                    return Ok(Receipt::accepted(
+                        "Select Attach or Watch to open this native terminal",
+                    ));
+                }
+            };
+            return ack(result);
+        }
         if id.backend == Backend::Tmux {
             let run = |args: &[&str]| {
                 let mut argv = vec!["-S", id.endpoint.as_str()];
@@ -299,6 +328,14 @@ impl Terminals {
         validate_launch(launch)?;
         let actual = self.verify(parent)?;
         let id = identity(&actual)?;
+        if id.backend == Backend::Native {
+            let pane = super::native::start(launch, field(&actual, "workspace_id")?, "Terminal")?;
+            return Ok(Receipt {
+                state: ReceiptState::Accepted,
+                message: "Native terminal started".into(),
+                terminal: Some(pane),
+            });
+        }
         #[cfg(unix)]
         let binary = launch
             .binary

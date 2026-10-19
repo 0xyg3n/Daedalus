@@ -1397,6 +1397,66 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn native_conversation_enrichment_requires_unique_exact_live_evidence() {
+        let scope = Scope {
+            instance: "example".into(),
+            terminal: TerminalId {
+                backend: Backend::Native,
+                endpoint: "pty-1".into(),
+                pane: "pty-1".into(),
+                generation: "generation-1".into(),
+            },
+            conversation: "conversation-1".into(),
+            harness: Harness::Claude,
+        };
+        let native = json!({"backend":"native","server":"pty-1","pane_id":"pty-1","terminal_id":"generation-1","agent_session":{"kind":"id","value":"stale"}});
+        let external = json!({"backend":"herdr","agent_session":{"kind":"id","value":"untouched"}});
+        let mut snapshot = json!({"panes":[native,external]});
+        assert_eq!(
+            apply_native_sessions(&mut snapshot, std::slice::from_ref(&scope)),
+            1
+        );
+        assert_eq!(
+            snapshot["panes"][0]["agent_session"]["value"],
+            "conversation-1"
+        );
+        assert_eq!(snapshot["panes"][0]["agent"], "claude");
+        assert_eq!(snapshot["panes"][1]["agent_session"]["value"], "untouched");
+        let mut replaced = scope.clone();
+        replaced.terminal.generation = "replacement".into();
+        assert_eq!(apply_native_sessions(&mut snapshot, &[replaced]), 0);
+        assert!(snapshot["panes"][0]["agent_session"].is_null());
+        assert_eq!(
+            apply_native_sessions(&mut snapshot, &[scope.clone(), scope]),
+            0
+        );
+        assert!(snapshot["panes"][0]["agent_session"].is_null());
+    }
+
+    #[test]
+    fn native_enrichment_does_not_trust_a_saved_unbound_registration() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.terminal = TerminalId {
+            backend: Backend::Native,
+            endpoint: "a".repeat(64),
+            pane: "a".repeat(64),
+            generation: "b".repeat(64),
+        };
+        install(&fixture.0).unwrap();
+        let terminal = &fixture.0.scope.terminal;
+        let mut snapshot = json!({"panes":[{
+            "backend":"native", "server":terminal.endpoint, "pane_id":terminal.pane,
+            "terminal_id":terminal.generation, "agent_session":{"kind":"id","value":"unverified"}
+        }]});
+        assert_eq!(
+            enrich_native_sessions(&fixture.0.directory, &mut snapshot, &Terminals::default())
+                .unwrap(),
+            0
+        );
+        assert!(snapshot["panes"][0]["agent_session"].is_null());
+    }
+
     struct Fixture(Registration);
     impl Fixture {
         fn new() -> Self {
@@ -3752,6 +3812,79 @@ pub fn reserve_ready_for(
     Ok(n == 1)
 }
 
+/// Add native conversation metadata only from an unambiguous registration whose
+/// exact terminal generation and harness process are still verified. This is
+/// discovery evidence, not readiness: feeders must still reserve an Idle hook.
+pub fn enrich_native_sessions(
+    directory: &Path,
+    snapshot: &mut Value,
+    terminals: &Terminals,
+) -> Result<usize> {
+    // A reused snapshot must not retain a conversation after its evidence expires.
+    apply_native_sessions(snapshot, &[]);
+    if !snapshot["panes"]
+        .as_array()
+        .is_some_and(|panes| panes.iter().any(|pane| pane["backend"] == "native"))
+    {
+        return Ok(0);
+    }
+    let entries = match fs::read_dir(directory.join("hooks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(Error::PrivateState),
+    };
+    let mut verified = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err(Error::Invalid("Hook registration limit exceeded"));
+        }
+        let path = entry.map_err(|_| Error::PrivateState)?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let registration = inspect(&path)?;
+        if registration.directory != directory {
+            return Err(Error::Identity);
+        }
+        if registration.scope.terminal.backend == crate::core::identity::Backend::Native
+            && registration.harness_process.is_some()
+            && verify_live_session(&registration, terminals).is_ok()
+        {
+            verified.push(registration.scope);
+        }
+    }
+    Ok(apply_native_sessions(snapshot, &verified))
+}
+fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
+    let Some(panes) = snapshot["panes"].as_array_mut() else {
+        return 0;
+    };
+    let mut enriched = 0;
+    for pane in panes {
+        if pane["backend"] != "native" {
+            continue;
+        }
+        pane["agent_session"] = Value::Null;
+        let Ok(identity) = crate::adapters::terminals::identity(pane) else {
+            continue;
+        };
+        let mut matches = verified.iter().filter(|scope| scope.terminal == identity);
+        let Some(scope) = matches.next() else {
+            continue;
+        };
+        // Even identical duplicates may refer to independently configured hooks.
+        // Match the feeder's rule: one live registration per terminal.
+        if matches.next().is_some() {
+            continue;
+        }
+        pane["agent"] = json!(scope.harness);
+        pane["agent_session"] =
+            json!({"kind":"id","agent":scope.harness,"value":scope.conversation});
+        enriched += 1;
+    }
+    enriched
+}
+
 /// Daemon-side live verification deliberately does not require daemon ancestry.
 /// Only registrations with a pinned harness process can be feeder destinations.
 pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -> Result<Value> {
@@ -3784,22 +3917,37 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
         #[cfg(windows)]
         {
             windows_descendant(process.pid, terminal_pid)?;
-            if id.backend != crate::core::identity::Backend::Herdr {
-                return Err(Error::Invalid(
-                    "Native tmux foreground process verification is not available",
-                ));
-            }
-            let info = terminals
-                .herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])
-                .map_err(|_| Error::Identity)?;
-            let foreground = info["process_info"]["foreground_processes"]
-                .as_array()
-                .ok_or(Error::Identity)?;
-            if !foreground
-                .iter()
-                .any(|p| p["pid"].as_u64() == Some(u64::from(process.pid)))
-            {
-                return Err(Error::Identity);
+            match id.backend {
+                crate::core::identity::Backend::Herdr => {
+                    let info = terminals
+                        .herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])
+                        .map_err(|_| Error::Identity)?;
+                    let foreground = info["process_info"]["foreground_processes"]
+                        .as_array()
+                        .ok_or(Error::Identity)?;
+                    if !foreground
+                        .iter()
+                        .any(|p| p["pid"].as_u64() == Some(u64::from(process.pid)))
+                    {
+                        return Err(Error::Identity);
+                    }
+                }
+                crate::core::identity::Backend::Native => {
+                    // ConPTY does not expose Unix foreground process groups.
+                    // Only a harness launched directly as this exact PTY child
+                    // has a verifiable input owner. Shell descendants alone do
+                    // not prove which process will receive a submitted prompt.
+                    if process.pid != terminal_pid {
+                        return Err(Error::Invalid(
+                            "Launch the harness directly in a Daedalus native terminal to verify Windows Telegram input ownership",
+                        ));
+                    }
+                }
+                crate::core::identity::Backend::Tmux => {
+                    return Err(Error::Invalid(
+                        "Native tmux foreground process verification is not available",
+                    ));
+                }
             }
             verify_process(process, &terminals.proc_root)?;
         }

@@ -414,8 +414,14 @@ pub struct Embed {
 }
 
 /// What to show while another client holds input.
-fn held_notice(held: &str) -> String {
-    format!("Input is held by {held}. Watching; Ctrl+] then T takes over.")
+fn held_notice(held: &str, takeover: bool) -> String {
+    if takeover {
+        format!("Input is held by {held}. Watching; Ctrl+] then T takes over.")
+    } else {
+        format!(
+            "Input is held by {held}. Watching; detach that client, then Ctrl+] and C to retry."
+        )
+    }
 }
 
 impl Embed {
@@ -430,7 +436,7 @@ impl Embed {
         if plan.argv.is_empty() || (tmux && !valid_tmux_pane(&plan.terminal)) {
             return Err(io::Error::other("Invalid attach plan"));
         }
-        if !tmux && plan.adapter != "herdr-session" {
+        if !tmux && !["herdr-session", "native-session"].contains(&plan.adapter.as_str()) {
             return Err(io::Error::other("Unsupported terminal adapter"));
         }
         // Herdr refuses input while another client holds it: watch instead,
@@ -453,7 +459,10 @@ impl Embed {
             retries: 0,
             retry_at: None,
             since: Instant::now(),
-            notice: held.as_deref().map(held_notice).unwrap_or_default(),
+            notice: held
+                .as_deref()
+                .map(|holder| held_notice(holder, plan.takeover))
+                .unwrap_or_default(),
             held,
             plan,
             mode,
@@ -826,10 +835,10 @@ impl Embed {
                     let held = self
                         .held
                         .clone()
-                        .unwrap_or_else(|| "another Herdr client".into());
+                        .unwrap_or_else(|| "another terminal client".into());
                     let argv = self.plan.observe_argv.clone();
                     self.restart(&argv, Mode::Observe);
-                    self.notice = held_notice(&held);
+                    self.notice = held_notice(&held, self.plan.takeover);
                     self.held = Some(held);
                 } else if reason.contains("read in progress") && self.retries < RETRIES {
                     // Herdr is busy reading this terminal: try again shortly,
@@ -848,9 +857,7 @@ impl Embed {
                     self.restart(&argv, Mode::Observe);
                     self.notice = "Another client took control. Watching only.".into();
                 } else {
-                    self.end(&format!(
-                        "Herdr: {reason}. The terminal itself was not touched."
-                    ));
+                    self.end(&format!("Terminal connection ended: {reason}"));
                 }
                 true
             }
@@ -947,8 +954,10 @@ impl Embed {
         if !self.live() || self.mode == Mode::Control {
             return;
         }
-        if let Some(held) = &self.held {
-            self.notice = held_notice(held);
+        if let Some(held) = &self.held
+            && self.plan.takeover
+        {
+            self.notice = held_notice(held, self.plan.takeover);
             return;
         }
         let argv = self.plan.control_argv.clone();
@@ -956,6 +965,7 @@ impl Embed {
             self.notice = "This view cannot send input".into();
             return;
         }
+        self.held = None;
         self.restart(&argv, Mode::Control);
     }
 
@@ -1828,6 +1838,26 @@ fn main() {
         embed.takeover();
         assert!(embed.held.is_none());
         embed.detach();
+    }
+
+    #[test]
+    fn native_controller_contention_watches_and_can_retry_after_release() {
+        let dir = scratch("native-held-retry");
+        let fake = fake_herdr(&dir);
+        std::fs::write(dir.join("busy"), "").unwrap();
+        let mut plan = herdr_plan(&fake, "control", &[]);
+        plan.adapter = "native-session".into();
+        plan.takeover = false;
+        let mut embed = Embed::start(plan, 10, 50).unwrap();
+        assert!(pump_until(&mut embed, |e| e.live() && e.mode == Mode::Observe));
+        assert!(embed.notice.contains("detach that client"));
+        assert!(!embed.notice.contains("takes over"));
+        std::fs::remove_file(dir.join("busy")).unwrap();
+        embed.request_control();
+        assert!(pump_until(&mut embed, |e| e.live() && e.mode == Mode::Control));
+        assert!(embed.held.is_none());
+        embed.detach();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

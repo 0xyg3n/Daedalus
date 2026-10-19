@@ -23,7 +23,8 @@ done
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64|Linux:amd64) architecture=x86_64; machine='62 0' ;;
   Linux:aarch64|Linux:arm64) architecture=aarch64; machine='183 0' ;;
-  *) echo 'Native packages currently support Linux x86_64 and ARM64 only.' >&2; exit 1 ;;
+  MINGW*:*|MSYS*:*|CYGWIN*:*) echo 'Detected Windows. Use install.ps1 in native PowerShell; the Linux installer will not run.' >&2; exit 1 ;;
+  *) echo 'This installer supports Linux x86_64 and ARM64. For Windows, use install.ps1 in PowerShell.' >&2; exit 1 ;;
 esac
 [[ "$prefix" == /* && "$prefix" != / && "$prefix" != *'/../'* && "$prefix" != */.. ]] || { echo 'Prefix must be an absolute path without traversal.' >&2; exit 2; }
 [[ -z "$binary" || ( "$binary" == /* && -z "$source_dir" && "$expected" =~ ^[a-fA-F0-9]{64}$ ) ]] || { echo '--binary requires an absolute file and --sha256; it cannot be combined with --source.' >&2; exit 2; }

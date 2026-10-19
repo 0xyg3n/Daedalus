@@ -67,3 +67,5 @@ pub mod update;
 pub mod workspace_usage;
 
 pub mod workspace_api;
+
+pub mod native_terminal;

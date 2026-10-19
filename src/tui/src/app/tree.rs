@@ -173,6 +173,13 @@ fn native_sid(pane: &Value) -> String {
     }
 }
 fn session_gap(pane: &Value, health: &Value) -> Value {
+    if s(pane, "backend") == "native" {
+        return json!([
+            "",
+            "not reported · session hooks not yet verified",
+            "Open Hooks to connect this harness's verified conversation; saving a checkpoint can also accept its explicit session ID."
+        ]);
+    }
     if s(pane, "backend") != "herdr" {
         return json!(["", "not reported · tmux reports none", ""]);
     }
@@ -348,11 +355,16 @@ impl Tree {
             let backend = s(pane, "backend");
             let server = first(pane, &["socket", "server", "session"]);
             let herdr = backend == "herdr";
+            let native = backend == "native";
             let root_key = vec![backend.clone().into(), server.clone().into()];
             let root = tree.add(
                 root_key.clone(),
                 None,
-                format!("{} · {server}", backend.to_uppercase()),
+                if native {
+                    "DAEDALUS · Native terminals".into()
+                } else {
+                    format!("{} · {server}", backend.to_uppercase())
+                },
                 "server",
                 None,
             );
@@ -364,7 +376,9 @@ impl Tree {
             };
             let project_key = extend(&root_key, ["project".into(), project.clone()]);
             let sessions = groups.get(&(s(pane, "socket"), s(pane, "session_group")));
-            let project_label = if herdr {
+            let project_label = if native {
+                first(pane, &["workspace_label", "workspace_id"])
+            } else if herdr {
                 topology_label(snapshot, "workspaces", &server, &project, &text(&project))
             } else {
                 format!(
@@ -380,7 +394,11 @@ impl Tree {
                 project_key.clone(),
                 Some(root),
                 project_label,
-                if herdr { "workspace" } else { "tmux session" },
+                if herdr || native {
+                    "workspace"
+                } else {
+                    "tmux session"
+                },
                 None,
             );
             let group = if herdr {
@@ -436,7 +454,11 @@ impl Tree {
             let pane_node = tree.add(
                 pane_key.clone(),
                 Some(group_node),
-                format!("{} · {title}", s(pane, "pane_id")),
+                if native {
+                    title.clone()
+                } else {
+                    format!("{} · {title}", s(pane, "pane_id"))
+                },
                 "pane",
                 Some(pane),
             );
@@ -674,6 +696,53 @@ impl Tree {
                 }
             }
         }
+        let external = array(snapshot, "external_terminals");
+        let external_errors = array(snapshot, "external_errors");
+        if !external.is_empty() || !external_errors.is_empty() {
+            let root_key = vec![json!("external")];
+            let root = tree.add(
+                root_key.clone(),
+                None,
+                "External terminals",
+                "external group",
+                None,
+            );
+            tree.nodes[root]
+                .attributes
+                .insert("external_count".into(), external.len().into());
+            tree.nodes[root]
+                .attributes
+                .insert("errors".into(), external_errors.to_vec().into());
+            for process in external {
+                let id = first(process, &["id"]);
+                if id.is_empty() {
+                    continue;
+                }
+                let name = first(process, &["name"]);
+                let pid = first(process, &["pid"]);
+                let node = tree.add(
+                    extend(&root_key, [id.into()]),
+                    Some(root),
+                    format!("{name} · PID {pid}"),
+                    "external",
+                    None,
+                );
+                tree.nodes[node]
+                    .attributes
+                    .insert("process".into(), process.clone());
+                tree.nodes[node]
+                    .attributes
+                    .insert("state".into(), v(process, "state"));
+                tree.nodes[node].attributes.insert(
+                    "parts".into(),
+                    json!([
+                        [name, "harness"],
+                        [format!("PID {pid}"), "id"],
+                        ["read only", "muted"]
+                    ]),
+                );
+            }
+        }
         // Reverse insertion order is a postorder because parents precede children.
         for index in (0..tree.nodes.len()).rev() {
             let count = usize::from(tree.nodes[index].kind == "pane")
@@ -750,12 +819,20 @@ fn views(pane: &Value, snapshot: &Value) -> Value {
         let backend = s(p, "backend");
         let kind = if session.starts_with("daedalus-view-") {
             "Daedalus view session"
+        } else if backend == "native" {
+            "Native workspace"
         } else if backend == "tmux" {
             "tmux session"
         } else {
             "Herdr workspace"
         };
-        let place = if backend == "herdr" {
+        let place = if backend == "native" {
+            format!(
+                "{} · {}",
+                first(p, &["workspace_label", "workspace_id"]),
+                first(p, &["title", "window"])
+            )
+        } else if backend == "herdr" {
             format!(
                 "{} · {}",
                 first(p, &["workspace_id", "session"]),
@@ -803,9 +880,26 @@ fn views(pane: &Value, snapshot: &Value) -> Value {
             places.push(format!("Daedalus viewer pane {}", s(viewer, "label")));
         }
     }
-    json!({"count":places.len(),"places":places,"typing":typing,"watching":watching,"control_clients":control,"shared":s(pane,"backend")=="tmux"})
+    let mut result = json!({"count":places.len(),"places":places,"typing":typing,"watching":watching,"control_clients":control,"shared":s(pane,"backend")=="tmux"});
+    if s(pane, "backend") == "native" {
+        result["controlled"] = pane["controlled"].clone();
+    }
+    result
 }
 fn input_brief(info: &Value, backend: &str) -> [String; 2] {
+    if backend == "native" {
+        return if info["controlled"] == true {
+            [
+                "One controller attached · Watch is available".into(),
+                "info".into(),
+            ]
+        } else {
+            [
+                "Input available · one controller at a time".into(),
+                "ok".into(),
+            ]
+        };
+    }
     if backend == "herdr" {
         return [
             "One attach slot · asks before takeover".into(),
@@ -883,6 +977,52 @@ impl Tree {
     pub fn fields(&self, index: usize, context: &ProjectionContext) -> Value {
         let node = &self.nodes[index];
         let pane = node.pane.as_ref().unwrap_or(&Value::Null);
+        if node.kind == "external" {
+            let process = node.attr("process");
+            let shown = |key| {
+                let value = first(&process, &[key]);
+                if value.is_empty() {
+                    "unavailable".to_owned()
+                } else {
+                    value
+                }
+            };
+            return json!([
+                ["Process", shown("name"), "harness"],
+                ["Kind", shown("kind"), "muted"],
+                ["PID", shown("pid"), "id"],
+                ["Parent", shown("parent_pid"), "muted"],
+                ["Terminal", shown("tty"), "muted"],
+                ["Folder", shown("cwd"), "path"],
+                ["Foreground", shown("foreground"), "muted"],
+                ["State", shown("state"), "state"],
+                [
+                    "Input / preview",
+                    "Unavailable · externally owned terminal",
+                    "warn"
+                ],
+                [
+                    "Control",
+                    "Launch a Daedalus terminal for input and capture",
+                    "info"
+                ]
+            ]);
+        }
+        if node.kind == "external group" {
+            let mut rows = vec![
+                json!(["Scope", "Local terminals outside managed backends", "muted"]),
+                json!(["Observed", text(&node.attr("external_count")), "info"]),
+                json!([
+                    "Access",
+                    "Process information only · no input or capture",
+                    "muted"
+                ]),
+            ];
+            for error in node.attr("errors").as_array().into_iter().flatten() {
+                rows.push(json!(["Discovery", text(error), "warn"]));
+            }
+            return rows.into();
+        }
         let checkpoint = node.attr("checkpoint");
         if truth(&checkpoint) {
             let harness = s(&checkpoint, "harness");
@@ -1006,12 +1146,23 @@ impl Tree {
             json!(["Agent", "not reported", "faint"])
         });
         let server = first(pane, &["socket", "server", "session"]);
-        let session = first(pane, &["session"]);
+        let native = backend == "native";
+        let session = if native {
+            first(pane, &["workspace_label", "workspace_id"])
+        } else {
+            first(pane, &["session"])
+        };
         rows.push(json!(["Server", server, backend]));
         let herdr = backend == "herdr";
         if session != server {
             rows.push(json!([
-                if herdr { "Session" } else { "tmux session" },
+                if native {
+                    "Workspace"
+                } else if herdr {
+                    "Session"
+                } else {
+                    "tmux session"
+                },
                 if session.is_empty() {
                     "not reported"
                 } else {
@@ -1045,7 +1196,9 @@ impl Tree {
         };
         rows.extend([
             json!([
-                if herdr {
+                if native {
+                    "Terminal · ID"
+                } else if herdr {
                     "Tab · pane"
                 } else {
                     "Window · pane"
@@ -1133,10 +1286,14 @@ impl Tree {
         if !query.is_empty() {
             for (index, node) in self.nodes.iter().enumerate() {
                 let content = format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     node.label,
                     node.kind,
-                    node.pane.as_ref().map(Value::to_string).unwrap_or_default()
+                    node.pane.as_ref().map(Value::to_string).unwrap_or_default(),
+                    node.attributes
+                        .get("process")
+                        .map(Value::to_string)
+                        .unwrap_or_default()
                 );
                 if lower(&content).contains(&query) {
                     let mut current = Some(index);
@@ -1474,6 +1631,88 @@ mod tests {
             .unwrap();
         assert!(agent.label.ends_with("session ID not reported"));
         assert_eq!(agent.attr("sid"), "");
+    }
+    #[test]
+    fn builtin_terminals_group_by_workspace_and_show_native_details() {
+        let context = ProjectionContext::default();
+        let pane = json!({"backend":"native","server":"local","session":"a".repeat(64),
+            "pane_id":"a".repeat(64),"terminal_id":"b".repeat(64),"session_id":"project",
+            "workspace_id":"project","workspace_label":"project","window_id":"a".repeat(64),
+            "window":"Developer shell","title":"Developer shell","agent":"bash","cwd":"/project",
+            "pid":"42","active":"1","dead":"0"});
+        let tree = Tree::build(&json!({"panes":[pane]}), &json!({}), &context);
+        let rows = tree.filtered_rows(&context, &BTreeSet::new(), "");
+        assert!(rows.iter().any(|row| {
+            row["label"]
+                .as_str()
+                .is_some_and(|label| label.contains("Native terminals"))
+        }));
+        assert!(rows.iter().any(|row| {
+            row["kind"] == "workspace"
+                && row["label"]
+                    .as_str()
+                    .is_some_and(|label| label.contains("project"))
+        }));
+        let terminal = rows.iter().find(|row| row["actionable"] == true).unwrap();
+        let fields = terminal["fields"].to_string();
+        assert!(fields.contains("Workspace"));
+        assert!(!fields.contains("tmux session"));
+        assert!(!fields.contains("Herdr workspace"));
+        assert!(fields.contains("one controller at a time"));
+        assert!(terminal["tile"].is_object());
+    }
+
+    #[test]
+    fn native_session_gap_explains_hook_enrollment_without_tmux_dependency() {
+        let gap = session_gap(&json!({"backend":"native","agent":"claude"}), &json!({}));
+        assert!(gap[1].as_str().unwrap().contains("not yet verified"));
+        assert!(gap[2].as_str().unwrap().contains("Open Hooks"));
+        assert!(gap[2].as_str().unwrap().contains("explicit session ID"));
+        assert!(!gap.to_string().contains("tmux"));
+        assert!(!gap.to_string().contains("Herdr"));
+    }
+    #[test]
+    fn external_processes_are_visible_searchable_and_never_actionable() {
+        let context = ProjectionContext::default();
+        let snapshot = json!({"panes":[], "external_terminals":[{
+            "id":"external:42:100", "pid":42, "parent_pid":1, "name":"bash",
+            "kind":"terminal", "tty":"/dev/pts/2", "cwd":"/separate/workspace",
+            "state":"waiting", "controllable":false
+        }]});
+        let tree = Tree::build(&snapshot, &json!({}), &context);
+        let rows = tree.filtered_rows(&context, &BTreeSet::new(), "");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["label"], "External terminals");
+        for row in &rows {
+            let fields: Vec<(String, String, String)> =
+                serde_json::from_value(row["fields"].clone()).unwrap();
+            assert!(!fields.is_empty());
+        }
+        assert_eq!(rows[0]["fields"][1][1], "1");
+        assert_eq!(rows[1]["kind"], "external");
+        assert_eq!(rows[1]["actionable"], false);
+        assert_eq!(rows[1]["count"], 0);
+        assert!(rows[1]["tile"].is_null());
+        assert!(tree.nodes.iter().all(|node| node.pane.is_none()));
+        assert!(rows[1]["fields"].to_string().contains("Unavailable"));
+        assert_eq!(
+            tree.filtered_rows(&context, &BTreeSet::new(), "separate/workspace")
+                .len(),
+            2
+        );
+    }
+    #[test]
+    fn external_discovery_failure_is_visible_without_fake_terminal() {
+        let context = ProjectionContext::default();
+        let tree = Tree::build(
+            &json!({"external_errors":["Cannot enumerate local terminal processes"]}),
+            &json!({}),
+            &context,
+        );
+        let rows = tree.filtered_rows(&context, &BTreeSet::new(), "");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["actionable"], false);
+        assert!(rows[0]["fields"].to_string().contains("Cannot enumerate"));
     }
     #[test]
     fn protocol_ids_preserve_python_ascii_encoding() {

@@ -359,6 +359,18 @@ fn installer_detects_architecture_before_installing_or_running_build_tools() {
     let output = execute();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Linux aarch64"));
+    for windows in ["MINGW64_NT-10.0", "MSYS_NT-10.0", "CYGWIN_NT-10.0"] {
+        fs::write(
+            &uname,
+            format!("#!/bin/sh\ncase \"$1\" in -s) echo {windows};; -m) echo x86_64;; esac\n"),
+        )
+        .unwrap();
+        let output = execute();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("install.ps1 in native PowerShell")
+        );
+    }
     fs::write(&uname, b"#!/bin/sh\necho unsupported\n").unwrap();
     assert!(!execute().status.success());
     assert!(!fixture.0.join("untouched").exists());

@@ -48,12 +48,46 @@ enum Endpoint {
 }
 
 pub fn collect(config: &ControlConfig, terminals: &Terminals, socket_roots: &[PathBuf]) -> Value {
-    collect_with_socket(
+    let (native, warnings) = if config.discovery.automatic {
+        match super::native_terminal::discover() {
+            Ok((sessions, warnings)) => (
+                sessions
+                    .iter()
+                    .map(crate::adapters::native::pane)
+                    .collect::<Vec<_>>(),
+                warnings,
+            ),
+            Err(error) => (Vec::new(), vec![error]),
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut snapshot = collect_with_socket(
         config,
         terminals,
         socket_roots,
         std::env::var("TMUX").ok().as_deref(),
-    )
+        &native,
+    );
+    for error in warnings {
+        snapshot["errors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"backend":"native", "error":error}));
+    }
+    if config.discovery.automatic {
+        match crate::adapters::standalone::collect(
+            &terminals.proc_root,
+            snapshot["panes"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        ) {
+            Ok(rows) => snapshot["external_terminals"] = rows.into(),
+            Err(error) => snapshot["external_errors"] = json!([error]),
+        }
+    }
+    snapshot
 }
 
 fn socket_candidates(config: &ControlConfig, current_tmux: Option<&str>) -> Vec<PathBuf> {
@@ -121,8 +155,12 @@ fn collect_with_socket(
     terminals: &Terminals,
     socket_roots: &[PathBuf],
     current_tmux: Option<&str>,
+    native_panes: &[Value],
 ) -> Value {
     let mut snapshot = json!({"panes":[], "clients":[], "workspaces":[], "tabs":[], "layouts":[], "herdr_sessions":[], "tmux_sessions":[], "herdr_focus":[], "errors":[], "unavailable":[], "stale_sockets":[]});
+    if config.discovery.automatic {
+        snapshot["panes"] = native_panes.to_vec().into();
+    }
     let sockets = socket_candidates(config, current_tmux);
     let roots = if config.discovery.automatic {
         socket_roots
@@ -139,7 +177,7 @@ fn collect_with_socket(
         .filter_map(|p| p.to_str().map(|s| Endpoint::Tmux(s.into())))
         .collect();
     let mut sessions: BTreeSet<String> = config.discovery.herdr_sessions.iter().cloned().collect();
-    if config.discovery.automatic {
+    if config.discovery.automatic && terminals::binary_available(&terminals.herdr) {
         match terminals.herdr_sessions() {
             Ok(discovered) => sessions.extend(discovered),
             Err(error) => snapshot["errors"]
@@ -231,6 +269,8 @@ fn collect_with_socket(
             }
         });
     }
+    snapshot["external_terminals"] = json!([]);
+    snapshot["external_errors"] = json!([]);
     snapshot["observed_at"] = json!(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -277,7 +317,7 @@ mod tests {
             tmux: root.join("missing-tmux-query"),
             ..Terminals::default()
         };
-        let snapshot = collect_with_socket(&config, &terminals, &[], None);
+        let snapshot = collect_with_socket(&config, &terminals, &[], None, &[]);
         assert_eq!(snapshot["stale_sockets"].as_array().unwrap().len(), 1);
         assert_eq!(
             snapshot["stale_sockets"][0]["endpoint"],
@@ -293,6 +333,45 @@ mod tests {
         }
         assert!(stale_tmux_socket(root.join("missing").to_str().unwrap()));
         assert!(!stale_tmux_socket(&"x".repeat(1024)));
+    }
+    #[test]
+    fn absent_optional_backend_does_not_make_native_inventory_fail() {
+        let root = std::env::temp_dir().join("daedalus-uninstalled-backend-fixture");
+        let mut config = ControlConfig::fresh(&root).unwrap();
+        let terminals = Terminals {
+            herdr: root.join("missing-herdr"),
+            ..Terminals::default()
+        };
+        let native = json!({"backend":"native", "server":"local", "pane_id":"session", "terminal_id":"generation", "shell_pid":42});
+        let snapshot = collect_with_socket(
+            &config,
+            &terminals,
+            &[],
+            None,
+            std::slice::from_ref(&native),
+        );
+        assert_eq!(snapshot["panes"], json!([native]));
+        assert_eq!(snapshot["errors"], json!([]));
+        assert_eq!(snapshot["external_terminals"], json!([]));
+        config.discovery.automatic = false;
+        assert_eq!(
+            collect_with_socket(&config, &terminals, &[], None, &[native])["panes"],
+            json!([])
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn installed_optional_backend_rejection_is_still_an_error() {
+        // /bin/false is a local deterministic fixture, never a terminal query.
+        let root = std::env::temp_dir().join("daedalus-uninstalled-backend-fixture");
+        let config = ControlConfig::fresh(&root).unwrap();
+        let terminals = Terminals {
+            herdr: "/bin/false".into(),
+            ..Terminals::default()
+        };
+        let snapshot = collect_with_socket(&config, &terminals, &[], None, &[]);
+        assert_eq!(snapshot["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["errors"][0]["backend"], "herdr");
     }
     #[test]
     fn active_custom_socket_is_included_only_with_automatic_discovery() {

@@ -346,10 +346,11 @@ mod tests {
         assert_eq!(registry.actions.len(), 42);
         assert_eq!(registry.sections.len(), 11);
         // Reviewed catalog: release checks replace the redundant install action.
+        // Native-client guidance now includes the built-in backend.
         // Navigation retains the established action contract.
         assert_eq!(
             fingerprint(&registry.actions),
-            "0b41f66f50951312fef73e6c71df4de656b6d60b372481c1e03488f438c1d21a"
+            "b7bf3086362b0358a1c9059edf2c39d681bcac45330bfc604e317f00246229e9"
         );
         assert_eq!(
             fingerprint(&registry.sections),

@@ -258,7 +258,7 @@
       "page": 1,
       "group": "Terminal actions",
       "title": "Open in the native client",
-      "note": "Full-screen tmux or Herdr client; detach with that tool's own key to return.",
+      "note": "Open the full-screen terminal client; native terminals detach with Ctrl+] then D.",
       "icon": "external",
       "effects": [
         "external",
@@ -1730,7 +1730,7 @@
       "category": "Command line",
       "group": "Interface",
       "title": "daedalus inventory --config-dir ABS --json",
-      "description": "Observe configured tmux and Herdr terminals",
+      "description": "Observe native terminals and configured tmux and Herdr sessions",
       "interface": "Native CLI reference",
       "detail": "Run this command with your own private paths and exact target observations. See docs/COMMANDS.md and the command family’s --help for required options and approval flags. This panel opens reference text; it does not run a shell command. A submitted receipt does not prove completion.",
       "aliases": [],

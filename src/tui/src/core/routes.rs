@@ -143,6 +143,7 @@ fn backend(value: &Backend) -> &'static str {
     match value {
         Backend::Tmux => "tmux",
         Backend::Herdr => "herdr",
+        Backend::Native => "native",
     }
 }
 

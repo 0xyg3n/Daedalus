@@ -316,6 +316,21 @@ fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option
     let mut candidates = Vec::new();
     for pid in pids {
         if let Some(evidence) = read_process(adapter, &pid, harness)? {
+            if id.backend == Backend::Native {
+                let process = super::hook_runtime::ProcessIdentity {
+                    pid: evidence
+                        .pid
+                        .parse()
+                        .map_err(|_| "Invalid native process PID")?,
+                    start_ticks: evidence
+                        .start
+                        .parse()
+                        .map_err(|_| "Invalid native process generation")?,
+                };
+                if super::hook_runtime::verify_process(&process, &adapter.proc_root).is_err() {
+                    continue;
+                }
+            }
             candidates.push(evidence);
         }
     }
@@ -369,6 +384,43 @@ fn check_process(
 }
 
 impl SessionStore {
+    /// Native transport proves terminal identity; private hooks and current
+    /// foreground processes independently establish harness/session metadata.
+    fn verify_pane(&self, adapter: &Terminals, pane: &Value) -> Result<Value> {
+        let actual = adapter.verify(pane)?;
+        if terminals::identity(&actual)?.backend != Backend::Native {
+            return Ok(actual);
+        }
+        let mut snapshot = json!({"panes":[actual]});
+        super::hook_runtime::enrich_native_sessions(&self.directory, &mut snapshot, adapter)
+            .map_err(|error| error.to_string())?;
+        let mut actual = snapshot["panes"][0].take();
+        if actual["agent_session"].is_null() {
+            let mut matches = Vec::new();
+            for tool in harnesses::tools() {
+                #[cfg(unix)]
+                if let Some(process) = foreground(adapter, &actual, tool.id)? {
+                    matches.push((tool.id, Some(process)));
+                }
+                #[cfg(windows)]
+                if !windows_native_process(adapter, &actual, tool.id)?.is_null() {
+                    matches.push((tool.id, None::<ProcessEvidence>));
+                }
+            }
+            if matches.len() > 1 {
+                return Err(
+                    "Native foreground harness is ambiguous; select it again when idle".into(),
+                );
+            }
+            if let Some((harness, process)) = matches.pop() {
+                actual["agent"] = json!(harness);
+                if let Some(process) = process {
+                    actual["foreground_cwd"] = json!(process.cwd);
+                }
+            }
+        }
+        Ok(actual)
+    }
     /// Record only a confirmed new viewer terminal, never an uncertain pane
     /// creation. Registration failure must not retry the already submitted launch.
     pub fn register_view(&self, source: &Value, receipt: &Receipt, mechanism: &str) -> Result<()> {
@@ -502,7 +554,7 @@ impl SessionStore {
         pane: &Value,
         supplied_sid: &str,
     ) -> Result<Checkpoint> {
-        let actual = adapter.verify(pane)?;
+        let actual = self.verify_pane(adapter, pane)?;
         let observed_harness = field(&actual, "agent").to_lowercase();
         let mut harness = observed_harness.clone();
         if matches!(harness.as_str(), "" | "node" | "nodejs") {
@@ -603,7 +655,7 @@ impl SessionStore {
             context_file: String::new(),
             source: Some(terminal_ref(&actual)?),
         };
-        let again = adapter.verify(pane)?;
+        let again = self.verify_pane(adapter, pane)?;
         if field(&again, "agent").to_lowercase() != observed_harness
             || again.get("agent_session") != actual.get("agent_session")
         {
@@ -629,12 +681,12 @@ impl SessionStore {
         pane: &Value,
         supplied_sid: &str,
     ) -> Result<(Checkpoint, Value)> {
-        let before = adapter.verify(pane)?;
+        let before = self.verify_pane(adapter, pane)?;
         let harness = field(&before, "agent").to_lowercase();
         let evidence = foreground(adapter, &before, &harness)?;
         let checkpoint = self.live_source(adapter, config, environment, pane, supplied_sid)?;
         check_process(adapter, &evidence, &harness)?;
-        let after = adapter.verify(pane)?;
+        let after = self.verify_pane(adapter, pane)?;
         if before.get("agent_session") != after.get("agent_session")
             || before.get("agent") != after.get("agent")
         {
@@ -659,7 +711,7 @@ impl SessionStore {
         request: &SaveRequest,
     ) -> Result<CheckpointRow> {
         let _lock = lock(&self.directory)?;
-        let before = adapter.verify(pane)?;
+        let before = self.verify_pane(adapter, pane)?;
         let observed = field(&before, "agent").to_lowercase();
         // A terminal excerpt is useful even when no native conversation can be
         // identified. Never promote shell/Node metadata into a provider ID.
@@ -697,7 +749,7 @@ impl SessionStore {
             row = self.capture_handoff(adapter, &frozen, row)?;
         }
         row.validate()?;
-        let after = adapter.verify(pane)?;
+        let after = self.verify_pane(adapter, pane)?;
         check_process(adapter, &process, &row.harness)?;
         if before.get("agent_session") != after.get("agent_session")
             || before.get("agent") != after.get("agent")
@@ -742,7 +794,7 @@ impl SessionStore {
             source: Some(terminal_ref(before)?),
         };
         let content = adapter.capture(pane, 120)?;
-        let after = adapter.verify(pane)?;
+        let after = self.verify_pane(adapter, pane)?;
         if !terminal_ref(before)?.same_identity(&terminal_ref(&after)?)
             || before.get("agent") != after.get("agent")
             || before.get("agent_session") != after.get("agent_session")
@@ -772,7 +824,7 @@ impl SessionStore {
         pane: &Value,
         mut checkpoint: Checkpoint,
     ) -> Result<Checkpoint> {
-        let before = adapter.verify(pane)?;
+        let before = self.verify_pane(adapter, pane)?;
         if checkpoint.source.as_ref().is_some_and(|source| {
             terminal_ref(&before).is_ok_and(|actual| !actual.same_identity(source))
         }) {
@@ -826,7 +878,7 @@ impl SessionStore {
             return Err("Handoff conversation or project changed; select it again".into());
         }
         let content = adapter.capture(pane, 120)?;
-        let after = adapter.verify(pane)?;
+        let after = self.verify_pane(adapter, pane)?;
         check_process(adapter, &process, &harness)?;
         if fingerprint != capture_fingerprint(adapter, &after, &harness, &process)? {
             return Err("Handoff foreground process changed during context capture".into());
@@ -990,6 +1042,13 @@ pub fn own_terminals(
             continue;
         };
         let direct = match id.backend {
+            Backend::Native => {
+                environment
+                    .get("DAEDALUS_TERMINAL_ID")
+                    .or_else(|| environment.get("DAEDALUS_NATIVE_SESSION"))
+                    .is_some_and(|session| session == &id.endpoint)
+                    && environment.get("DAEDALUS_TERMINAL_GENERATION") == Some(&id.generation)
+            }
             Backend::Tmux => id.endpoint == socket && id.pane == tmux_pane,
             Backend::Herdr => {
                 !herdr_pane.is_empty()
@@ -1092,6 +1151,9 @@ fn view_facts(pane: &Value, snapshot: &Value) -> (usize, String) {
                     .join("/")
         })
         .count();
+    if pane["backend"] == "native" {
+        return (same.len() + viewers, "One controller at a time; additional Daedalus windows can watch without taking input control.".into());
+    }
     if pane["backend"] == "herdr" {
         return (same.len()+viewers,"Herdr has one attach slot per terminal; observers are unlimited. Herdr's own window and API input still reach it. Daedalus asks before taking over.".into());
     }
@@ -1170,7 +1232,31 @@ pub fn prepare_attach(
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
     .join(" · ");
-    let mut plan = json!({"mode":mode.name(),"title":title,"backend":if id.backend==Backend::Tmux{"tmux"}else{"herdr"},"server":first(pane,&["socket","server"]),"terminal":id.pane,"views":views,"input":input,"node":context.node});
+    let mut plan = json!({"mode":mode.name(),"title":title,"backend":id.backend,"server":first(pane,&["socket","server"]),"terminal":id.pane,"views":views,"input":input,"node":context.node});
+    if id.backend == Backend::Native {
+        let binary = std::env::current_exe().map_err(|_| "Cannot locate Daedalus executable")?;
+        let argv = |mode: &str| {
+            vec![
+                binary.to_string_lossy().into_owned(),
+                "terminal-native".into(),
+                "stream".into(),
+                id.endpoint.clone(),
+                id.generation.clone(),
+                "--mode".into(),
+                mode.into(),
+            ]
+        };
+        plan["backend"] = "native".into();
+        plan["server"] = id.endpoint.clone().into();
+        plan["adapter"] = "native-session".into();
+        plan["argv"] = json!(argv(mode.name()));
+        plan["observe_argv"] = json!(argv("observe"));
+        plan["control_argv"] = json!(argv("control"));
+        plan["takeover"] = false.into();
+        plan["pid"] = field(&actual, "pid").into();
+        plan["input"] = "One controller at a time; additional views can watch".into();
+        return Ok(plan);
+    }
     if id.backend == Backend::Tmux {
         let session = field(&actual, "session_id");
         if session.is_empty() {
@@ -1287,6 +1373,11 @@ pub fn prepare_duplicate_view(
 ) -> Result<PreparedView> {
     let source_id = terminals::identity(source)?;
     let destination_id = terminals::identity(destination)?;
+    if source_id.backend == Backend::Native {
+        return Err(
+            "Use Watch in another Daedalus window for a second view of this native terminal".into(),
+        );
+    }
     if source_id == destination_id {
         return Err("Choose a different destination terminal".into());
     }
@@ -1482,13 +1573,20 @@ pub fn unlink_window(adapter: &Terminals, pane: &Value) -> Result<Receipt> {
 #[cfg(windows)]
 fn windows_native_process(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Value> {
     let id = terminals::identity(pane)?;
-    if id.backend != Backend::Herdr {
-        return Ok(Value::Null);
-    }
-    let info = adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
-    let rows = info["process_info"]["foreground_processes"]
-        .as_array()
-        .ok_or("Missing foreground process information")?;
+    let rows = match id.backend {
+        Backend::Herdr => {
+            let info = adapter
+                .herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
+            info["process_info"]["foreground_processes"]
+                .as_array()
+                .ok_or("Missing foreground process information")?
+                .clone()
+        }
+        // ConPTY does not establish shell-child foreground ownership. Only the
+        // exact directly launched PTY child can supply process evidence here.
+        Backend::Native => vec![json!({"pid":pane["pid"]})],
+        Backend::Tmux => return Ok(Value::Null),
+    };
     let mut candidates = Vec::new();
     for row in rows.iter().take(128) {
         let pid = row["pid"]
@@ -1869,6 +1967,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn native_self_detection_requires_own_generation_and_has_native_view_details() {
+        let pane = json!({"backend":"native","session":"pty-1","server":"local","pane_id":"pty-1","terminal_id":"generation-1"});
+        let snapshot = json!({"panes":[pane]});
+        let mut environment = BTreeMap::from([
+            ("DAEDALUS_TERMINAL_ID".into(), "pty-1".into()),
+            ("DAEDALUS_TERMINAL_GENERATION".into(), "generation-1".into()),
+        ]);
+        assert_eq!(
+            own_terminals(&snapshot, &environment, &BTreeSet::new(), &[]).len(),
+            1
+        );
+        environment.insert("DAEDALUS_TERMINAL_GENERATION".into(), "replacement".into());
+        assert!(own_terminals(&snapshot, &environment, &BTreeSet::new(), &[]).is_empty());
+        let (_, detail) = view_facts(&pane, &snapshot);
+        assert!(detail.contains("One controller"));
+        assert!(!detail.contains("tmux"));
+    }
+    #[test]
+    fn native_foreground_detects_real_harness_and_rejects_background_process() {
+        use std::os::unix::fs::symlink;
+        let f = fixture();
+        for (pid, group, command) in [(42, 42, "bash"), (90, 90, "claude")] {
+            let path = f.adapter.proc_root.join(pid.to_string());
+            fs::create_dir(&path).unwrap();
+            let mut fields = vec!["0".to_string(); 20];
+            fields[0] = "S".into();
+            fields[2] = group.to_string();
+            fields[4] = "99".into();
+            fields[5] = "90".into();
+            fields[19] = "500".into();
+            fs::write(
+                path.join("stat"),
+                format!("{pid} ({command}) {}", fields.join(" ")),
+            )
+            .unwrap();
+            fs::write(path.join("cmdline"), format!("/usr/bin/{command}\0")).unwrap();
+            fs::write(path.join("environ"), format!("HOME={}\0", f.dir.display())).unwrap();
+            symlink(&f.dir, path.join("cwd")).unwrap();
+        }
+        let pane = json!({"backend":"native","session":"pty-1","pane_id":"pty-1","terminal_id":"generation-1","pid":"42"});
+        let process = foreground(&f.adapter, &pane, "claude").unwrap().unwrap();
+        assert_eq!(process.pid, "90");
+        assert_eq!(process.start, "500");
+        let path = f.adapter.proc_root.join("90/stat");
+        let stat = fs::read_to_string(&path).unwrap();
+        fs::write(path, stat.replacen("90 0 99 90", "90 0 99 42", 1)).unwrap();
+        assert!(foreground(&f.adapter, &pane, "claude").unwrap().is_none());
+    }
+    #[test]
+    fn native_duplicate_rejects_before_attempting_a_herdr_client() {
+        let f = fixture();
+        let source = json!({"backend":"native","session":"pty-1","pane_id":"pty-1","terminal_id":"generation-1"});
+        let result = prepare_duplicate_view(
+            &f.adapter,
+            &source,
+            &f.pane,
+            true,
+            &f.environment,
+            &AttachContext::default(),
+        );
+        assert!(matches!(result, Err(error) if error.contains("Watch in another Daedalus window")));
     }
     #[test]
     fn own_detection_follows_nested_clients() {

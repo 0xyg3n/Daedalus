@@ -12,9 +12,11 @@ digest where one is required.
 | Command | Operations |
 | --- | --- |
 | `daedalus` | Open the control panel; `setup` opens setup (`setup --cli` for prompts) |
+| `shell [--workspace NAME] [--name NAME] [--cwd ABS] [-- COMMAND ARGS…]` | Start and attach a persistent native terminal; Ctrl+] then D detaches |
+| `terminal-native` | Native terminal `start`, `list`, `capture`, `input`, `resize`, `rename`, `close`, `attach`, `stream` |
 | `config` | `init`, `import`, `import-instance`, `validate` |
 | `agent` | `capabilities`, `call` with one bounded JSON request on stdin; see [agent tools](AGENT_TOOLS.md) |
-| `inventory --json` | List tmux and Herdr terminals |
+| `inventory --json` | List native, tmux and Herdr terminals, plus read-only external shell observations |
 | `workspace-usage --config-dir ABS --json` | Read existing Herdr selection aggregates for current terminal identities |
 | `terminal` | `list`, `capture`, `send`, `interrupt`, `close`, `focus`, `attach`, `rename`, `launch`, `wait`, `command`, `keys`, `control` |
 | `checkpoint` | `list`, `show`, `save`, `remove`, `spawn --operation resume\|fork\|handoff` |
@@ -51,6 +53,33 @@ daedalus diagnostics --config-dir /abs/instance --json
   `sessions`, `checkpoint`, `save`, `checkpoints`, `resume`, `fork`, `handoff`,
   `health`, `model`, `effort`, `plan`. They take the same flags as the commands
   they map to.
+
+## Native terminals
+
+```sh
+daedalus shell --workspace project --name dev
+daedalus terminal-native start --workspace project --name worker --cwd /abs/project -- /bin/bash
+daedalus terminal-native list
+daedalus terminal-native capture ID GENERATION
+daedalus terminal-native attach ID GENERATION
+daedalus terminal-native resize ID GENERATION --cols 120 --rows 36
+daedalus terminal-native rename ID GENERATION --name review --workspace project
+daedalus terminal-native close ID GENERATION
+```
+
+`start` returns the terminal ID and generation as JSON. Both are required for
+later operations; stale identities are rejected. `shell` uses the platform shell
+unless a command follows `--`. On Windows, use an installed Windows executable
+and a native absolute working directory. `input` accepts `--text` or `--base64`;
+it sends exactly those bytes without adding Enter. Mutating `terminal-native`
+commands act immediately; unlike the higher-level `terminal` operations, they
+do not produce a preview. `close` terminates the owned terminal process.
+
+For programmatic views, `stream ID GENERATION --mode observe|control` emits
+newline-delimited JSON screen frames with base64 ANSI data. Control streams
+accept `terminal.input` (`bytes` in base64), `terminal.resize` (`cols`, `rows`),
+and `terminal.release`. Observers cannot input or resize. Detaching releases
+control without stopping the session. Keep captures and input out of public logs.
 
 ## Hooks and goals
 

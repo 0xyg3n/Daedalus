@@ -3,10 +3,13 @@
 //! PTYs and private state are synthetic; no live terminal server is contacted.
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{fs::DirBuilderExt, process::CommandExt},
+        unix::{
+            fs::{DirBuilderExt, OpenOptionsExt},
+            process::CommandExt,
+        },
     },
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -21,6 +24,7 @@ struct Ui {
     directory: PathBuf,
     screen: vt100::Parser,
     raw: Vec<u8>,
+    stderr: File,
 }
 impl Ui {
     fn start(demo: bool) -> Self {
@@ -85,6 +89,17 @@ impl Ui {
             unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
             0
         );
+        // Keep diagnostics in an unlinked private file: failures stay inspectable
+        // without adding state to the empty-home assertions or blocking on pipes.
+        let stderr_path = directory.join("stderr.log");
+        let stderr = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&stderr_path)
+            .unwrap();
+        fs::remove_file(stderr_path).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_daedalus-tui"));
         command
             .env_clear()
@@ -103,7 +118,7 @@ impl Ui {
             .arg("tui")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave))
-            .stderr(Stdio::null());
+            .stderr(Stdio::from(stderr.try_clone().unwrap()));
         if demo {
             command.arg("--demo");
         }
@@ -123,7 +138,17 @@ impl Ui {
             directory,
             screen: vt100::Parser::new(48, 160, 0),
             raw: Vec::new(),
+            stderr,
         }
+    }
+    fn stderr_text(&mut self) -> String {
+        self.stderr.seek(SeekFrom::Start(0)).unwrap();
+        let mut text = String::new();
+        (&mut self.stderr)
+            .take(65536)
+            .read_to_string(&mut text)
+            .unwrap();
+        text
     }
     fn wait_text(&mut self, text: &str) {
         self.wait_presence(text, true);
@@ -148,8 +173,9 @@ impl Ui {
             }
             assert!(
                 self.child.try_wait().unwrap().is_none(),
-                "TUI exited: {}",
-                self.screen.screen().contents()
+                "TUI exited: {}\n{}",
+                self.screen.screen().contents(),
+                self.stderr_text()
             );
             assert!(
                 Instant::now() < deadline,

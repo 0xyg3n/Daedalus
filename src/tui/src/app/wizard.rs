@@ -230,13 +230,20 @@ pub fn run(
         .map(|path| std::env::split_paths(path).collect())
         .unwrap_or_default();
     let environment = Environment::detect(&home, search)?;
-    prompt(writer, "Terminal backends: tmux, herdr, or both [tmux]: ")?;
+    prompt(
+        writer,
+        &format!(
+            "Detected: {} / {}. Native terminals are built in; existing skips extra backend installation.\nTerminal backends: existing, tmux, herdr, or both [existing]: ",
+            environment.os, environment.architecture
+        ),
+    )?;
     let backend = read_answer(reader)?;
     let (tmux, herdr) = match backend.as_str() {
-        "" | "tmux" => (true, false),
+        "" | "existing" => (false, false),
+        "tmux" => (true, false),
         "herdr" => (false, true),
         "both" => (true, true),
-        _ => return Err("Choose tmux, herdr, or both".into()),
+        _ => return Err("Choose existing, tmux, herdr, or both".into()),
     };
     let wizard = if let Some(source) = source {
         if flags.contains("--import-instance") {
@@ -337,7 +344,7 @@ pub fn run_with(
         wizard.prepare_installers(fetcher)?;
     }
     let review =
-        serde_json::to_string_pretty(wizard.review()).map_err(|_| "Cannot encode setup review")?;
+        super::dialog_text::format(wizard.review()).map_err(|_| "Cannot encode setup review")?;
     prompt(writer, &format!("{review}\n"))?;
     if !wizard.review().dependencies.blockers.is_empty() {
         return Err("Setup has unresolved prerequisites; no installers executed".into());
@@ -353,14 +360,18 @@ pub fn run_with(
     let sign_in = wizard.review().sign_in.clone();
     prompt(
         writer,
-        "Applying reviewed plan; dependency installation may take several minutes.\n",
+        if wizard.review().dependencies.operations.is_empty() {
+            "Saving reviewed configuration; no dependency installations are needed.\n"
+        } else {
+            "Applying reviewed plan; dependency installation may take several minutes.\n"
+        },
     )?;
     let result = wizard.apply(&token, executor)?;
     prompt(
         writer,
         &format!(
             "{}\n",
-            serde_json::to_string_pretty(&result).map_err(|_| "Cannot encode setup result")?
+            super::dialog_text::format(&result).map_err(|_| "Cannot encode setup result")?
         ),
     )?;
     if !result.ready {
@@ -662,7 +673,12 @@ mod tests {
         assert_eq!(executor.calls, 0);
         assert!(!dest.exists());
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("script_sha256"));
+        assert!(output.contains("Script SHA256:"));
+        use sha2::Digest;
+        assert!(output.contains(&format!(
+            "{:x}",
+            sha2::Sha256::digest(b"#!/bin/sh\nexit 0\n")
+        )));
         assert!(output.contains("Setup cancelled"));
     }
 }

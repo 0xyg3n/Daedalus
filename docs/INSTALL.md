@@ -36,10 +36,10 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-The [0.2.0-beta.7 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.7) provides `daedalus-0.2.0-beta.7-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. Install Herdr or a compatible native multiplexer separately. Stable update checks do not select prereleases.
+The [0.2.0-beta.8 Windows preview](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) provides `daedalus-0.2.0-beta.8-x86_64-windows.exe` and its `.sha256` file. The executable runs without a compiler or interpreter installation. Download both, verify with `Get-FileHash` as shown in the README, and run `setup`. The built-in terminal backend requires no separate multiplexer. Stable update checks do not select prereleases.
 
 
-Use native PowerShell and Windows Terminal. **Herdr** is the default backend.
+Use native PowerShell and Windows Terminal. The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
 Native Windows multiplexers such as [tmux-windows](https://github.com/arndawg/tmux-windows)
 and [PSMux](https://github.com/psmux/psmux) can be selected through explicitly
 configured compatible endpoints; command and identity contracts require validation
@@ -49,8 +49,7 @@ path of a compatible executable when selection is needed; discovery otherwise
 tries `tmux.exe`, then `psmux.exe`. PSMux `.psmux/*.port` namespace markers are
 automatic candidates; configured absolute `tmux_sockets` endpoints are passed
 through `-S` for the selected implementation. Every candidate still needs fresh
-identity evidence before mutation. Install a Windows-compatible Herdr build
-and the Windows versions of the harnesses you choose. Provider support depends on
+identity evidence before mutation. For the optional Herdr adapter, install a Windows-compatible Herdr build. Install the Windows versions of the harnesses you choose. Provider support depends on
 each upstream CLI; Linux shell installers are not run on Windows.
 
 From a reviewed checkout, build the committed revision:
@@ -157,7 +156,7 @@ ConPTY, ACL, Herdr or provider behavior; real Windows validation remains require
 `daedalus setup`, or the first `daedalus` launch, opens setup in the TUI.
 `daedalus setup --cli` asks the same questions as prompts. Setup:
 
-1. chooses the available terminal backend (tmux/Herdr on Linux; Herdr or an explicitly configured compatible Windows multiplexer);
+1. shows your platform and defaults to built-in native terminals; optional tmux/Herdr dependencies are selected separately;
 2. selects agent tools and lists the missing ones it would install;
 3. writes a private configuration directory (0700 on Unix; owner-scoped access on Windows).
 
@@ -242,3 +241,23 @@ installation prefix; private configuration remains separate.
 On Linux, stop its Telegram service, then delete `PREFIX/bin/daedalus`
 and `PREFIX/share/daedalus/`. The configuration directory stays until you delete
 it. Agent tools and system packages are not removed.
+
+### Optional terminal backends
+
+Setup shows the detected operating system and architecture. **Daedalus native
+terminals** is the default: the binary supplies its own PTY/ConPTY backend and
+does not need tmux or Herdr. The CLI's `existing` selection has the same no-extra-
+multiplexer behavior. Select optional Herdr, tmux, or both only when you want them
+included in the dependency plan. Installed tools are reused.
+
+After setup, choose **New project → Daedalus native terminals**, or run
+`daedalus shell --workspace my-project`. Detach with **Ctrl+] then D** and reopen
+the terminal from the TUI. Native sessions are user-wide and survive the UI
+closing. See [built-in terminals](../README.md#built-in-terminals) for discovery,
+private state and platform boundaries.
+
+On Linux, missing selected tools use the reviewed installation plan. On Windows,
+setup uses installed native backends and gives installation guidance when a
+selected backend is missing; it does not run Linux shell installers. Running the
+Linux installer from Git Bash, MSYS or Cygwin directs you to `install.ps1` in
+native PowerShell. WSL is detected as Linux and uses Linux dependencies.

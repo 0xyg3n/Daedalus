@@ -18,17 +18,41 @@ Tab or 0-9 switches pages, Ctrl+P searches every command, `?` shows the key bar 
 
 - **AI tools**: sign-in, profile directories and update checks for the seven tools.
 - **Hooks**: hook profiles and Hindsight memory ([hooks](HOOKS.md)).
-- **Telegram**: bot configuration, routes, feeder registration and reply recipients.
-  Each is a separate explicit step; sender permissions are separate from routes.
+- **Telegram**: guided connection settings, private bot token, service start and
+  destination selection. Each step has its own review. Sender permissions are
+  separate from routes; replies need an installed hook connected to the chat.
 - **Activity**: what happened, and whether each step was attempted, queued,
   submitted, delivered or uncertain.
 - **Instances**: saved configurations. One is shown as running only when its
   service is verified.
 
+## First-time setup and Telegram
+
+Choose **Daedalus native terminals** to use the built-in terminal backend without
+installing tmux or Herdr. External backends remain optional. Setup shows the detected
+operating system and architecture before presenting any dependency installation.
+Select only the AI tools you use; account sign-in stays in each tool.
+
+Telegram setup asks for a local connection name, your bot's numeric ID, your own
+numeric user ID and the chat ID. The bot ID is the portion before the colon in the
+@BotFather token. For a private chat, the chat ID is your user ID; group IDs include
+a minus sign. Invalid identity entries can be corrected without restarting setup.
+
+After each saved step, close its summary to continue or choose **Finish later**.
+The full token goes into a masked field and is stored privately. Saving it validates
+its format and bot ID; it does not verify Telegram connectivity. Starting the service
+requires a separate review. Choose a destination terminal and connect its installed
+reply hook, then start a conversation with your bot. Check connection status before
+sending a test message. A saved route alone does not mean a message was delivered.
+
 ## Workspaces
 
-Daedalus lists tmux (servers, sessions, windows, panes) and Herdr (servers,
-workspaces, tabs, panes) side by side, including Herdr clients running inside tmux.
+Daedalus lists its native workspaces and terminals alongside tmux (servers,
+sessions, windows, panes) and Herdr (servers, workspaces, tabs, panes), including
+Herdr clients running inside tmux. **New project → Daedalus native terminal** starts
+a shell or installed agent without an external multiplexer. Native control has
+one writer; additional views can Watch. Standalone external shell processes are
+listed separately as read-only observations.
 Set nondefault tmux sockets and Herdr endpoints in the configuration. Keep each
 project in its own workspace with its shells, agents and logs.
 

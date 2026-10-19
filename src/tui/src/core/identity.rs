@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum Backend {
     Tmux,
     Herdr,
+    Native,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -25,6 +26,9 @@ impl TerminalId {
                 return Err("Incomplete or invalid terminal identity");
             }
         }
+        if self.backend == Backend::Native && self.pane != self.endpoint {
+            return Err("Native terminal identity does not match its session");
+        }
         match self.backend {
             Backend::Tmux => {
                 if !std::path::Path::new(&self.endpoint).is_absolute()
@@ -36,7 +40,7 @@ impl TerminalId {
                     return Err("Invalid tmux endpoint or pane ID");
                 }
             }
-            Backend::Herdr => {
+            Backend::Herdr | Backend::Native => {
                 if self.endpoint.len() > 80
                     || matches!(self.endpoint.as_str(), "." | "..")
                     || !self
@@ -44,7 +48,7 @@ impl TerminalId {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
                 {
-                    return Err("Invalid Herdr server name");
+                    return Err("Invalid terminal server name");
                 }
             }
         }

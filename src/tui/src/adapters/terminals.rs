@@ -70,7 +70,7 @@ impl Default for Terminals {
     fn default() -> Self {
         Self {
             tmux: default_mux_binary(),
-            herdr: "herdr".into(),
+            herdr: default_herdr_binary(),
             proc_root: "/proc".into(),
             timeout: Duration::from_secs(5),
         }
@@ -173,6 +173,10 @@ impl Terminals {
     pub fn verify(&self, saved: &Value) -> Result<Value> {
         let expected = identity(saved)?;
         let candidates = match expected.backend {
+            Backend::Native => vec![super::native::pane(&crate::app::native_terminal::info(
+                &expected.endpoint,
+                &expected.generation,
+            )?)],
             Backend::Tmux => self.tmux_inventory(&expected.endpoint)?["panes"]
                 .as_array()
                 .cloned()
@@ -238,11 +242,12 @@ pub fn identity(row: &Value) -> Result<TerminalId> {
     let backend = match get("backend").as_str() {
         "tmux" => Backend::Tmux,
         "herdr" => Backend::Herdr,
+        "native" => Backend::Native,
         _ => return Err("Unknown terminal backend".into()),
     };
     let endpoint = match backend {
         Backend::Tmux => get("socket"),
-        Backend::Herdr => {
+        Backend::Herdr | Backend::Native => {
             let session = get("session");
             if session.is_empty() {
                 get("server")
@@ -554,6 +559,72 @@ mod tests {
     }
 }
 
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+}
+fn binary_in(name: &str, paths: &[PathBuf], home: Option<&Path>) -> Option<PathBuf> {
+    let filename = if cfg!(windows) && Path::new(name).extension().is_none() {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let known = home
+        .into_iter()
+        .filter(|p| p.is_absolute())
+        .flat_map(|p| [p.join(".local/bin"), p.join(".cargo/bin")]);
+    paths
+        .iter()
+        .filter(|p| p.is_absolute())
+        .cloned()
+        .chain(known)
+        .map(|p| p.join(&filename))
+        .find(|p| executable_file(p))
+}
+fn search_paths() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default()
+}
+fn default_herdr_binary() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+        });
+    binary_in("herdr", &search_paths(), home.as_deref()).unwrap_or_else(|| "herdr".into())
+}
+/// Optional backends are not probed when absent. Explicit endpoints still query
+/// the configured executable so unavailable integrations remain visible errors.
+pub(crate) fn binary_available(binary: &Path) -> bool {
+    if binary.is_absolute() {
+        return executable_file(binary);
+    }
+    if binary.components().count() != 1 {
+        return false;
+    }
+    binary
+        .to_str()
+        .and_then(|name| binary_in(name, &search_paths(), None))
+        .is_some()
+}
+
 fn default_mux_binary() -> PathBuf {
     if let Some(binary) = std::env::var_os("DAEDALUS_TMUX_BIN")
         .map(PathBuf::from)
@@ -620,4 +691,47 @@ fn windows_harness_labels(mut panes: Vec<Value>) -> Vec<Value> {
         }
     }
     panes
+}
+
+#[cfg(test)]
+mod binary_tests {
+    use super::*;
+    #[test]
+    fn resolves_known_user_install_when_path_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "dd-bin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join(".cargo/bin");
+        fs::create_dir_all(&directory).unwrap();
+        let name = if cfg!(windows) { "herdr.exe" } else { "herdr" };
+        let binary = directory.join(name);
+        fs::write(&binary, "fixture; never executed").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(binary_in("herdr", &[], Some(&root)), None);
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert_eq!(binary_in("herdr", &[], Some(&root)), Some(binary.clone()));
+        assert!(binary_available(&binary));
+        assert_eq!(
+            binary_in("herdr", std::slice::from_ref(&directory), None),
+            Some(binary)
+        );
+        assert_eq!(
+            binary_in(
+                "herdr",
+                &[PathBuf::from("relative")],
+                Some(Path::new("relative"))
+            ),
+            None
+        );
+        assert!(!binary_available(Path::new("./untrusted-herdr")));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

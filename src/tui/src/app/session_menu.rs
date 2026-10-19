@@ -597,7 +597,7 @@ impl SessionMenu {
                 .map(|a| a.title.clone())
                 .unwrap_or_else(|| action.into());
             let text = match action {
-                "help.guide" => "Navigate with Tab or number keys; arrows select, Enter opens an action, Esc cancels. Ctrl+P searches commands. Workspaces groups servers, sessions, windows and exact terminals. Left/Right folds the tree. [ and ] switch Tree, Tiles and Focus views.\n\nSelect a terminal: a attaches, w watches, c saves a checkpoint, f forks, d duplicates its view, p pins. L saves the current layout. Ctrl+] then D detaches; the terminal keeps running. q exits without stopping agents.\n\nSetup imports private configuration or starts fresh. Review dependency changes before installation. Account sign-in belongs to each native harness. Checkpoint resume/fork depends on the installed harness capabilities; cross-harness handoff supplies context to a new session. A duplicate view shares the original terminal.\n\nActions marked unavailable have not reached native backend parity. Submitted operations are not proof of completed work. No configuration or credentials belong in the public repository.".into(),
+                "help.guide" => "Navigate with Tab or number keys; arrows select, Enter opens an action, Esc cancels. Ctrl+P searches commands. Workspaces groups servers, sessions, windows and exact terminals. Left/Right folds the tree. [ and ] switch Tree, Tiles, Wall, Cube and Focus views.\n\nSelect a terminal: a attaches, w watches, c saves a checkpoint, f forks, d duplicates its view, p pins. L saves the current layout. Ctrl+] then D detaches; the terminal keeps running. q checks for updates before exiting without stopping agents. Options → Application → Check for updates (Ctrl+U) checks on demand.\n\nSetup imports private configuration or starts fresh. Review dependency changes before installation. Account sign-in belongs to each native harness. Checkpoint resume/fork depends on the installed harness capabilities; cross-harness handoff supplies context to a new session. A duplicate view shares the original terminal.\n\nAvailable actions depend on the selected terminal backend and harness. Submitted operations are not proof of completed work. Configuration and credentials are stored privately.".into(),
                 "hooks.profile" => {
                     let roster=super::hook_install::capabilities().iter().map(|cap|format!("{} · {}\n{}\n{}",cap.harness,if cap.installable{"native profile installation available"}else{"installation unavailable"},cap.integration,cap.reference)).collect::<Vec<_>>().join("\n\n");
                     format!("Native hook profiles\n\nTelegram delivery publishes final responses. Progress reports tool activity. Notifications report attention and permission events. Optional Hindsight queues memory work. Exact process, conversation and terminal identities are verified for each registration. Hook installation preserves unrelated handlers and requires review; goal continuation is enabled only by adapters with a tested native continuation contract.\n\n{roster}")
@@ -621,6 +621,11 @@ impl SessionMenu {
                 Stage::ProjectBackend,
                 "New project",
                 vec![
+                    json!([
+                        "native",
+                        "Daedalus native terminal",
+                        "Built in; start a shell or agent without tmux or Herdr."
+                    ]),
                     json!(["tmux", "tmux session", "New project on a tmux server"]),
                     json!([
                         "herdr",
@@ -782,9 +787,9 @@ impl SessionMenu {
         self.choose(
             seq,
             Stage::WorkspaceTool(Box::new(request)),
-            "Start which AI tool in the new terminal?",
+            "Start a shell or AI tool",
             options,
-            "It starts in its own account directory; use native sign-in if needed.",
+            "Shell opens in your project directory. AI tools use their configured account directory; sign in through the tool if needed.",
         )
     }
     fn workspace_confirm(&mut self, seq: &mut u64, request: WorkspaceRequest) -> Result<Outcome> {
@@ -847,11 +852,25 @@ impl SessionMenu {
                     "These views share one terminal process.",
                 )
             }
-            "terminal.organize"=>self.choose(seq,Stage::Organize(pane),"Organize project",vec![
-                json!(["rename-project","Rename project","Change its workspace or session name."]),json!(["rename-group","Rename tab","Change its tab or window label."]),
-                json!(["new-group","New tab","Open another tab or window in this project."]),json!(["split","Split terminal","Add a terminal beside this one."]),
-                json!(["close-group","Close tab","Affects every terminal in the tab."]),json!(["close-project","Close project","Affects all terminals and shared views of this project."]),json!(["unlink-group","Remove this session's link","For a tmux window linked into several sessions; it keeps running in the others."])
-            ],""),
+            "terminal.organize" => {
+                let mut options = vec![
+                    json!(["rename-project", "Rename project", "Change its workspace or session name."]),
+                    json!(["rename-group", "Rename tab", "Change its tab or window label."]),
+                    json!(["new-group", "New tab", "Open another tab or window in this project."]),
+                    json!(["split", "Split terminal", "Add a terminal beside this one."]),
+                    json!(["close-group", "Close tab", "Affects every terminal in the tab."]),
+                    json!(["close-project", "Close project", "Affects all terminals and shared views of this project."]),
+                ];
+                if field(&pane, "backend") == "native" {
+                    options = vec![
+                        json!(["rename-project", "Move terminal to a project", "Change this terminal's project name; other terminals stay where they are."]),
+                        json!(["split", "New terminal in this project", "Start another independent shell or agent in the same project."]),
+                    ];
+                } else if field(&pane, "backend") == "tmux" {
+                    options.push(json!(["unlink-group", "Remove this session's link", "For a tmux window linked into several sessions; it keeps running in the others."]));
+                }
+                self.choose(seq, Stage::Organize(pane), "Organize project", options, "")
+            }
             "terminal.native"=>self.confirm(seq,Commit::Native(pane),"Open this terminal full screen in its native client; detach to return to Daedalus. The original process stays running."),
             "terminal.view" => {
                 let text = source.preview(&pane, 120)?;
@@ -954,7 +973,9 @@ impl SessionMenu {
                 ];
                 // Native Herdr cannot currently create a second attach client
                 // on Windows. Keep Watch/Tiles available without a dead-end plan.
-                if cfg!(windows) && field(&pane, "backend") == "herdr" {
+                if (cfg!(windows) && field(&pane, "backend") == "herdr")
+                    || field(&pane, "backend") == "native"
+                {
                     options.retain(|option| option[0] != "viewer");
                 }
                 if field(&pane, "backend") == "tmux" {
@@ -981,7 +1002,11 @@ impl SessionMenu {
                     Stage::Duplicate(pane.clone()),
                     &format!("Duplicate view of {}", description(&pane)),
                     options,
-                    "Same process, not a new agent (use Fork for that).",
+                    if field(&pane, "backend") == "native" {
+                        "Use Watch in another Daedalus window for a second view of this terminal. Pinning also keeps it visible in Tiles."
+                    } else {
+                        "Same process, not a new agent (use Fork for that)."
+                    },
                 )
             }
             _ => Err("This terminal action is not available".into()),
@@ -1204,11 +1229,22 @@ impl SessionMenu {
                 })
             }
             Stage::ProjectBackend => {
-                let backend = if text == "tmux" {
-                    crate::core::identity::Backend::Tmux
-                } else {
-                    crate::core::identity::Backend::Herdr
+                let backend = match text {
+                    "native" => crate::core::identity::Backend::Native,
+                    "tmux" => crate::core::identity::Backend::Tmux,
+                    "herdr" => crate::core::identity::Backend::Herdr,
+                    _ => return Err("Unknown terminal backend".into()),
                 };
+                if backend == crate::core::identity::Backend::Native {
+                    return self.input(
+                        seq,
+                        Stage::ProjectName {
+                            backend,
+                            anchor: None,
+                        },
+                        "Project name",
+                    );
+                }
                 let mut seen = std::collections::HashSet::new();
                 let panes = self
                     .panes()
@@ -2527,5 +2563,75 @@ mod tests {
         ));
         assert!(reply(&mut menu, &mut source, &mut seq, json!("yes")).is_err());
         assert_eq!(source.requests.len(), 1);
+    }
+    #[test]
+    fn native_project_starts_without_existing_terminals_and_requires_confirmation() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        let mut empty = view();
+        empty.snapshot["panes"] = json!([]);
+        empty.selected = None;
+        let options = menu
+            .start("project.new", empty, &mut source, &config(), &mut seq)
+            .unwrap();
+        assert_eq!(options.frames[0]["options"][0][0], "native");
+        let name = reply(&mut menu, &mut source, &mut seq, json!("native")).unwrap();
+        assert_eq!(name.frames[0]["title"], "Project name");
+        for value in ["my_project", crate::test_support::path("/tmp"), "shell"] {
+            reply(&mut menu, &mut source, &mut seq, json!(value)).unwrap();
+        }
+        assert!(source.requests.is_empty());
+        reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+        assert!(
+            matches!(source.requests.last(), Some(Request::Workspace(request)) if matches!(&**request,
+                WorkspaceRequest::Create { backend: crate::core::identity::Backend::Native, anchor: None, name, tool, .. }
+                if name == "my_project" && tool == "shell"
+            ))
+        );
+    }
+    #[test]
+    fn native_menus_offer_supported_organization_and_watch_guidance() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        let mut selected = view();
+        let mut terminal = pane();
+        terminal["backend"] = json!("native");
+        selected.selected = Some(terminal.clone());
+        selected.snapshot["panes"] = json!([terminal]);
+        let organize = menu
+            .start(
+                "terminal.organize",
+                selected.clone(),
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+        let choices = organize.frames[0]["options"].as_array().unwrap();
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0][0], "rename-project");
+        assert_eq!(choices[1][0], "split");
+        menu.cancel();
+        let duplicate = menu
+            .start(
+                "terminal.duplicate",
+                selected,
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+        assert!(
+            duplicate.frames[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|option| option[0] != "viewer")
+        );
+        assert!(
+            duplicate.frames[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Watch in another Daedalus window")
+        );
+        assert!(source.requests.is_empty());
     }
 }

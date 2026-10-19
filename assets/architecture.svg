@@ -59,7 +59,7 @@
 <text x="593" y="514" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="800" fill="#39c5cf" text-anchor="start">ADAPTERS</text>
 <rect x="595" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
 <text x="707.5" y="551" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Terminals + tools</text>
-<text x="707.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">tmux · Herdr</text>
+<text x="707.5" y="573" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Native PTY · tmux · Herdr</text>
 <text x="707.5" y="592" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">launch · profiles</text>
 <text x="707.5" y="611" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">hook install</text>
 <rect x="835" y="524" width="225" height="116" rx="10" fill="#161b22" stroke="#39c5cf" stroke-width="1.6"/>
@@ -76,7 +76,7 @@
 <text x="220.0" y="789" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">lifecycle · replies · progress</text>
 <text x="220.0" y="808" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">registered per tool</text>
 <rect x="400" y="740" width="420" height="92" rx="10" fill="#161b22" stroke="#f2c14e" stroke-width="1.6"/>
-<text x="610.0" y="767" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">tmux servers · Herdr sessions</text>
+<text x="610.0" y="767" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="16" font-weight="700" fill="#e6edf3" text-anchor="middle">Native terminals · optional adapters</text>
 <text x="610.0" y="789" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Claude Code · Codex · Grok · Hermes</text>
 <text x="610.0" y="808" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#8b949e" text-anchor="middle">Cursor · Pi · OpenCode, with their own sign-in</text>
 <rect x="835" y="740" width="225" height="92" rx="10" fill="#161b22" stroke="#f2c14e" stroke-width="1.6"/>

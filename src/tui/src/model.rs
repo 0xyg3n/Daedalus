@@ -1778,6 +1778,16 @@ impl Ui {
             None => false,
         }
     }
+    /// Background inventory refreshes must not erase an unresolved action error.
+    pub fn refresh_status(&mut self, action_completed: bool) {
+        if self.status_error && !action_completed {
+            return;
+        }
+        if self.embed.is_none() || self.status.is_empty() || action_completed {
+            self.status = self.snapshot.message.clone();
+            self.status_error = false;
+        }
+    }
     pub fn update(&mut self, mut snapshot: Snapshot) {
         let old = self.selected_row();
         let mut ancestry = Vec::new();
@@ -1937,6 +1947,23 @@ pub mod tests {
             .map(|r| r.id)
             .collect()
     }
+    #[test]
+    fn background_refresh_preserves_action_errors_until_an_action_completes() {
+        let mut ui = Ui {
+            status: "Connection failed. Check the selected terminal.".into(),
+            status_error: true,
+            ..Ui::default()
+        };
+        ui.snapshot.message = "Inventory refreshed".into();
+        ui.refresh_status(false);
+        assert!(ui.status_error);
+        assert!(ui.status.contains("Connection failed"));
+        ui.snapshot.message = "Checkpoint saved".into();
+        ui.refresh_status(true);
+        assert!(!ui.status_error);
+        assert_eq!(ui.status, "Checkpoint saved");
+    }
+
     #[test]
     fn filtering_keeps_ancestors_and_overrides_collapse() {
         let mut ui = fixture();

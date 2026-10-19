@@ -216,8 +216,16 @@ impl Native<'_> {
         Ok(value["result"].clone())
     }
 }
+fn metadata_backend(backend: &Backend) -> Result<&'static str> {
+    match backend {
+        Backend::Tmux => Ok("tmux"),
+        Backend::Herdr => Ok("herdr"),
+        Backend::Native => Err("Armonia identity synchronization supports tmux and Herdr terminals; rename native terminals from their terminal menu".into()),
+    }
+}
 impl BackendApi for Native<'_> {
     fn observe(&mut self, pane: &Value) -> Result<Observation> {
+        metadata_backend(&terminals::identity(pane)?.backend)?;
         let actual = self.terminals.verify(pane)?;
         let terminal = terminals::identity(&actual)?;
         if terminal.backend == Backend::Herdr {
@@ -450,6 +458,7 @@ impl Plan {
             pane,
         } = request;
         scope.validate().map_err(|_| "Invalid rename scope")?;
+        metadata_backend(&terminals::identity(&pane)?.backend)?;
         if actor.is_empty() || actor.len() > 128 || event.is_empty() || event.len() > 512 {
             return Err("Rename requires a stable authorized actor and event".into());
         }
@@ -460,11 +469,7 @@ impl Plan {
         })?
         .ok_or("Armonia registry unavailable")?;
         let before = backend.observe(&pane)?;
-        let backend_name = if before.terminal.backend == Backend::Tmux {
-            "tmux"
-        } else {
-            "herdr"
-        };
+        let backend_name = metadata_backend(&before.terminal.backend)?;
         if binding.backend != backend_name
             || binding.pane_id != before.terminal.pane
             || binding.terminal_id != before.terminal.generation
@@ -944,6 +949,41 @@ mod tests {
             }
             Err("Simulated lost acknowledgement".into())
         }
+    }
+    #[test]
+    fn native_terminal_metadata_is_rejected_before_any_backend_query() {
+        let terminals = Terminals {
+            tmux: "/missing/tmux".into(),
+            herdr: "/missing/herdr".into(),
+            ..Terminals::default()
+        };
+        let mut adapter = Native {
+            terminals: &terminals,
+            herdr_sockets: BTreeMap::new(),
+        };
+        let native = json!({"backend":"native", "session":"fixture", "pane_id":"fixture", "terminal_id":"generation"});
+        let error = adapter.observe(&native).unwrap_err();
+        assert!(error.starts_with("Armonia identity synchronization supports"));
+        let directory = std::env::temp_dir().join("daedalus-no-armonia-fixture");
+        let mut mock = Mock::new();
+        let result = Plan::prepare(
+            &directory,
+            Request {
+                scope: scope(),
+                actor: "1",
+                target: "old-7",
+                base: "new",
+                event: "event",
+                pane: native,
+            },
+            &mut mock,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .starts_with("Armonia identity synchronization supports")
+        );
+        assert_eq!(mock.calls, 0);
     }
     #[test]
     fn verified_receipt_preserves_numeric_identity_and_aliases_despite_lost_ack() {

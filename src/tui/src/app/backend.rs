@@ -2005,6 +2005,15 @@ impl Source for NativeSource {
         }
         let mut snapshot = inventory::collect(config, &self.terminals, &roots);
         let mut errors = Vec::new();
+        if super::hook_runtime::enrich_native_sessions(
+            &self.directory,
+            &mut snapshot,
+            &self.terminals,
+        )
+        .is_err()
+        {
+            errors.push("Native harness session metadata could not be verified");
+        }
         let mut layouts_available = true;
         let layouts = match Layouts::load(&self.directory) {
             Ok(layouts) => layouts,

@@ -157,9 +157,6 @@ pub struct Plan {
 impl Plan {
     pub fn prepare(environment: Environment, selection: Selection) -> Result<Self> {
         environment.validate()?;
-        if !selection.tmux && !selection.herdr {
-            return Err("Select tmux, Herdr, or both".into());
-        }
         let mut seen = BTreeSet::new();
         for id in &selection.harnesses {
             if harnesses::tool(id).is_none() || !seen.insert(id) {
@@ -846,6 +843,32 @@ mod tests {
         );
     }
     #[test]
+    fn backend_installation_is_optional_on_linux_and_windows() {
+        for os in ["linux", "windows"] {
+            for installed in [false, true] {
+                let mut environment = env();
+                environment.os = os.into();
+                if !installed {
+                    environment.binaries.clear();
+                }
+                let plan = Plan::prepare(
+                    environment,
+                    Selection {
+                        tmux: false,
+                        herdr: false,
+                        harnesses: vec![],
+                    },
+                )
+                .unwrap();
+                assert!(
+                    plan.review.operations.is_empty(),
+                    "{os}: no backend selected"
+                );
+                assert!(plan.review.blockers.is_empty(), "{os}: backend is optional");
+            }
+        }
+    }
+    #[test]
     fn architecture_and_selection_fail_closed() {
         let selection = Selection {
             tmux: true,
@@ -870,17 +893,17 @@ mod tests {
                 .is_err()
             );
         }
-        assert!(
-            Plan::prepare(
-                env(),
-                Selection {
-                    tmux: false,
-                    herdr: false,
-                    harnesses: vec![]
-                }
-            )
-            .is_err()
-        );
+        let plan = Plan::prepare(
+            env(),
+            Selection {
+                tmux: false,
+                herdr: false,
+                harnesses: vec![],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.operations.is_empty());
+        assert!(plan.review.blockers.is_empty());
     }
     #[test]
     fn system_install_uses_exact_argv_and_explicit_elevation() {

@@ -66,7 +66,7 @@ pub fn run_job(args: &[String], out: &mut impl Write) -> Result<()> {
 }
 pub fn run_attach(args: &[String], out: &mut impl Write) -> Result<()> {
     if args.is_empty() || args == ["--help"] || args == ["-h"] {
-        return writeln!(out,"daedalus tma --config-dir ABS --target ABS [--apply]\nNative project attachment uses an exact terminal observation file. A reviewed --apply opens an independent native tmux/Herdr view; the source terminal keeps running.").map_err(|_|"Cannot write attach help".into());
+        return writeln!(out,"daedalus tma --config-dir ABS --target ABS [--apply]\nNative project attachment uses an exact terminal observation file. A reviewed --apply opens an attachment view using the selected terminal backend; the source terminal keeps running.").map_err(|_|"Cannot write attach help".into());
     }
     let mut options = vec!["attach".into()];
     options.extend_from_slice(args);

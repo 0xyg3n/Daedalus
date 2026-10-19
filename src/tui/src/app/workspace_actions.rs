@@ -28,7 +28,12 @@ pub fn native_command(
     session_actions::prepare_attach(adapter, pane, AttachMode::Control, snapshot, context)?;
     let actual = adapter.verify(pane)?;
     let id = terminals::identity(&actual)?;
-    let mut command = if id.backend == Backend::Tmux {
+    let mut command = if id.backend == Backend::Native {
+        let mut command =
+            Command::new(std::env::current_exe().map_err(|_| "Cannot locate Daedalus executable")?);
+        command.args(["terminal-native", "attach", &id.endpoint, &id.generation]);
+        command
+    } else if id.backend == Backend::Tmux {
         let name = format!(
             "daedalus-view-{:x}-{:x}",
             std::process::id(),
@@ -285,6 +290,14 @@ pub fn create(
     {
         return Err("Project backend does not match its selected server".into());
     }
+    if backend == Backend::Native {
+        let pane = crate::adapters::native::start(launch, name, name)?;
+        return Ok(receipt(
+            ReceiptState::Accepted,
+            "Native workspace and terminal started",
+            Some(pane),
+        ));
+    }
     if backend == Backend::Herdr {
         let actual = actual.as_ref().ok_or("Choose an existing Herdr server")?;
         let server = text(actual, "session")?;
@@ -440,6 +453,22 @@ pub fn organize(
             launch.ok_or("Choose a tool or shell")?,
             Placement::Split,
         );
+    }
+    if identity.backend == Backend::Native {
+        if operation == "rename-project" {
+            super::native_terminal::rename(
+                &identity.endpoint,
+                &identity.generation,
+                text(&actual, "title")?,
+                value,
+            )?;
+            return Ok(receipt(
+                ReceiptState::Accepted,
+                "Terminal moved to workspace",
+                None,
+            ));
+        }
+        return Err("Use Split, Rename terminal, or Move to workspace for native terminals".into());
     }
     if operation == "new-group" {
         let launch = launch.ok_or("Choose a tool or shell")?;

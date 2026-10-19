@@ -308,7 +308,9 @@ impl Menu {
                         .cloned()
                         .collect::<Vec<_>>();
                     if panes.is_empty() {
-                        return Err("Create a tmux or Herdr project terminal first".into());
+                        return Err(
+                            "Create a project terminal first: Workspaces → New project".into()
+                        );
                     }
                     let options = panes
                         .iter()

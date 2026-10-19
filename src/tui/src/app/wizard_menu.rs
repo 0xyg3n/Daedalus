@@ -28,8 +28,8 @@ impl Spec {
             destination: None,
             mode: Mode::Current,
             selection: Selection {
-                tmux: true,
-                herdr: true,
+                tmux: false,
+                herdr: false,
                 harnesses: config
                     .subscriptions
                     .iter()
@@ -170,15 +170,55 @@ impl Menu {
         )
     }
     fn backends(&mut self, seq: &mut u64, spec: Spec) -> Result<Outcome> {
+        let windows = cfg!(windows);
+        let description = format!(
+            "Detected: {} / {}. Native terminals are built in. Existing external backends are discovered automatically. Choose only what you need; no backend installation is required to save your configuration. {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            if windows {
+                "Missing Windows backends need their official native installer; Linux installers will not run."
+            } else {
+                "Missing tools are installed only after you review and approve the plan."
+            }
+        );
         self.choose(
             seq,
             "Terminal backends",
             json!([
-                ["both", "tmux and Herdr", "Install either if missing."],
-                ["tmux", "tmux", "Install tmux if missing."],
-                ["herdr", "Herdr", "Install Herdr if missing."]
+                [
+                    "existing",
+                    "Daedalus native terminals",
+                    "Built in; no tmux or Herdr installation. Existing external backends are also discovered."
+                ],
+                [
+                    "herdr",
+                    "Herdr only",
+                    if windows {
+                        "Use installed Herdr; show native installation guidance if missing."
+                    } else {
+                        "Install Herdr only if missing."
+                    }
+                ],
+                [
+                    "tmux",
+                    if windows {
+                        "PSMux / tmux-compatible backend"
+                    } else {
+                        "tmux only"
+                    },
+                    if windows {
+                        "Use the configured native Windows backend; show guidance if missing."
+                    } else {
+                        "Install tmux only if missing."
+                    }
+                ],
+                [
+                    "both",
+                    "Both backends",
+                    "Explicitly include both in the reviewed plan."
+                ]
             ]),
-            "Review every installation before it runs.",
+            &description,
             Stage::Backends(spec),
         )
     }
@@ -220,7 +260,7 @@ impl Menu {
                     [
                         "telegram",
                         "3. Connect Telegram (optional)",
-                        "Review Telegram configuration, credentials and service controls."
+                        "Follow the guided settings, bot token, service and destination steps."
                     ],
                     [
                         "done",
@@ -417,8 +457,8 @@ impl Menu {
                 }
             }
             Stage::Backends(mut spec) => {
-                spec.selection.tmux = text != "herdr";
-                spec.selection.herdr = text != "tmux";
+                spec.selection.tmux = matches!(text, "tmux" | "both");
+                spec.selection.herdr = matches!(text, "herdr" | "both");
                 let wizard = Box::new(source.prepare_setup(config, spec)?);
                 let urls = wizard
                     .review()
@@ -472,8 +512,15 @@ impl Menu {
                     .ok_or("Setup destination has no directory")?.to_path_buf();
                 let token = wizard.approval_token().to_owned();
                 let (result, updated) = source.apply_setup(*wizard, &token)?;
-                let text = super::dialog_text::format(&result)
-                    .map_err(|_| "Cannot encode setup result")?;
+                let summary = if result["instance_import"]["requires_cutover"] == true {
+                    "Import staged. Review the final transfer before switching instances."
+                } else if result["ready"] == true {
+                    "Setup complete. Your configuration is saved."
+                } else {
+                    "Setup incomplete. Review the details below before retrying."
+                };
+                let text = format!("{summary}\n\n{}", super::dialog_text::format(&result)
+                    .map_err(|_| "Cannot encode setup result")?);
                 let mut outcome = self.frame(
                     seq,
                     "output",
@@ -718,6 +765,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_backend_choice_saves_configuration_without_installing_backends() {
+        let (mut menu, mut source, mut seq) = (Menu::default(), Mock::new(), 0);
+        source.missing_herdr = true;
+        menu.start("tools.choose", &config(), &mut seq).unwrap();
+        let backends = reply(&mut menu, &mut source, &mut seq, json!("done")).unwrap();
+        assert_eq!(backends.frames[0]["options"][0][0], "existing");
+        assert!(
+            backends.frames[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains(std::env::consts::OS)
+        );
+        let review = reply(&mut menu, &mut source, &mut seq, json!("existing")).unwrap();
+        assert_eq!(review.frames[0]["title"], "Setup review");
+        assert_eq!(source.downloads, 0);
+        assert!(!source.specs[0].selection.tmux && !source.specs[0].selection.herdr);
+        reply(&mut menu, &mut source, &mut seq, json!("close")).unwrap();
+        let result = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+        assert!(
+            result.frames[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Setup complete.")
+        );
+        assert_eq!(source.applies, 1);
+    }
     #[test]
     fn downloads_and_installations_have_separate_cancellable_reviews() {
         let (mut menu, mut source, mut seq) = (Menu::default(), Mock::new(), 0);

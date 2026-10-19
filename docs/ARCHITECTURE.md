@@ -14,6 +14,25 @@ it over a local, versioned JSON protocol (version 2). Requests carry state queri
 previews, exact-target operations and dialog answers; each confirmation can be used
 once. The protocol is not a network API.
 
+## Native terminal backend
+
+`app/native_terminal.rs` owns a detached PTY/ConPTY daemon for each native
+terminal. `adapters/native.rs` projects its observations and launches into the
+shared terminal operations. Detaching a client leaves the shell alive; closing
+the terminal ends the owned process. User-wide discovery uses an owner-private
+registry, independent of the UI's working directory or configuration instance.
+
+Clients authenticate a fresh server challenge before sending input over loopback.
+Requests and replies are authenticated and bound to the terminal generation;
+captured requests cannot be replayed on a new connection. One renewable control
+lease owns input and resize. Observers receive rendered screens but cannot mutate
+terminal size or write. A lost write acknowledgement remains uncertain.
+
+The backend parses ANSI output into a bounded screen; it does not forward raw
+terminal escape sequences to viewers. External process discovery is a separate,
+read-only adapter in `adapters/standalone.rs`. It cannot adopt an arbitrary existing
+shell's PTY, read all Windows application tabs, or control another user's processes.
+
 ## Identity and effects
 
 A display name is never an identity. Every operation pins the backend, endpoint,
@@ -36,7 +55,7 @@ authentication and runtime. The Pi and OpenCode hook bridges run inside those to
 | Area | Files | Notes |
 | --- | --- | --- |
 | Shared operations | `app/backend.rs`, CLI and menu modules | Unknown commands are rejected |
-| Terminals | `adapters/terminals.rs`, `adapters/terminal_actions.rs`, `app/tree.rs` | tmux and Herdr |
+| Terminals | `adapters/terminals.rs`, `adapters/terminal_actions.rs`, `app/tree.rs` | Native PTY/ConPTY, tmux and Herdr; external process discovery is read-only |
 | Agent tools | `adapters/harnesses.rs`, `app/hook_install.rs`, `app/hook_runtime.rs` | Launch, sign-in, profiles, hooks |
 | Sessions | `app/session_actions.rs`, `app/session_menu.rs`, `app/session_cli.rs` | Resume, fork, handoff |
 | Telegram | `app/telegram*.rs`, `adapters/telegram.rs` | Admission, outbox, commands, streams |
@@ -81,7 +100,8 @@ and Hindsight, and private tmux and shell fixtures. They never start a real bot,
 send messages, touch user sessions or make paid model requests.
 `src/tui/tests/ui_startup.rs` drives the interface in a PTY with no agent tools
 installed; `src/tui/tests/native_cli.rs` runs the packaged CLI against private
-state.
+state. `src/tui/tests/native_terminal.rs` exercises actual isolated native shell
+processes, stream control, resize, stale identity refusal and detach survival.
 
 Tests do not prove OAuth acceptance, live Telegram delivery, Hindsight indexing or
 compatibility with untested upstream versions. Run a credential scan on the
