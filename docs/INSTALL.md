@@ -36,7 +36,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-Download **Daedalus-0.2.0-beta.12-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.12), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
+Download **Daedalus-0.2.0-beta.13-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.13), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
 
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
