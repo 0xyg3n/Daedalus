@@ -161,7 +161,10 @@ strip of companion terminals from the same workspace. `+` and `-` adjust compani
 size; PageUp/PageDown selects the next group. Workspace tabs and Alt+Up/Down
 switch workspaces in Tiles and Wall. Wall uses compact previews for the overview and, on wide terminals,
 a separate enlarged screen for the selected terminal. Its overview cards stay
-compact even when only a few terminals exist. Focus shows harness icons and
+compact even when only a few terminals exist. The selected screen gets most of
+the width. Its read-only preview wraps wide output with the original colors; it
+does not resize the source terminal. Attaching fits Herdr to the selected screen,
+including when the layout changes before the first frame arrives. Focus shows harness icons and
 explicit colored status labels in its persistent workspace outline.
 
 Terminal status labels use green for working, amber for blocked, muted text for

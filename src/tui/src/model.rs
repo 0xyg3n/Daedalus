@@ -658,7 +658,7 @@ pub struct Preview {
     pub error: String,
 }
 impl Preview {
-    pub const COLUMNS: u16 = 240;
+    const MAX_COLUMNS: usize = 2048;
     /// Larger than the backend's per-preview limit, which already trims.
     pub const BYTES: usize = 256 * 1024;
     pub fn new(text: &str, error: &str) -> Self {
@@ -672,12 +672,20 @@ impl Preview {
         let all: Vec<&str> = text.split('\n').collect();
         let kept = &all[all.len().saturating_sub(200)..];
         let lines = kept.len().max(1) as u16;
-        let mut screen = vt100::Parser::new(lines, Self::COLUMNS, 0);
-        // Captured lines end in LF only; draw each on its own row.
+        // Captures may be wider than the dashboard. A fixed 240-column parser
+        // wrapped those rows and scrolled earlier content out of the snapshot.
+        // Byte length is a conservative width bound even with ANSI and Unicode.
+        let columns = kept
+            .iter()
+            .map(|line| line.len() + 7 * line.bytes().filter(|b| *b == b'\t').count())
+            .max()
+            .unwrap_or(1)
+            .clamp(1, Self::MAX_COLUMNS) as u16;
+        let mut screen = vt100::Parser::new(lines, columns, 0);
+        screen.process(b"\x1b[?7l");
+        // Position rows explicitly; oversized lines must never scroll others out.
         for (i, line) in kept.iter().enumerate() {
-            if i > 0 {
-                screen.process(b"\r\n");
-            }
+            screen.process(format!("\x1b[{};1H", i + 1).as_bytes());
             screen.process(line.as_bytes());
             screen.process(b"\x1b[0m");
         }
@@ -686,6 +694,52 @@ impl Preview {
             lines,
             error: error.to_owned(),
         }
+    }
+
+    /// Newest visual rows at the available width, retaining terminal cell styles.
+    pub fn wrapped_rows(&self, width: u16, limit: u16) -> Vec<(u16, u16, u16)> {
+        if width < 2 || limit == 0 {
+            return Vec::new();
+        }
+        let screen = self.screen.screen();
+        let mut shown = Vec::new();
+        for row in (0..self.lines).rev() {
+            let end = (0..screen.size().1)
+                .rev()
+                .find(|&col| {
+                    screen.cell(row, col).is_some_and(|cell| {
+                        cell.is_wide_continuation()
+                            || cell.contents().chars().any(|c| !c.is_whitespace())
+                    })
+                })
+                .map_or(0, |col| col + 1);
+            let mut segments = Vec::new();
+            let mut left = 0;
+            loop {
+                let mut length = width.min(end.saturating_sub(left));
+                if length > 1
+                    && screen
+                        .cell(row, left + length - 1)
+                        .is_some_and(|c| c.is_wide())
+                {
+                    length -= 1;
+                }
+                segments.push((row, left, length));
+                left += length;
+                if left >= end {
+                    break;
+                }
+            }
+            for segment in segments.into_iter().rev() {
+                shown.push(segment);
+                if shown.len() == usize::from(limit) {
+                    shown.reverse();
+                    return shown;
+                }
+            }
+        }
+        shown.reverse();
+        shown
     }
 }
 #[derive(Clone, Default, Deserialize)]
@@ -2467,6 +2521,39 @@ pub mod tests {
             preview.screen.screen().cell(1, 0).unwrap().fgcolor(),
             vt100::Color::Idx(1)
         );
+    }
+
+    #[test]
+    fn wide_preview_rows_do_not_wrap_over_other_captured_rows() {
+        let preview = Preview::new(
+            &format!(
+                "HEADER\n\x1b[38;2;20;180;240m{}END\x1b[0m\nPROMPT",
+                "x".repeat(350)
+            ),
+            "",
+        );
+        let screen = preview.screen.screen();
+        assert_eq!(preview.lines, 3);
+        assert!(screen.contents().starts_with("HEADER\n"));
+        assert_eq!(screen.cell(1, 350).unwrap().contents(), "E");
+        assert_eq!(
+            screen.cell(1, 350).unwrap().fgcolor(),
+            vt100::Color::Rgb(20, 180, 240)
+        );
+        assert!(screen.contents().ends_with("\nPROMPT"));
+        let rows = preview.wrapped_rows(80, 3);
+        assert_eq!(rows, [(1, 240, 80), (1, 320, 33), (2, 0, 6)]);
+    }
+
+    #[test]
+    fn preview_wrapping_preserves_wide_characters_and_blank_rows() {
+        let preview = Preview::new("abc界def\n\nlast", "");
+        assert_eq!(
+            preview.wrapped_rows(4, 8),
+            [(0, 0, 3), (0, 3, 4), (0, 7, 1), (1, 0, 0), (2, 0, 4)]
+        );
+        assert!(preview.wrapped_rows(1, 8).is_empty());
+        assert!(preview.wrapped_rows(4, 0).is_empty());
     }
     #[test]
     fn focus_reveals_and_selects_item_and_catalog_is_retained() {

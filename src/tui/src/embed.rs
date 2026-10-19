@@ -1007,21 +1007,25 @@ impl Embed {
     pub fn resize(&mut self, rows: u16, cols: u16) {
         let changed = self.viewport != (rows, cols);
         self.viewport = (rows, cols);
-        if !changed || rows < 2 || cols < 2 || !self.live() {
+        if rows < 2 || cols < 2 || !self.live() {
             return;
         }
         if self.is_tmux() {
-            if self.fit {
+            if changed && self.fit {
                 self.command(Purpose::Flags, &format!("refresh-client -C {cols}x{rows}"));
             }
-        } else if self.mode == Mode::Control {
-            // A Herdr controller owns the terminal size, like a native attach.
-            self.requested = (rows, cols);
-            self.herdr_line(&format!(
-                r#"{{"type":"terminal.resize","cols":{cols},"rows":{rows}}}"#
-            ));
         } else if self.requested != (rows, cols) {
-            self.respawn = true;
+            if self.mode == Mode::Control {
+                // A Herdr controller owns the terminal size, like a native attach.
+                // A layout can settle while Connecting. Compare with the size sent
+                // to the client, not the viewport recorded before it became live.
+                self.requested = (rows, cols);
+                self.herdr_line(&format!(
+                    r#"{{"type":"terminal.resize","cols":{cols},"rows":{rows}}}"#
+                ));
+            } else {
+                self.respawn = true;
+            }
         }
     }
 
@@ -1715,6 +1719,53 @@ fn main() {
             reason.contains("unknown terminal session control option: --bogus"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn herdr_applies_viewport_changes_made_before_the_first_frame() {
+        let dir = scratch("herdr-connect-resize");
+        let fake = fake_herdr(&dir);
+        for mode in ["control", "observe"] {
+            let log = dir.join("log");
+            let _ = std::fs::remove_file(&log);
+            let mut embed = Embed::start(herdr_plan(&fake, mode, &[]), 30, 140).unwrap();
+            // Wall settles on its actual inspector size before the client replies.
+            embed.resize(12, 60);
+            assert_eq!(embed.phase, Phase::Connecting);
+            assert!(pump_until(&mut embed, |e| e.live()));
+            embed.resize(12, 60);
+            assert!(pump_until(&mut embed, |_| {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if mode == "control" {
+                    text.contains("terminal.resize")
+                } else {
+                    text.lines().count() >= 3 && text.contains("\"60\"")
+                }
+            }));
+            for _ in 0..5 {
+                embed.resize(12, 60);
+                embed.pump();
+            }
+            let text = std::fs::read_to_string(&log).unwrap();
+            if mode == "control" {
+                let sizes: Vec<serde_json::Value> = text
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter(|value| value["type"] == "terminal.resize")
+                    .collect();
+                assert_eq!(sizes.len(), 1);
+                assert_eq!(sizes[0]["cols"], 60);
+                assert_eq!(sizes[0]["rows"], 12);
+            } else {
+                assert!(
+                    !text.contains("terminal.resize"),
+                    "observers must not resize the source"
+                );
+                assert_eq!(embed.requested, (12, 60));
+            }
+            embed.detach();
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

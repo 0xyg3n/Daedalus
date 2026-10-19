@@ -1651,7 +1651,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         inner.x,
         inner.y + 2,
         inner.width,
-        inner.height.saturating_sub(2),
+        inner.height.saturating_sub(3),
     );
     quick_bar(
         f,
@@ -1671,7 +1671,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let dense = count > readable;
     let (grid, inspect) = if ui.embed.is_some() && full_grid.width < 84 && full_grid.height < 20 {
         (Rect::default(), Some(full_grid))
-    } else if dense && full_grid.width >= 84 {
+    } else if count > 1 && full_grid.width >= 84 {
         let parts = split(
             full_grid,
             Direction::Horizontal,
@@ -1681,22 +1681,7 @@ fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
             ],
         );
         (parts[0], Some(parts[1]))
-    } else if dense && full_grid.height >= 20 {
-        let parts = split(
-            full_grid,
-            Direction::Vertical,
-            vec![Constraint::Percentage(45), Constraint::Percentage(55)],
-        );
-        (parts[0], Some(parts[1]))
-    } else if full_grid.width >= 110 && count > 1 {
-        let width = (full_grid.width / 3).clamp(36, 64);
-        let parts = split(
-            full_grid,
-            Direction::Horizontal,
-            vec![Constraint::Min(50), Constraint::Length(width)],
-        );
-        (parts[0], Some(parts[1]))
-    } else if count > 1 && full_grid.height >= 24 {
+    } else if (dense && full_grid.height >= 20) || (count > 1 && full_grid.height >= 24) {
         let parts = split(
             full_grid,
             Direction::Vertical,
@@ -2330,6 +2315,22 @@ fn preview_screen(f: &mut Frame, screen: Rect, ui: &Ui, id: &str) {
     f.render_widget(Block::default().style(theme.screen()), screen);
     match ui.previews.get(id) {
         Some(preview) if preview.error.is_empty() => {
+            if ui.view == View::Wall && ui.selected_terminal().as_deref() == Some(id) {
+                // Read-only snapshots cannot resize the source terminal. Wrap
+                // the selected output instead of hiding its right-hand columns.
+                let rows = preview.wrapped_rows(screen.width, screen.height);
+                let y = screen.bottom() - rows.len() as u16;
+                for (i, (row, left, width)) in rows.into_iter().enumerate() {
+                    embed::draw_screen(
+                        preview.screen.screen(),
+                        Rect::new(screen.x, y + i as u16, width, 1),
+                        f.buffer_mut(),
+                        &theme,
+                        (row, left),
+                    );
+                }
+                return;
+            }
             // Bottom-aligned: the latest lines matter most.
             let top = preview.lines.saturating_sub(screen.height);
             let shown = Rect {
@@ -6906,12 +6907,42 @@ mod tests {
             "selected inspection uses the full height"
         );
         assert!(wall.tile_hits.iter().all(|(r, _)| r.right() < 120));
+        assert!(
+            wall.pane_hits[0].0.width > 80,
+            "selection gets most of the width"
+        );
         let narrow = text(&render(&mut wall, 90, 44));
         assert!(
             narrow.contains("SELECTED TERMINAL"),
             "narrow Wall stacks the selected screen"
         );
         assert!(wall.tile_hits.iter().all(|(r, _)| r.height <= 8));
+    }
+
+    #[test]
+    fn wall_selected_preview_wraps_the_right_edge_and_keeps_truecolor() {
+        let mut ui = workspace(Theme::default(), View::Wall);
+        render(&mut ui, 160, 44);
+        let (screen, id) = ui.pane_hits[0].clone();
+        let output = format!(
+            "\x1b[38;2;23;180;210m{} VISIBLE_END\x1b[0m",
+            "x".repeat(usize::from(screen.width) + 10)
+        );
+        ui.previews
+            .insert(id, crate::model::Preview::new(&output, ""));
+        let buffer = render(&mut ui, 160, 44);
+        let rendered = text(&buffer);
+        assert!(rendered.contains("VISIBLE_END"), "{rendered}");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "V" && cell.fg == Color::Rgb(23, 180, 210))
+        );
+        assert!(
+            ui.embed.is_none(),
+            "preview must not attach or resize the terminal"
+        );
     }
     #[test]
     fn focus_outline_shows_harness_icons_and_working_status() {
