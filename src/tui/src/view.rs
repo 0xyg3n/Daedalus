@@ -5084,6 +5084,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         if split {
             pairs.push((move4, "Pane"));
             pairs.push(("Z", if ui.zoomed { "Whole tab" } else { "Zoom" }));
+            pairs.push(("F11", "Full"));
         }
         pairs.extend([
             ("[ ]", "View"),
@@ -5097,6 +5098,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
             (move4, "Move"),
             (enter, "Menu"),
             ("z", "Focus"),
+            ("F11", "Full"),
             ("[ ]", "View"),
             ("PgUp/Dn", "Page"),
             ("Alt+↑↓", "Workspace"),
@@ -5120,6 +5122,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
             ),
             (enter, "Menu"),
             ("z", "Focus"),
+            ("F11", "Full"),
             (
                 if ui.view == View::Cube {
                     "Alt+arrows"

@@ -1081,6 +1081,8 @@ pub struct Ui {
     pub order: Order,
     /// Focus shows one terminal alone instead of its whole tab.
     pub zoomed: bool,
+    /// Where F11 fullscreen started. `Focus` means stay in Focus when it ends.
+    pub fullscreen_from: Option<View>,
     /// Panes of the tab drawn in Focus, for clicks.
     pub focus_tree_hits: Vec<(ratatui::layout::Rect, String, bool)>,
     pub focus_tree_toggles: Vec<(ratatui::layout::Rect, String)>,

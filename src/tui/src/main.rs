@@ -794,6 +794,8 @@ fn repaint(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 /// Leave Focus: only the stream client stops; the terminal keeps running.
 fn close_focus(ui: &mut Ui) {
     ui.pane_resize = None;
+    ui.fullscreen_from = None;
+    ui.zoomed = false;
     if let Some(mut embed) = ui.embed.take() {
         embed.detach();
         ui.status = "Detached. The terminal keeps running.".into();
@@ -1031,6 +1033,12 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
 }
 
 fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
+    if key.code == KeyCode::F(11) && ui.page == WORKSPACES {
+        if let Some(embed) = ui.embed.as_mut() {
+            embed.prefix = false;
+        }
+        return toggle_fullscreen(ui);
+    }
     if ui.pane_resize.is_some() && key.code == KeyCode::Esc {
         ui.pane_resize = None;
         ui.status = "Pane resize cancelled".into();
@@ -1531,6 +1539,7 @@ fn focus_pane(ui: &mut Ui, id: &str) -> Step {
     ui.takeover_armed = false;
     ui.last_preview = None;
     ui.zoomed = false;
+    ui.fullscreen_from = None;
     quick_action(ui, "terminal.watch")
 }
 
@@ -1546,6 +1555,9 @@ fn toggle_zoom(ui: &mut Ui) {
         return;
     }
     ui.zoomed = !ui.zoomed;
+    if !ui.zoomed {
+        ui.fullscreen_from = None;
+    }
     ui.last_preview = None;
     ui.status_error = false;
     ui.status = if ui.zoomed {
@@ -1578,6 +1590,42 @@ fn switch_view(ui: &mut Ui, target: View) -> Step {
         return quick_action(ui, "terminal.watch");
     }
     Step::Continue
+}
+
+/// F11 fills the screen with the selected terminal. The same key leaves it.
+/// From Wall, Tiles or Cube it opens Focus zoomed, and returns there afterwards.
+/// From Focus it only zooms, and the second press restores the whole tab.
+fn toggle_fullscreen(ui: &mut Ui) -> Step {
+    if let Some(origin) = ui.fullscreen_from.take() {
+        ui.zoomed = false;
+        ui.last_preview = None;
+        if origin != View::Focus {
+            close_focus(ui);
+        }
+        ui.status = "Left fullscreen".into();
+        ui.status_error = false;
+        return Step::Continue;
+    }
+    if ui.selected_terminal().is_none() {
+        ui.status = "Select a terminal to fill the screen".into();
+        ui.status_error = true;
+        return Step::Continue;
+    }
+    let origin = ui.view;
+    let step = if origin == View::Focus {
+        Step::Continue
+    } else {
+        switch_view(ui, View::Focus)
+    };
+    if ui.view != View::Focus {
+        return step;
+    }
+    ui.fullscreen_from = Some(origin);
+    ui.zoomed = true;
+    ui.last_preview = None;
+    ui.status = "Fullscreen · F11 returns".into();
+    ui.status_error = false;
+    step
 }
 
 fn wall_preset(ui: &mut Ui, scope: &str) -> Step {
@@ -1856,7 +1904,7 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                 }
             } else if let Some(&(_, row)) = ui.list_hits.iter().find(|(r, _)| r.contains(p)) {
                 ui.select(row, true);
-            } else if ui.view == View::Cube && ui.embed.is_some() {
+            } else if ui.embed.is_some() {
                 close_focus(ui);
             }
         }
@@ -4045,6 +4093,81 @@ mod cli_tests {
         assert_eq!(request["action"], "terminal.attach");
         assert_eq!(request["node"], ui.tiles()[index].id);
         assert_eq!(ui.view, View::Wall);
+    }
+    #[test]
+    fn click_outside_a_terminal_detaches_on_wall_and_tiles() {
+        for view in [View::Wall, View::Tiles] {
+            let mut ui = workspace();
+            ui.set_view(view);
+            ui.reveal("a");
+            let plan = json!({
+                "adapter":"herdr-session", "mode":"control", "node":"a",
+                "argv":[crate::test_support::path("/bin/sh"), "-c", "while read line; do :; done"]
+            });
+            open_embed(&mut ui, &plan);
+            assert!(ui.embed.is_some());
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 44)).unwrap();
+            terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+            let blank = (0..44)
+                .flat_map(|row| (0..160).map(move |column| (column, row)))
+                .find(|&(column, row)| {
+                    let point = ratatui::layout::Position::new(column, row);
+                    !ui.tile_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.pane_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.nav_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.side_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.view_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.quick_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.list_hits.iter().any(|(rect, _)| rect.contains(point))
+                        && !ui.handles.iter().any(|handle| handle.area.contains(point))
+                })
+                .unwrap_or_else(|| panic!("no empty cell in {view:?}"));
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(event::MouseButton::Left),
+                column: blank.0,
+                row: blank.1,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert!(matches!(mouse_event(&mut ui, click), Step::Continue));
+            assert!(ui.embed.is_none(), "{view:?} stays attached");
+            assert_eq!(ui.view, view);
+            assert!(ui.status.contains("Detached"));
+        }
+    }
+    #[test]
+    fn f11_fills_the_screen_and_returns_to_the_wall() {
+        let mut ui = workspace();
+        ui.view = View::Wall;
+        ui.reveal("a");
+        let Step::Send(request) =
+            key_event(&mut ui, KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE))
+        else {
+            panic!("fullscreen watches the selected terminal");
+        };
+        assert_eq!(request["action"], "terminal.watch");
+        assert_eq!(ui.view, View::Focus);
+        assert!(ui.zoomed);
+        assert_eq!(ui.fullscreen_from, Some(View::Wall));
+        assert!(matches!(
+            key_event(&mut ui, KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE),),
+            Step::Continue
+        ));
+        assert_eq!(ui.view, View::Wall);
+        assert!(!ui.zoomed);
+        assert!(ui.fullscreen_from.is_none());
+        assert!(ui.status.contains("Left fullscreen"));
+
+        ui.view = View::Focus;
+        ui.previous = View::Tiles;
+        ui.focus_target = "a".into();
+        ui.zoomed = false;
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE));
+        assert_eq!(ui.view, View::Focus);
+        assert!(ui.zoomed);
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE));
+        assert_eq!(ui.view, View::Focus);
+        assert!(!ui.zoomed);
     }
     #[test]
     fn focus_tree_disclosure_toggles_pane_children_and_session_click_targets_parent() {

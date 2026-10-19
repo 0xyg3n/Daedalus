@@ -222,7 +222,9 @@ In Tiles and Wall, select a terminal and press **a** or double-click its card.
 Tiles and Wall also allow clicking inside the selected screen to attach.
 Input and live output stay in that layout;
 Daedalus does not substitute the backend's native split layout. **w** opens a
-read-only stream in the same place. **z** explicitly opens Focus.
+read-only stream in the same place. **z** explicitly opens Focus. **F11**
+fills the screen with the selected terminal and returns to the previous layout;
+the same key works while attached.
 
 The selected screen shows **INPUT HERE** while controlling. Ordinary keys go to
 that terminal. Press **Ctrl+]**, then **D** to detach, **O** to observe, or **[** / **]**
