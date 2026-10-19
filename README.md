@@ -212,16 +212,18 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) includes a standalone executable and SHA-256 checksum. Download both files, then run in PowerShell:
+On Windows, the [x64 preview release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.8) includes a standalone executable and SHA-256 checksum. Download both files, then install from a checkout in PowerShell:
 
 ```powershell
 $exe = 'daedalus-0.2.0-beta.8-x86_64-windows.exe'
 $expected = (Get-Content "$exe.sha256").Split(' ')[0]
 if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $expected) { throw 'Checksum mismatch' }
-& ".\$exe" setup
+git clone https://github.com/0xyg3n/Daedalus.git
+.\Daedalus\install.ps1 -Binary (Resolve-Path $exe).Path -Sha256 $expected
+& "$env:LOCALAPPDATA\Daedalus\bin\daedalus.exe" setup
 ```
 
-For guided installation or source builds, use the reviewed [PowerShell installer](docs/INSTALL.md#native-windows-install).
+The installer makes its executable directory private so Daedalus can verify and stage updates. Running a downloaded executable directly from a shared folder such as Downloads can fail that check. See the [PowerShell installer](docs/INSTALL.md#native-windows-install) for source builds and other options.
 
 Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 

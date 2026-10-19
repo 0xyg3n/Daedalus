@@ -82,7 +82,7 @@ integrity, not publisher identity when both come from an untrusted source.
 
 The installer checks SHA-256 and PE x64 architecture, keeps versioned binaries
 under `PREFIX\share\daedalus\native\SHA256`, and copies the selected binary to
-`PREFIX\bin\daedalus.exe`. The default prefix is `%LOCALAPPDATA%\Daedalus`;
+`PREFIX\bin\daedalus.exe`. It restricts the installed executable and its directory to the current Windows user, as required by the updater. If an older installation reports unsafe update directory permissions, close Daedalus and rerun the installer from the verified release binary. A standalone executable run directly from Downloads should be installed before using in-app updates. The default prefix is `%LOCALAPPDATA%\Daedalus`;
 `-Prefix ABS` overrides it. Existing commands without an installer receipt, or
 whose installed bytes changed, are not overwritten. A running executable may
 need to be closed before replacement. PATH is not changed automatically.

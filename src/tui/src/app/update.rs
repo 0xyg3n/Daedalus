@@ -277,7 +277,7 @@ fn checked_file(path: &Path) -> Result<Vec<u8>, String> {
     };
     #[cfg(windows)]
     let file = crate::platform::open_native_profile(path, false, false)
-        .map_err(|_| "Unsafe executable permissions")?;
+        .map_err(|_| "Unsafe executable permissions. Install Daedalus with install.ps1 in a private user directory, then relaunch it")?;
     let mut bytes = Vec::new();
     file.take(BINARY_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -305,7 +305,7 @@ fn directory(path: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     crate::platform::validate_native_profile_dir(path)
-        .map_err(|_| "Unsafe update directory permissions")?;
+        .map_err(|_| "Unsafe update directory permissions. Install Daedalus with install.ps1 in a private user directory, then relaunch it")?;
     Ok(())
 }
 fn target() -> Result<PathBuf, String> {

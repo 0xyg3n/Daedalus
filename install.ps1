@@ -19,6 +19,29 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)." }
 }
 function Get-Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Set-PrivateInstallAcl([string]$Path) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    if (-not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($identity)) {
+        throw "Install path is not owned by the current user: $Path"
+    }
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+    $inheritance = if (Test-Path -LiteralPath $Path -PathType Container) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        [Security.AccessControl.InheritanceFlags]::None
+    }
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        $identity,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    )
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
 function Assert-WindowsExecutable([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
     $reader = New-Object IO.BinaryReader($stream)
@@ -136,15 +159,20 @@ try {
     $release = Join-Path $Prefix ('share/daedalus/native/' + $hash)
     [void][IO.Directory]::CreateDirectory($release)
     [void][IO.Directory]::CreateDirectory($binDirectory)
+    Set-PrivateInstallAcl $release
+    Set-PrivateInstallAcl $binDirectory
     $releaseBinary = Join-Path $release 'daedalus.exe'
     if (Test-Path -LiteralPath $releaseBinary) {
         if ((Get-Hash $releaseBinary) -ne $hash) { throw 'Existing versioned executable has changed.' }
     } else { Copy-Item -LiteralPath $candidate -Destination $releaseBinary }
+    Set-PrivateInstallAcl $releaseBinary
     $staged = Join-Path $binDirectory ('daedalus-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
         Copy-Item -LiteralPath $releaseBinary -Destination $staged
+        Set-PrivateInstallAcl $staged
         if ((Get-Hash $staged) -ne $hash) { throw 'Installed copy failed checksum verification.' }
         Move-Item -LiteralPath $staged -Destination $destination -Force
+        Set-PrivateInstallAcl $destination
     } finally { if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force } }
     @{ version = 1; sha256 = $hash; target = 'x86_64-pc-windows-msvc' } | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
     Write-Host "Installed $destination"
