@@ -14,8 +14,13 @@ Unicode true
 !ifndef OUTPUT
   !error "OUTPUT is required"
 !endif
+!ifndef ICON
+  !error "ICON is required"
+!endif
 
 Name "Daedalus ${PRODUCT_VERSION}"
+Icon "${ICON}"
+UninstallIcon "${ICON}"
 OutFile "${OUTPUT}"
 InstallDir "$LOCALAPPDATA\Daedalus"
 RequestExecutionLevel user
