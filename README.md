@@ -28,7 +28,7 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.10](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.10), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.11](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
@@ -63,12 +63,13 @@ billing measurements. See [quick switching and usage](docs/TUI.md#quick-terminal
 | [Tree](assets/screenshots/tui.png) | Browse servers, workspaces, tabs, panes and agent sessions in their hierarchy. | Arrows navigate and fold branches; `/` searches. |
 | [Tiles](assets/screenshots/tiles.png) | Work within one workspace, with a large selected screen and a strip of companion terminals. | Arrows select; PageUp/PageDown pages; Alt+Up/Down changes workspace. |
 | [Wall](assets/screenshots/wall.png) | Scan terminal activity across the fleet, then inspect one readable screen. | Click a row to select; All / Working / Pinned changes scope. |
-| [Cube](assets/screenshots/cube.png) | Rotate terminals within a workspace and adjust the front face to your task. | Arrows rotate; Alt+Up/Down changes cube; Alt+Left/Right changes only the front terminal. |
+| [Cube](assets/screenshots/cube.png) | Rotate terminals within a workspace and adjust the front face to your task. | Click a face to attach; click outside the faces to detach. Arrows rotate; Alt+Up/Down changes cube. |
 | Focus | Work with a terminal and its native split tab while keeping the workspace tree visible. | `z` opens Focus; Esc returns; drag native split dividers to resize. |
 
 Use **[ / ]** to change layouts while keeping the selected terminal. In Cube,
 Tiles and Wall, **a** attaches in place; **Ctrl+] then D** detaches without stopping
-the terminal. In Cube, drag **↔ / ↕** on the front face, or use **< / >** for width
+the terminal. In Cube, one click on a face attaches and a click outside the faces
+detaches. Drag **↔ / ↕** on the front face, or use **< / >** for width
 and **+ / -** for height. While typing, press **Ctrl+]** before a resize key.
 Proportions persist in your local layout.
 
@@ -183,8 +184,8 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.10) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.10) |
+| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) |
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, the Start Menu shortcut opens Daedalus in a console; Windows Terminal is recommended for the best display. No additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -195,12 +196,12 @@ The Windows preview is cross-compiled; platform-independent tests have also run 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.10
-curl -fLO "$base/daedalus-0.2.0-beta.10-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.10-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.10-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.11
+curl -fLO "$base/daedalus-0.2.0-beta.11-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.11-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.11-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.10-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.11-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -212,7 +213,7 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, download **Daedalus-0.2.0-beta.10-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.10) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
+On Windows, download **Daedalus-0.2.0-beta.11-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.11) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
 
 Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 

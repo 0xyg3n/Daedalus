@@ -1615,7 +1615,10 @@ fn quick_action(ui: &mut Ui, action: &str) -> Step {
     };
     if ui.view == View::Cube
         && action == "terminal.attach"
-        && !ui.pane_hits.iter().any(|(_, id)| id == &node)
+        && !ui
+            .tile_hits
+            .first()
+            .is_some_and(|(rect, _)| rect.width >= 24 && rect.height >= 7)
     {
         ui.status = "Cube face too small to type. Enlarge it or select another terminal.".into();
         ui.status_error = false;
@@ -1815,19 +1818,25 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     return focus_pane(ui, &id);
                 }
             } else if let Some(&(_, index)) = ui.tile_hits.iter().find(|(r, _)| r.contains(p)) {
-                let again = ui
-                    .clicked
-                    .is_some_and(|(i, at)| i == index && at.elapsed() < Duration::from_millis(500));
                 if ui.view == View::Cube && index != ui.tile {
                     ui.cube_anchor = None;
                 }
                 ui.select_tile(index);
+                if ui.view == View::Cube {
+                    ui.clicked = None;
+                    return quick_action(ui, "terminal.attach");
+                }
+                let again = ui
+                    .clicked
+                    .is_some_and(|(i, at)| i == index && at.elapsed() < Duration::from_millis(500));
                 ui.clicked = Some((index, Instant::now()));
                 if again {
                     return quick_action(ui, "terminal.attach");
                 }
             } else if let Some(&(_, row)) = ui.list_hits.iter().find(|(r, _)| r.contains(p)) {
                 ui.select(row, true);
+            } else if ui.view == View::Cube && ui.embed.is_some() {
+                close_focus(ui);
             }
         }
         _ => {}
@@ -3017,7 +3026,7 @@ mod cli_tests {
     }
 
     #[test]
-    fn cube_click_selects_without_attaching_and_small_faces_reject_input() {
+    fn cube_single_click_attaches_and_small_faces_reject_input() {
         let mut ui = workspace();
         ui.set_view(View::Cube);
         ui.reveal("a");
@@ -3031,11 +3040,8 @@ mod cli_tests {
             row: screen.y + 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(matches!(mouse_event(&mut ui, click), Step::Continue));
-        assert!(ui.embed.is_none());
-        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
         let Step::Send(request) = mouse_event(&mut ui, click) else {
-            panic!("A deliberate double-click attaches a readable face");
+            panic!("A single click attaches a readable face");
         };
         assert_eq!(request["action"], "terminal.attach");
         assert_eq!(request["node"], "a");
@@ -3050,6 +3056,47 @@ mod cli_tests {
         assert!(ui.status.contains("too small"));
         assert!(ui.embed.is_none());
         assert_eq!(ui.view, View::Cube);
+    }
+
+    #[test]
+    fn cube_clicking_empty_space_detaches_without_changing_layout() {
+        let mut ui = workspace();
+        ui.set_view(View::Cube);
+        ui.reveal("a");
+        let plan = json!({
+            "adapter":"herdr-session", "mode":"control", "node":"a",
+            "argv":[crate::test_support::path("/bin/sh"), "-c", "while read line; do :; done"]
+        });
+        open_embed(&mut ui, &plan);
+        assert!(ui.embed.is_some());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let face = ui.tile_hits[0].0;
+        let blank = (0..40)
+            .flat_map(|row| (0..140).map(move |column| (column, row)))
+            .find(|&(column, row)| {
+                let point = ratatui::layout::Position::new(column, row);
+                !face.contains(point)
+                    && !ui.tile_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.nav_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.side_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.view_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.quick_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.list_hits.iter().any(|(rect, _)| rect.contains(point))
+                    && !ui.handles.iter().any(|handle| handle.area.contains(point))
+            })
+            .unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: blank.0,
+            row: blank.1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, click), Step::Continue));
+        assert!(ui.embed.is_none());
+        assert_eq!(ui.view, View::Cube);
+        assert!(ui.status.contains("Detached"));
     }
 
     #[test]

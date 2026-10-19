@@ -216,8 +216,9 @@ Hierarchy connectors continue through the extra metadata lines.
 
 ## Type without changing layouts (source builds from main)
 
-In Cube, Tiles and Wall, select a terminal and press **a** or double-click its card.
-A single click in Cube only selects; faces too small to type into refuse attachment.
+In Cube, click a face once to select and attach it; click empty space outside the
+faces to detach without leaving Cube. Faces too small to type into refuse attachment.
+In Tiles and Wall, select a terminal and press **a** or double-click its card.
 Tiles and Wall also allow clicking inside the selected screen to attach.
 Input and live output stay in that layout;
 Daedalus does not substitute the backend's native split layout. **w** opens a

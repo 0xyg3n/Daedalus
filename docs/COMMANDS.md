@@ -175,7 +175,7 @@ process, then the queue and failure receipts.
 
 ### Cube layout
 
-Select **Cube** in the Workspaces view bar, or cycle layouts with `[` / `]`. Each workspace has its own cube, identified by workspace name, number, colour and terminal count. `Alt+Up/Down` switches workspace cubes, wrapping at the ends. Left/right cycle one terminal within the current cube; up/down cycle two. `Alt+Left/Right` changes the front terminal without changing the cube orientation. Click a neighbouring preview to bring it to the front. `Enter` opens terminal actions; `z` opens Focus and `Esc` returns to Cube. Small windows show only the front terminal. Rotation changes the selected preview without sending keys to an agent.
+Select **Cube** in the Workspaces view bar, or cycle layouts with `[` / `]`. Each workspace has its own cube, identified by workspace name, number, colour and terminal count. `Alt+Up/Down` switches workspace cubes, wrapping at the ends. Left/right cycle one terminal within the current cube; up/down cycle two. `Alt+Left/Right` changes the front terminal without changing the cube orientation. Click a face once to select and attach its terminal; click empty space outside the faces to detach while keeping Cube open. `Enter` opens terminal actions; `z` opens Focus and `Esc` returns to Cube. Small windows show only the front terminal. Rotation changes the selected preview without sending keys to an agent.
 
 Workspace colours are derived from workspace identity, rather than terminal order. Unknown workspace membership is labelled Unassigned. Rotation briefly adds chromatic scan and frame effects; reduced motion disables those effects. Terminal text and the underlying terminal are unchanged by the effects.
 
@@ -183,7 +183,7 @@ Cube remembers each workspace’s front terminal and orientation during the curr
 
 The Motion option controls selection sweeps, switch feedback, shortcut hover highlights and cube glitch fragments. Reduced motion disables these effects; no-colour terminals keep plain styling. Effects do not change terminal text or input.
 
-In source builds from `main`, **a** or a click inside the selected preview attaches
+**a** or a click inside the selected preview attaches
 without leaving Cube, Tiles or Wall. **w** watches in place. **Ctrl+] then D**
 detaches, **Ctrl+] then O** observes, and **Ctrl+] then [ / ]** changes layout.
 **Ctrl+] then arrows** detaches and navigates within a preview layout. Selecting
