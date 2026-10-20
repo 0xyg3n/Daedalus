@@ -205,11 +205,17 @@ impl Poller {
                         + match error {
                             Error::RateLimited(delay) => delay.max(1) as f64,
                             Error::NotSent | Error::Uncertain => 5.0,
-                            Error::Rejected(_) | Error::Invalid(_) => {
+                            Error::Rejected(code) => {
                                 self.stopped.store(true, Ordering::Release);
-                                return Err(
-                                    "Telegram polling rejected; check local configuration".into()
-                                );
+                                return Err(match code {
+                                    409 => "Telegram polling conflict (409): another poller or webhook owns this bot. Stop the competing receiver before restarting Daedalus.".into(),
+                                    401 => "Telegram token rejected (401): replace the bot token in Telegram settings.".into(),
+                                    _ => format!("Telegram polling rejected ({code}); check the bot configuration."),
+                                });
+                            }
+                            Error::Invalid(_) => {
+                                self.stopped.store(true, Ordering::Release);
+                                return Err("Telegram polling response was invalid; no updates were acknowledged.".into());
                             }
                         };
                 }

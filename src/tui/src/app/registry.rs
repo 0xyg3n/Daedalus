@@ -343,18 +343,18 @@ mod tests {
     #[test]
     fn metadata_matches_reviewed_action_and_navigation_contract() {
         let registry = builtin();
-        assert_eq!(registry.actions.len(), 44);
+        assert_eq!(registry.actions.len(), 45);
         assert_eq!(registry.sections.len(), 11);
         // Reviewed catalog: release checks replace the redundant install action.
         // Native-client guidance now includes the built-in backend.
         // Navigation retains the established action contract.
         assert_eq!(
             fingerprint(&registry.actions),
-            "27580f48dc21b7b47930a33f2c13656e7c1ec125b67ffc479b5b85ade2c12c5d"
+            "c41970484a4836af769bdbcd47a5050ff91b3e1815e62dc08f0f236b1148e4c4"
         );
         assert_eq!(
             fingerprint(&registry.sections),
-            "6704f3242d8b39a5293a7b8846955a44d275b8bbabd7c002f751b9f07d6dc00c"
+            "bcbc9668ce63eb20983ac24838bcf4214e3f35629e829e68b343dbe7c0d010cf"
         );
     }
     #[test]
@@ -415,7 +415,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.execution == Execution::GuidedAction)
                 .count(),
-            44
+            45
         );
         for entry in &registry.references {
             assert!(registry.catalog_action(&entry.id).is_none());

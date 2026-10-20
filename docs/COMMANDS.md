@@ -94,28 +94,63 @@ daedalus goal status --registration /abs/registration.json
 and does not start an agent. `profile-apply` needs the digest from `profile-preview`
 and saves a rollback receipt. See [hooks](HOOKS.md) and [goals](GOALS.md).
 
+### Refreshing installed hooks
+
+**Hooks → Profiles → Refresh / reload managed hooks** reviews all recorded
+installations, backs up the existing profiles and updates only managed handlers
+to the current Daedalus launcher. Removed handlers are not reinstalled. Changed
+profiles or registrations invalidate the review instead of overwriting newer edits.
+The backend action is `hooks.reload`.
+
+Each harness has its own activation step: Claude and Cursor watch profile changes;
+Codex requires `/hooks` review when a command changes; Pi uses `/reload`; OpenCode
+plugins belong to its server. Grok and Hermes may require a native restart.
+Daedalus reports these requirements and does not call a profile write a verified
+runtime reload. It never kills sessions or approves native trust through this action.
+Private per-event results in `hook-status/` contain only status, time and a fixed
+error message, never hook payloads, tokens, prompts or tool output.
+
 ## Telegram
 
 Each registered DM or group has its own saved default terminal. Open a terminal's
 actions and choose **Connect Telegram chat**, or click **Telegram** while attached
 (`Ctrl+]`, then `G`). Choose the chat, review its current destination and confirm.
 The selected pane stays selected; other chats keep their defaults. After saving,
-connect its installed reply hook when prompted to enable responses.
+connect its installed reply hook when prompted to enable responses. If no matching
+hook exists, **Set up standard hooks** opens the installer for that exact terminal
+and continues to the selected chat's recipient review. Codex and Claude profiles
+are detected from the live process; other adapters request an explicit profile.
+Native trust/reload requirements still apply. A saved route alone does not confirm
+delivery: the Telegram service must be running, and ordinary group messages require
+listening to be enabled.
 
 Chat names and IDs are kept in the private configuration directory. Bots can
 discover chats they receive updates from; they cannot list every group in a
 person's Telegram account. Add the bot to another group and send
 `/start@YourBot`, then use **Find DM or group chats** to register it.
 
-The TUI's **Telegram → Set up connection** offers automatic pairing. Enter the
-bot token in a masked field, review the derived bot ID, then send `/start` to the
-bot in a DM or `/start@YourBot` in a group. **Find a DM or group chat** lists
-recent senders for local approval. Granting a sender, starting the service,
-choosing a terminal and connecting reply hooks are separate reviewed steps.
-`daedalus telegram discover --config-dir ABS` prints the same candidate list
-and saves chat names privately; it does not grant access or consume the update cursor. Keep the
-managed service stopped while discovering. Numeric IDs can still be entered
-manually in the TUI.
+Open **Options → Configuration settings → Telegram configuration**. The default
+**Connect my bot and DM** flow asks for the bot token in a masked field and your
+numeric Telegram owner user ID. It derives the bot ID from the token and uses your
+owner ID as the private DM chat ID. Send `/start` to the bot before using it.
+Configuration and token storage are reviewed before saving; starting the service
+and assigning a pane remain explicit steps. If local setup has not been saved,
+**Save and continue** creates it first. Existing settings are preserved.
+
+An existing connection opens its settings menu instead of repeating onboarding:
+- **Add a DM or group** authorizes a user and a chat. Group IDs include their minus sign.
+- **Manage chat names** assigns private display names to registered chat IDs. These
+  names appear when selecting a chat for a pane; renaming does not change access or routing.
+- **Assign chats to panes** chooses each chat's default terminal and reply hook.
+- **Change bot token** replaces the private credential for the configured bot.
+- **Start connection / Stop connection** controls this instance's service.
+
+**Find chats automatically** discovers recent bot updates for local approval.
+Keep the managed service stopped while discovering. Send `/start` to the bot in a
+DM or `/start@YourBot` in a group, then select the exact sender and chat.
+`daedalus telegram discover --config-dir ABS` provides the same candidate list.
+Discovery does not grant access or consume the update cursor, and preserves saved
+chat display names. Manual chat registration works without discovery.
 
 `daedalus telegram config init` writes `telegram-service.json`: bot ID, token
 file, sender grants (Read, Send, Manage), feeder registrations and reply

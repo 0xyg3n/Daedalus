@@ -29,3 +29,6 @@ Document only what the code does and tests cover.
 8. Backend changes do not authorize a TUI redesign.
 9. Before publishing, run `./scripts/check.sh`, the affected tests and a credential
    scan of the current tree ([testing](docs/ARCHITECTURE.md#testing)).
+10. Ship user-facing changes with a new version and GitHub release: update VERSION,
+    Cargo package/lockfile and release links, run checks, and publish matching
+    Linux and Windows artifacts with checksums. Do not reuse a published version.

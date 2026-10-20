@@ -2381,6 +2381,10 @@ fn change_option(ui: &mut Ui, item: Item, forward: bool) {
             ui.sizes.set(Split::Tiles, value);
             resized(ui, Split::Tiles);
         }
+        Item::Settings => {
+            ui.options = None;
+            ui.navigate(4);
+        }
         Item::Updates => {
             ui.options = None;
             ui.updates_requested = true;
@@ -3746,12 +3750,23 @@ mod cli_tests {
         options_key(ui, KeyEvent::new(code, KeyModifiers::NONE));
     }
     #[test]
+    fn configuration_option_opens_settings_without_changing_preferences() {
+        let mut ui = workspace();
+        let before = view_state(&ui);
+        open_options(&mut ui);
+        option_key(&mut ui, KeyCode::Enter);
+        assert!(ui.options.is_none());
+        assert_eq!(ui.page, 4);
+        assert_eq!(before, view_state(&ui));
+    }
+    #[test]
     fn options_open_with_comma_change_in_place_and_are_remembered() {
         let mut ui = workspace();
         ui.view = View::Tree;
         press(&mut ui, KeyCode::Char(','));
         assert!(ui.options.is_some());
-        // Down to the Details panel; Right hides it at once.
+        // Move past Configuration and Terminal order to the Details panel.
+        option_key(&mut ui, KeyCode::Down);
         option_key(&mut ui, KeyCode::Down);
         option_key(&mut ui, KeyCode::Right);
         assert!(!ui.prefs.details);
@@ -3762,8 +3777,12 @@ mod cli_tests {
         // An item's own key works inside Options too, and moves the choice to it.
         option_key(&mut ui, KeyCode::Char('o'));
         assert_eq!(ui.order, Order::Layout);
-        assert_eq!(ui.options.as_ref().unwrap().selected, 0);
-        // Up wraps to the Application update command, which opens the updater.
+        assert_eq!(
+            Item::ALL[ui.options.as_ref().unwrap().selected],
+            Item::Order
+        );
+        // Home reaches Configuration; Up wraps to the update command.
+        option_key(&mut ui, KeyCode::Home);
         option_key(&mut ui, KeyCode::Up);
         option_key(&mut ui, KeyCode::Enter);
         assert!(ui.options.is_none() && ui.updates_requested);

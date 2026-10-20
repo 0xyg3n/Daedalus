@@ -28,7 +28,7 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.16](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.16), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.17](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
@@ -130,6 +130,18 @@ verified hooks; seeing a shell in the inventory does not establish agent readine
 
 ## Telegram feeder
 
+Open **Options → Configuration settings** to manage harnesses, accounts and
+Telegram. **Telegram configuration** accepts your bot token and owner user ID,
+uses your DM by default, and lets you register named groups and assign each chat
+to a pane. Existing connections remain editable; credentials and chat details
+stay in your private configuration directory.
+
+Telegram runs as a separate process of the same Rust executable, started and stopped
+from the TUI's Telegram menu or `daedalus telegram start|stop`. It does not require
+a separate daemon package or systemd unit. Closing the TUI does not stop an already
+started connection. `daedalus telegram status` reports its state (pass
+`--config-dir ABS` for your instance).
+
 The feeder connects one Telegram chat to one exact agent conversation. A message you send to your bot is typed into that agent's prompt, and the agent's reply comes back to the chat.
 
 1. **Admit.** `daedalus telegram serve` polls your bot. Only granted senders are accepted; forwarded commands are refused. In groups input requires `/listen`, a mention or a reply to the bot.
@@ -191,8 +203,8 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.16) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.16) |
+| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) |
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, the Start Menu shortcut opens Daedalus in a console; Windows Terminal is recommended for the best display. No additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -203,12 +215,12 @@ The Windows preview is cross-compiled; platform-independent tests have also run 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.16
-curl -fLO "$base/daedalus-0.2.0-beta.16-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.16-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.16-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.17
+curl -fLO "$base/daedalus-0.2.0-beta.17-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.17-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.17-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.16-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.17-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -220,7 +232,7 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, download **Daedalus-0.2.0-beta.16-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.16) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
+On Windows, download **Daedalus-0.2.0-beta.17-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
 
 Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 

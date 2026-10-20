@@ -79,7 +79,9 @@ pub fn installed_launcher(current: PathBuf) -> PathBuf {
 #[cfg(unix)]
 fn installed_launcher_in(current: PathBuf, home: &Path) -> PathBuf {
     let launcher = home.join(".local/bin/daedalus");
-    if std::fs::symlink_metadata(&launcher).is_ok_and(|meta| meta.file_type().is_symlink())
+    if layouts::check_path(launcher.parent().expect("launcher parent")).is_ok()
+        && std::fs::canonicalize(&launcher).is_ok_and(|target| layouts::check_path(&target).is_ok())
+        && std::fs::symlink_metadata(&launcher).is_ok_and(|meta| meta.file_type().is_symlink())
         && std::fs::canonicalize(&current)
             .ok()
             .is_some_and(|running| std::fs::canonicalize(&launcher).ok() == Some(running))
@@ -139,6 +141,21 @@ pub fn preview_live(
         harness_version: request.harness_version.clone(),
     };
     preview(&request, terminals)
+}
+
+pub(crate) fn check_binary_path(path: &Path) -> Result<()> {
+    if let Err(error) = layouts::check_path(path) {
+        // The installer owns this one update-stable launcher. State/profile symlinks
+        // remain forbidden, and the launcher must resolve to this running binary.
+        let current = std::env::current_exe().map_err(|_| "Cannot locate hook executable")?;
+        if installed_launcher(current) != path {
+            return Err(error);
+        }
+        layouts::check_path(
+            &std::fs::canonicalize(path).map_err(|_| "Hook launcher target disappeared")?,
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -299,9 +316,10 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     if request.harness == Harness::Claude && !supported(&request.harness_version) {
         return Err("Claude hook profiles require an observed version >=2.1.295".into());
     }
-    for path in [&request.directory, &request.profile, &request.binary] {
+    for path in [&request.directory, &request.profile] {
         layouts::check_path(path)?;
     }
+    check_binary_path(&request.binary)?;
     if let Some(path) = &request.transcript {
         layouts::check_path(path)?;
     }
@@ -470,7 +488,11 @@ pub(crate) fn launch_hooks(
     serde_json::to_vec_pretty(&value).map_err(|_| "Cannot encode Grok hooks".into())
 }
 
-fn merge(before: Option<&[u8]>, registration: &Registration, binary: &Path) -> Result<Vec<u8>> {
+pub(crate) fn merge(
+    before: Option<&[u8]>,
+    registration: &Registration,
+    binary: &Path,
+) -> Result<Vec<u8>> {
     if registration.scope.harness == Harness::Opencode {
         let marker = format!(
             "// Daedalus managed OpenCode bridge v2: {}\n",
@@ -875,6 +897,7 @@ pub(crate) fn write_profile(path: &Path, bytes: &[u8]) -> Result<()> {
 /// match. Backup precedes mutation. A provider may reload the written profile
 /// immediately; only registration creation by itself is inert.
 pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
+    check_binary_path(&plan.executable)?;
     let _active =
         hook_runtime::active_guard(&plan.registration.directory).map_err(|e| e.to_string())?;
     let _lock = lock(&plan.registration.directory)?;

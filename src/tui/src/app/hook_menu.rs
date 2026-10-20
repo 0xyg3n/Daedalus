@@ -26,6 +26,8 @@ struct MemorySpec {
     expected: Option<super::memory::Config>,
 }
 enum Stage {
+    Reload(super::hook_reload::Plan),
+    ReloadResult,
     HerdrReview(Box<super::herdr_hooks::Plan>),
     HerdrApply(Box<super::herdr_hooks::Plan>),
     RemovalChoose(Vec<super::hook_uninstall::Entry>),
@@ -66,6 +68,7 @@ pub struct Menu {
     pending: Option<Pending>,
     batch: VecDeque<Value>,
     batch_active: bool,
+    telegram_recipient: Option<(i64, i64)>,
 }
 impl Menu {
     pub fn pending(&self) -> bool {
@@ -73,6 +76,7 @@ impl Menu {
     }
     pub fn cancel(&mut self) {
         self.pending = None;
+        self.telegram_recipient = None;
         self.batch.clear();
         self.batch_active = false;
     }
@@ -211,6 +215,21 @@ impl Menu {
                 ["stop","Stop setup","Keep any previously installed profiles"]]}),
             Stage::BatchError(pane),
         )
+    }
+    pub fn start_defaults<S: Source>(
+        &mut self,
+        pane: Value,
+        recipient: (i64, i64),
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
+        self.cancel();
+        self.telegram_recipient = Some(recipient);
+        match source.default_hook_spec(config, &pane)? {
+            Some(spec) => self.review_hooks(source, config, spec, seq),
+            None => self.profile(pane, seq),
+        }
     }
     fn profile(&mut self, pane: Value, seq: &mut u64) -> Result<Outcome> {
         self.frame(
@@ -530,6 +549,13 @@ impl Menu {
         )
     }
 
+    pub fn reload<S: Source>(&mut self, source: &mut S, seq: &mut u64) -> Result<Outcome> {
+        let plan = source.prepare_hook_reload()?;
+        let review = super::dialog_text::format(&plan.review())
+            .map_err(|_| "Cannot format hook reload review")?;
+        self.frame(seq,"choose","Refresh / reload managed hooks",json!({"description":review,"options":[["apply","Refresh all managed profiles","Back up profiles and update managed handlers; review native activation steps"],["cancel","Cancel","Keep existing handlers"]]}),Stage::Reload(plan))
+    }
+
     pub fn herdr<S: Source>(
         &mut self,
         config: &ControlConfig,
@@ -637,6 +663,12 @@ impl Menu {
                 "skip" => self.next_batch(seq),
                 _ => { self.batch.clear(); self.batch_active=false; Ok(Outcome::default()) }
             },
+            Stage::Reload(plan) => {
+                if text=="cancel" {return Ok(Outcome::default());}
+                let result=source.apply_hook_reload(plan)?;
+                self.frame(seq,"output","Profiles refreshed · activation steps",json!({"text":super::dialog_text::review(&result)}),Stage::ReloadResult)
+            }
+            Stage::ReloadResult => Ok(Outcome {refresh:true,..Default::default()}),
             Stage::HerdrReview(plan) => self.frame(seq, "choose", "Confirm Herdr integration installation",
                 json!({"options":[["cancel","Cancel","Keep the profile unchanged"],["yes","Install or update","Back up reviewed files, run Herdr and verify its status"]]}), Stage::HerdrApply(plan)),
             Stage::HerdrApply(plan) => {
@@ -759,6 +791,9 @@ impl Menu {
                     return Ok(Outcome::default());
                 }
                 let receipt = source.apply_hooks(*plan)?;
+                if let Some((chat, actor)) = self.telegram_recipient.take() {
+                    return self.review_recipient(source, receipt, &[json!({"chat":chat.to_string(),"actor":actor.to_string()})], "0", seq);
+                }
                 let mut options = vec![json!(["done", "Done", "Keep the installed profile"]),
                     json!(["telegram", "Connect Telegram", "Choose an explicitly authorized recipient and review its route"]),
                     json!(["memory", "Configure Hindsight", "Set an explicit endpoint and memory bank for this registration"]),

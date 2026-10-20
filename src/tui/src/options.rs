@@ -19,10 +19,12 @@ pub enum Item {
     Keys,
     Reset,
     Updates,
+    Settings,
 }
 
 impl Item {
-    pub const ALL: [Item; 15] = [
+    pub const ALL: [Item; 16] = [
+        Item::Settings,
         Item::Order,
         Item::Details,
         Item::Screen,
@@ -47,6 +49,7 @@ impl Item {
             Item::Look | Item::Saver | Item::Motion | Item::Keys => "Look and feel",
             Item::Reset => "",
             Item::Updates => "Application",
+            Item::Settings => "Configuration",
         }
     }
     pub fn label(self) -> &'static str {
@@ -66,6 +69,7 @@ impl Item {
             Item::Keys => "Key bar",
             Item::Reset => "Reset panel sizes",
             Item::Updates => "Check for updates",
+            Item::Settings => "Configuration settings",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -85,6 +89,7 @@ impl Item {
             Item::Keys => "keys",
             Item::Reset => "reset",
             Item::Updates => "refresh",
+            Item::Settings => "options",
         }
     }
     /// The key that makes the same change outside Options, if any.
@@ -149,6 +154,7 @@ pub fn value(ui: &Ui, item: Item) -> String {
         Item::Motion => "Still".into(),
         Item::Keys => shown(!ui.hide_keys),
         Item::Reset => "Every border back to its default".into(),
+        Item::Settings => "Telegram, harnesses and accounts".into(),
         Item::Updates => format!(
             "Installed {} · check GitHub releases",
             env!("CARGO_PKG_VERSION")

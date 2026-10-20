@@ -1188,6 +1188,32 @@ pub fn execute(
         }
     }
 }
+pub fn record_run_result(
+    path: &Path,
+    event: Option<EventKind>,
+    error: Option<&Error>,
+) -> Result<()> {
+    let registration = inspect(path)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Input)?
+        .as_millis();
+    let value = json!({"state":if error.is_some(){"failed"}else{"ok"},"event":event,"observed_at_ms":now,"error":error.map(ToString::to_string)});
+    let event_name = serde_json::to_value(event)
+        .map_err(|_| Error::Output)?
+        .as_str()
+        .unwrap_or("unspecified")
+        .to_owned();
+    layouts::write_private(
+        &registration
+            .directory
+            .join("hook-status")
+            .join(format!("{}-{event_name}.json", registration.id)),
+        &serde_json::to_vec(&value).map_err(|_| Error::Output)?,
+    )
+    .map_err(|_| Error::Persistence)
+}
+
 /// CLI integration: registration path and optional stable event ID are explicit
 /// arguments. Stdout contains only the harness hook response, never status logs.
 pub fn run(
@@ -1531,6 +1557,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0.directory);
         }
+    }
+    #[test]
+    fn hook_status_preserves_failure_when_another_event_succeeds() {
+        let f = Fixture::new();
+        let path = install(&f.0).unwrap();
+        record_run_result(&path, Some(EventKind::Stop), Some(&Error::Input)).unwrap();
+        record_run_result(&path, Some(EventKind::PostToolUse), None).unwrap();
+        let failed: Value = serde_json::from_slice(
+            &fs::read(f.0.directory.join("hook-status/hook-Stop.json")).unwrap(),
+        )
+        .unwrap();
+        let passed: Value = serde_json::from_slice(
+            &fs::read(f.0.directory.join("hook-status/hook-PostToolUse.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(passed["state"], "ok");
+        assert_eq!(failed["error"], Error::Input.to_string());
+        assert_eq!(failed.as_object().unwrap().len(), 4);
     }
     struct Verified;
     impl Verifier for Verified {

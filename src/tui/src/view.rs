@@ -21,7 +21,7 @@ const FALLBACK: [(&str, &str, &str); crate::model::PAGES] = [
     ("Workspaces", "workspaces", "Work"),
     ("Sessions", "sessions", "Work"),
     ("Telegram", "connections", "Connect"),
-    ("AI tools", "tools", "Connect"),
+    ("Settings", "options", "System"),
     ("Hooks", "hooks", "Connect"),
     ("Activity", "activity", "System"),
     ("Instances", "instances", "System"),

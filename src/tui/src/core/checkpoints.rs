@@ -166,16 +166,72 @@ fn decode_legacy(mut value: serde_json::Value) -> Result<Checkpoint> {
     Ok(checkpoint)
 }
 
+// Resume options may precede the positional session ID. Do not mistake a
+// model/profile value or an initial prompt selected with --last for that ID.
+fn codex_launch_sid(argv: &[String]) -> Option<&str> {
+    if !argv
+        .get(1)
+        .is_some_and(|v| matches!(v.as_str(), "resume" | "fork"))
+    {
+        return None;
+    }
+    let mut args = argv[2..].iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--last" => return None,
+            "-c"
+            | "--config"
+            | "-m"
+            | "--model"
+            | "-p"
+            | "--profile"
+            | "-s"
+            | "--sandbox"
+            | "-a"
+            | "--ask-for-approval"
+            | "-C"
+            | "--cd"
+            | "--enable"
+            | "--disable"
+            | "--remote"
+            | "--remote-auth-token-env"
+            | "--local-provider"
+            | "--add-dir" => {
+                args.next()?;
+            }
+            "--no-daemon"
+            | "--all"
+            | "--include-non-interactive"
+            | "--strict-config"
+            | "--oss"
+            | "--approve-for-me"
+            | "--dangerously-bypass-approvals-and-sandbox"
+            | "--full-auto"
+            | "--search"
+            | "--no-alt-screen" => (),
+            "--" => return args.next().map(String::as_str),
+            value if value.starts_with('-') => return None,
+            value => return Some(value),
+        }
+    }
+    None
+}
+
 /// A fork parent's launch ID is never reported as the new child's ID.
 pub fn resolve_sid(argv: &[String], harness: &str, reported: &str) -> Result<Option<String>> {
     let forking = argv.iter().any(|a| a == "--fork-session")
         || (harness == "codex" && argv.get(1).is_some_and(|a| a == "fork"));
     let mut ids = Vec::new();
-    for (index, pair) in argv.windows(2).enumerate() {
-        if matches!(pair[0].as_str(), "--resume" | "-r" | "--session-id")
-            || (harness == "codex" && index == 1 && matches!(pair[0].as_str(), "resume" | "fork"))
-        {
+    for pair in argv.windows(2) {
+        if matches!(pair[0].as_str(), "--resume" | "-r" | "--session-id") {
             ids.push(pair[1].as_str());
+        }
+    }
+    if harness == "codex" {
+        if let Some(id) = codex_launch_sid(argv) {
+            ids.push(id);
+        } else if forking {
+            return Ok(None);
         }
     }
     if forking {
@@ -418,6 +474,35 @@ mod tests {
         assert_eq!(resolve_sid(&args, "claude", "parent").unwrap(), None);
         assert_eq!(
             resolve_sid(&args, "claude", "child").unwrap(),
+            Some("child".into())
+        );
+    }
+    #[test]
+    fn codex_resume_options_do_not_hide_or_impersonate_session_id() {
+        let args = [
+            "codex",
+            "resume",
+            "--no-daemon",
+            "-m",
+            "model-name",
+            "-c",
+            "key=value",
+            "session-123",
+        ]
+        .map(String::from);
+        assert_eq!(
+            resolve_sid(&args, "codex", "").unwrap(),
+            Some("session-123".into())
+        );
+        assert!(resolve_sid(&args, "codex", "different").is_err());
+        let args = ["codex", "resume", "--last", "prompt"].map(String::from);
+        assert_eq!(resolve_sid(&args, "codex", "").unwrap(), None);
+        let args = ["codex", "resume", "--unrecognized", "value"].map(String::from);
+        assert_eq!(resolve_sid(&args, "codex", "").unwrap(), None);
+        let args = ["codex", "fork", "-m", "model", "parent"].map(String::from);
+        assert_eq!(resolve_sid(&args, "codex", "parent").unwrap(), None);
+        assert_eq!(
+            resolve_sid(&args, "codex", "child").unwrap(),
             Some("child".into())
         );
     }

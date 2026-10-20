@@ -26,10 +26,10 @@
       "summary": "Telegram routing, delivery and feeder connections."
     },
     {
-      "title": "AI tools",
-      "icon": "tools",
-      "category": "Connect",
-      "summary": "Harnesses, providers, accounts and installation."
+      "title": "Settings",
+      "icon": "options",
+      "category": "System",
+      "summary": "Configuration, Telegram, harnesses, accounts and updates."
     },
     {
       "title": "Hooks",
@@ -558,10 +558,10 @@
     {
       "id": "telegram.details",
       "key": "t",
-      "page": 3,
-      "group": "Telegram",
-      "title": "Bot & chat setup",
-      "note": "Choose a DM or group chat, authorize a user ID and review the connection.",
+      "page": 4,
+      "group": "Connections",
+      "title": "Telegram configuration",
+      "note": "Connect a bot, authorize your DM, manage named groups and assign their terminals.",
       "icon": "edit",
       "effects": [
         "settings"
@@ -605,8 +605,17 @@
       "title": "Find DM or group chats",
       "note": "Read recent /start messages, then review who may use each chat.",
       "icon": "search",
-      "effects": ["read", "external", "settings", "confirm"],
-      "aliases": ["pair telegram", "discover telegram", "find chat"],
+      "effects": [
+        "read",
+        "external",
+        "settings",
+        "confirm"
+      ],
+      "aliases": [
+        "pair telegram",
+        "discover telegram",
+        "find chat"
+      ],
       "context": "",
       "context_note": "",
       "listed": true,
@@ -683,7 +692,7 @@
       "id": "tools.choose",
       "key": "a",
       "page": 4,
-      "group": "Your AI tools",
+      "group": "Harnesses and accounts",
       "title": "Choose my AI tools",
       "note": "Select the tools or subscriptions you already use.",
       "icon": "choose",
@@ -704,7 +713,7 @@
       "id": "tools.signin",
       "key": "signin",
       "page": 4,
-      "group": "Your AI tools",
+      "group": "Harnesses and accounts",
       "title": "Sign in to an AI tool",
       "note": "Each tool's own sign-in: browser OAuth, a device code or an API key.",
       "icon": "signin",
@@ -727,7 +736,7 @@
       "id": "tools.open",
       "key": "l",
       "page": 4,
-      "group": "Your AI tools",
+      "group": "Harnesses and accounts",
       "title": "Open an AI tool",
       "note": "Runs the tool's own interface in this terminal.",
       "icon": "open",
@@ -752,7 +761,11 @@
       "note": "Compare this version with the latest GitHub release. No automatic installation.",
       "icon": "refresh",
       "effects": [],
-      "aliases": ["version", "release", "update"],
+      "aliases": [
+        "version",
+        "release",
+        "update"
+      ],
       "context": "",
       "context_note": "",
       "listed": true,
@@ -802,6 +815,28 @@
       "quick": ""
     },
     {
+      "id": "hooks.reload",
+      "key": "hooks-reload",
+      "page": 5,
+      "group": "Profiles",
+      "title": "Refresh / reload managed hooks",
+      "note": "Update installed handlers for all harnesses and show native activation or restart requirements.",
+      "icon": "refresh",
+      "effects": [
+        "hooks",
+        "confirm"
+      ],
+      "aliases": [
+        "reload hooks",
+        "refresh hooks",
+        "repair hook commands"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
       "id": "hooks.all",
       "key": "hooks-all",
       "page": 5,
@@ -809,8 +844,15 @@
       "title": "Set up hooks for detected agents",
       "note": "Review standard hooks for every detected live harness session, one at a time.",
       "icon": "install",
-      "effects": ["hooks", "confirm"],
-      "aliases": ["all hooks", "default hooks", "agent hooks"],
+      "effects": [
+        "hooks",
+        "confirm"
+      ],
+      "aliases": [
+        "all hooks",
+        "default hooks",
+        "agent hooks"
+      ],
       "context": "",
       "context_note": "",
       "listed": true,

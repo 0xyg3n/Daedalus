@@ -60,11 +60,19 @@ impl Next {
     }
 }
 enum Stage {
+    LocalSetup(String),
+    Settings(ServiceConfig),
+    Names(Vec<Value>),
+    Name(i64),
+    Owner {
+        updated: ServiceConfig,
+        token: Zeroizing<String>,
+    },
     Output(Option<Next>),
     Continue(Next),
     Details(Box<Details>),
     InitialMode(ServiceConfig),
-    AutomaticToken(ServiceConfig),
+    AutomaticToken(ServiceConfig, bool),
     AutomaticName {
         updated: ServiceConfig,
         token: Zeroizing<String>,
@@ -90,6 +98,11 @@ enum Stage {
         actor: i64,
         choices: Vec<Value>,
     },
+    InstallHooks {
+        identity: crate::core::identity::TerminalId,
+        chat: i64,
+        actor: i64,
+    },
     Confirm(Box<Plan>),
 }
 struct Pending {
@@ -102,6 +115,7 @@ struct Pending {
 pub struct Menu {
     pending: Option<Pending>,
     target: Option<crate::core::identity::TerminalId>,
+    hooks: super::hook_menu::Menu,
 }
 pub fn available(action: &str) -> bool {
     matches!(
@@ -116,11 +130,12 @@ pub fn available(action: &str) -> bool {
 }
 impl Menu {
     pub fn pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.hooks.pending()
     }
     pub fn cancel(&mut self) {
         self.pending = None;
         self.target = None;
+        self.hooks.cancel();
     }
     pub fn for_pane<S: Source>(
         &mut self,
@@ -182,6 +197,20 @@ impl Menu {
             return Err("Finish the current Telegram dialog first".into());
         }
         self.target = None;
+        let Reply::Data(local) = source.telegram(Request::Inspect)? else {
+            return Err("Invalid Telegram settings response".into());
+        };
+        if local["local_configured"] == false {
+            return self.frame(seq,"choose","Save local configuration",json!({"description":"Telegram needs a saved local configuration. Save this instance first, then continue connecting Telegram. Existing configuration is preserved; no tools are installed.","options":[["save","Save and continue","Create private local settings"],["cancel","Cancel","Leave files unchanged"]]}),Stage::LocalSetup(action.into()));
+        }
+        if local["configured"] == false
+            && matches!(
+                action,
+                "telegram.route" | "telegram.discover" | "telegram.token"
+            )
+        {
+            return self.start("telegram.details", source, _config, seq);
+        }
         if action == "telegram.start" {
             let Reply::Data(status) = source.telegram(Request::Inspect)? else {
                 return Err("Invalid Telegram settings response".into());
@@ -215,7 +244,7 @@ impl Menu {
                     });
                     json!([i.to_string(),format!("{} · {}",g["title"].as_str().unwrap_or("Chat"),g["chat"]),format!("{destination} · authorized user {}",g["actor"])])
                 }).collect::<Vec<_>>();
-                if choices.is_empty(){return Err("No authorized chat yet. Open Telegram setup and add a DM or group, then choose a destination.".into());}
+                if choices.is_empty(){return self.start("telegram.details", source, _config, seq);}
                 self.frame(seq,"choose","Choose Telegram chat",json!({"options":choices,"description":"Each chat has its own saved default terminal. Changing one chat does not change other chats."}),Stage::RouteGrant(data))
             }
             "telegram.token" => self.frame(seq,"input","Telegram bot token",json!({"secret":true,"description":"Paste the complete token from @BotFather (numeric ID:secret). It must match your configured bot ID. It is stored privately and never shown in the review."}),Stage::Token),
@@ -226,9 +255,9 @@ impl Menu {
                 let directory=PathBuf::from(value["config_directory"].as_str().ok_or("Missing configuration directory")?);
                 let updated=expected.clone().unwrap_or(ServiceConfig {version:1,instance:String::new(),bot_id:0,token_file:directory.join("telegram.env"),grants:vec![],listen_chats:BTreeSet::new(),registrations:vec![],hook_bindings:vec![]});
                 if expected.is_none() {
-                    self.frame(seq,"choose","Connect Telegram",json!({"options":[["automatic","Find my DM or group","Save bot identity and token, then discover a chat for review"],["manual","Enter IDs myself","Type the authorized user and group chat IDs"]]}),Stage::InitialMode(updated))
+                    self.frame(seq,"choose","Connect Telegram",json!({"description":"Start with your private DM. You can add named groups afterwards.","options":[["dm","Connect my bot and DM","Enter the bot token and your Telegram user ID"],["automatic","Find my DM or group","Discover recent chats, then review access"],["manual","Advanced setup","Enter bot and chat IDs separately"]]}),Stage::InitialMode(updated))
                 } else {
-                    self.field(seq,2,expected,updated,None,false)
+                    self.frame(seq,"choose","Telegram configuration",json!({"description":"Edit this connection without repeating onboarding. Existing chats, routes and hooks are preserved.","options":[["add","Add a DM or group","Authorize a Telegram user and chat ID"],["names","Manage chat names","Name registered chats for the pane selector"],["route","Assign chats to panes","Choose a default destination for each chat"],["token","Change bot token","Replace the private credential for this bot"],["discover","Find chats automatically","Discover recent chats while the service is stopped"],["start","Start connection","Review starting the Telegram service"],["stop","Stop connection","Stop this instance's managed service"]]}),Stage::Settings(updated))
                 }
             }
             _=>Err("Unknown Telegram action".into()),
@@ -284,6 +313,9 @@ impl Menu {
         request: &Value,
         seq: &mut u64,
     ) -> Result<Outcome> {
+        if self.hooks.pending() {
+            return self.hooks.reply(request, source, _config, seq);
+        }
         let pending = self.pending.as_ref().ok_or("No Telegram dialog pending")?;
         if request["op"] != "reply" || request["id"].as_u64() != Some(pending.id) {
             return Err("Unexpected Telegram reply".into());
@@ -341,17 +373,56 @@ impl Menu {
         }
         let text = value.as_str().unwrap();
         match pending.stage {
+            Stage::LocalSetup(action) => {
+                if text == "cancel" { return Ok(Outcome::default()); }
+                let configuration = source.finish_local_setup(_config)?;
+                let mut outcome = self.start(&action, source, &configuration, seq)?;
+                outcome.configuration = Some(configuration);
+                outcome.refresh = true;
+                Ok(outcome)
+            }
+            Stage::Settings(updated) => match text {
+                "add" => self.field(seq,2,Some(updated.clone()),updated,None,false),
+                "names" => {
+                    let Reply::Data(data) = source.telegram(Request::Inspect)? else { return Err("Invalid chat inventory".into()); };
+                    let mut seen = BTreeSet::new();
+                    let chats = data["chats"].as_array().ok_or("Invalid chats")?.iter().filter(|g| seen.insert(g["chat"].as_i64())).cloned().collect::<Vec<_>>();
+                    if chats.is_empty() { return self.field(seq,2,Some(updated.clone()),updated,None,false); }
+                    let options = chats.iter().enumerate().map(|(i,g)|json!([i.to_string(),g["title"],format!("Chat ID {}",g["chat"])])).collect::<Vec<_>>();
+                    self.frame(seq,"choose","Manage chat names",json!({"options":options}),Stage::Names(chats))
+                }
+                other => self.start(match other {"route"=>"telegram.route","token"=>"telegram.token","discover"=>"telegram.discover","start"=>"telegram.start",_=>"telegram.stop"},source,_config,seq),
+            },
+            Stage::Names(chats) => {
+                let chat = chats.get(text.parse::<usize>().map_err(|_|"Invalid chat")?).and_then(|c|c["chat"].as_i64()).ok_or("Invalid chat")?;
+                self.frame(seq,"input","Chat display name",json!({"description":"Use a short name for this chat (up to 120 characters). This is private display metadata; chat ID and permissions stay unchanged."}),Stage::Name(chat))
+            }
+            Stage::Name(chat) => self.review(seq,source.telegram(Request::NameChat { chat, title:text.into() })?),
+            Stage::Owner { mut updated, token } => {
+                let Some(owner) = text.parse::<i64>().ok().filter(|id| *id > 0) else {
+                    return self.frame(seq,"input","Telegram owner user ID",json!({"description":"Enter your positive numeric Telegram user ID, not an @username."}),Stage::Owner { updated, token });
+                };
+                updated.instance = "telegram".into();
+                updated.grants.push(Grant { chat:owner, actor:owner, permissions:vec![Access::Read,Access::Send,Access::Manage] });
+                let Reply::Plan(plan) = source.telegram(Request::Configure { expected:None, config:Box::new(updated) })? else { return Err("Invalid Telegram setup plan".into()); };
+                self.frame(seq,"choose","Review Telegram DM connection",json!({"description":super::dialog_text::format(&plan.review()).map_err(|_|"Cannot display review")?,"options":[["apply","Save connection","Save the owner DM, then review private token storage"],["cancel","Cancel","Leave configuration unchanged"]]}),Stage::AutomaticReview { plan, token })
+            }
             Stage::InitialMode(updated) => {
-                if text == "automatic" {
-                    self.frame(seq,"input","Telegram bot token",json!({"secret":true,"description":"Paste the complete token from @BotFather. Its numeric prefix identifies your bot; the token stays in private local storage and is never shown in a review."}),Stage::AutomaticToken(updated))
+                if text == "automatic" || text == "dm" {
+                    self.frame(seq,"input","Telegram bot token",json!({"secret":true,"description":"Paste the complete token from @BotFather. Its numeric prefix identifies your bot; the token stays in private local storage and is never shown in a review."}),Stage::AutomaticToken(updated, text == "dm"))
                 } else {
                     self.field(seq,0,None,updated,None,false)
                 }
             }
-            Stage::AutomaticToken(mut updated) => {
-                let bot=text.split_once(':').and_then(|(id,_)|id.parse::<i64>().ok()).filter(|id|*id>0).ok_or("Invalid bot token")?;
-                super::telegram_config::validate_token(bot,text.as_bytes()).map_err(|_|"Invalid bot token")?;
+            Stage::AutomaticToken(mut updated, dm) => {
+                let bot = text.split_once(':').and_then(|(id,_)|id.parse::<i64>().ok()).filter(|id|*id>0);
+                let Some(bot) = bot.filter(|bot| super::telegram_config::validate_token(*bot,text.as_bytes()).is_ok()) else {
+                    return self.frame(seq,"input","Telegram bot token",json!({"secret":true,"description":"Paste the complete token from @BotFather (numeric ID:secret). No token was saved."}),Stage::AutomaticToken(updated,dm));
+                };
                 updated.bot_id=bot;
+                if dm {
+                    return self.frame(seq,"input","Telegram owner user ID",json!({"description":"Enter your numeric Telegram user ID. Your private DM is the default chat; groups can be added later."}),Stage::Owner { updated, token:Zeroizing::new(text.to_owned()) });
+                }
                 self.frame(seq,"input","Connection name",json!({"description":"Choose a local name for this Telegram connection (letters, numbers, underscores or hyphens)."}),Stage::AutomaticName{updated,token:Zeroizing::new(text.to_owned())})
             }
             Stage::AutomaticName { mut updated, token } => {
@@ -377,6 +448,14 @@ impl Menu {
                 updated.grants.retain(|g|g.chat!=chat || g.actor!=actor);
                 updated.grants.push(Grant{chat,actor,permissions:vec![Access::Read,Access::Send,Access::Manage]});
                 self.review(seq,source.telegram(Request::Configure{expected:Some(Box::new(expected)),config:Box::new(updated)})?)
+            }
+            Stage::InstallHooks { identity, chat, actor } => {
+                if text == "later" { return Ok(Outcome::default()); }
+                let observed = source.refresh(_config)?;
+                let panes = observed.snapshot["panes"].as_array().ok_or("Missing live pane inventory")?;
+                let matches = panes.iter().filter(|p| crate::adapters::terminals::identity(p).is_ok_and(|id| id == identity)).collect::<Vec<_>>();
+                if matches.len() != 1 { return Err("Destination terminal changed. Refresh and select it again.".into()); }
+                self.hooks.start_defaults(matches[0].clone(), (chat, actor), source, _config, seq)
             }
             Stage::Output(None) => Ok(Outcome::default()),
             Stage::Output(Some(next)) => self.frame(
@@ -516,6 +595,7 @@ impl Menu {
                 let route = if matches!(*plan, Plan::Route(_)) {
                     let review = plan.review();
                     Some((
+                        serde_json::from_value::<crate::core::routes::Terminal>(review["terminal"].clone()).map_err(|_| "Invalid route target")?.identity,
                         review["chat"]
                             .as_str()
                             .ok_or("Missing route chat")?
@@ -531,6 +611,7 @@ impl Menu {
                     None
                 };
                 let (summary, mut next) = match &*plan {
+                    Plan::ChatName(_) => ("Chat name saved. It will appear when assigning a Telegram chat to a pane.", None),
                     Plan::Configuration(_) => ("Telegram settings saved. Saving settings does not start or reconnect the bot.", Some(Next::Token)),
                     Plan::Token(_) => ("Bot token saved privately. Its format matches the configured bot; Telegram has not verified it yet.", Some(Next::Start)),
                     Plan::Service(_) if plan.review()["operation"] == "start" => ("Telegram start requested. Check connection status before sending a message.", Some(Next::Route)),
@@ -556,7 +637,7 @@ impl Menu {
                 {
                     next = Some(Next::Discover);
                 }
-                if let Some((chat, actor)) = route {
+                if let Some((identity, chat, actor)) = route {
                     let Reply::Data(data) =
                         source.telegram(Request::RouteBindings { chat, actor })?
                     else {
@@ -586,6 +667,12 @@ impl Menu {
                         outcome.refresh = true;
                         return Ok(outcome);
                     }
+                    let mut outcome = self.frame(seq, "choose", "Destination saved · hooks required", json!({
+                        "description":"This terminal has no matching Telegram hook registration. Install standard hooks, then connect the chat in the installer. The harness may require native trust approval or a reload. The Telegram service must also be running; groups receive ordinary messages only when listening is enabled.",
+                        "options":[["install","Set up standard hooks","Detect the native profile and review changes"],["later","Finish later","The saved route is not a verified connection"]]
+                    }), Stage::InstallHooks { identity, chat, actor })?;
+                    outcome.refresh = true;
+                    return Ok(outcome);
                 }
                 let mut outcome = self.frame(
                     seq,
@@ -673,6 +760,7 @@ mod tests {
     impl Source for Routing {
         fn telegram(&mut self, request: Request) -> Result<Reply> {
             match request {
+                Request::Inspect => Ok(Reply::Data(json!({}))),
                 Request::Routes => Ok(Reply::Data(self.inventory.clone())),
                 Request::Route { chat, target, .. } => {
                     self.selected = Some((chat, target.identity));
@@ -745,9 +833,72 @@ mod tests {
         );
         assert!(source.selected.is_none());
     }
+    #[test]
+    fn missing_hooks_continue_on_exact_pane_and_cancel_nested_dialog() {
+        struct Inventory(Value);
+        impl Source for Inventory {
+            fn refresh(&mut self, _: &ControlConfig) -> Result<Observations> {
+                Ok(Observations {
+                    snapshot: self.0.clone(),
+                    ..Default::default()
+                })
+            }
+            fn preview(&mut self, _: &Value, _: usize) -> Result<String> {
+                unreachable!()
+            }
+            fn save_layouts(&mut self, _: &Layouts) -> Result<()> {
+                unreachable!()
+            }
+        }
+        let pane = json!({"backend":"herdr","session":"fixture","pane_id":"p1","terminal_id":"original","agent":"codex"});
+        let identity = crate::adapters::terminals::identity(&pane).unwrap();
+        for replaced in [false, true] {
+            let mut current = pane.clone();
+            if replaced {
+                current["terminal_id"] = json!("replacement");
+            }
+            let mut source = Inventory(json!({"panes":[current]}));
+            let mut menu = Menu::default();
+            let mut seq = 0;
+            menu.frame(
+                &mut seq,
+                "choose",
+                "Install",
+                json!({"options":[["install","Install","Review"]]}),
+                Stage::InstallHooks {
+                    identity: identity.clone(),
+                    chat: -100,
+                    actor: 1,
+                },
+            )
+            .unwrap();
+            let outcome = menu.answer(
+                &mut source,
+                &config(),
+                &json!({"op":"reply","id":seq,"value":"install"}),
+                &mut seq,
+            );
+            if replaced {
+                assert!(
+                    outcome
+                        .unwrap_err()
+                        .contains("Destination terminal changed")
+                );
+            } else {
+                assert_eq!(
+                    outcome.unwrap().frames[0]["title"],
+                    "Native hook profile file (absolute path)"
+                );
+                assert!(menu.pending());
+                menu.cancel();
+                assert!(!menu.pending());
+            }
+        }
+    }
     struct Local {
         directory: PathBuf,
         applied: usize,
+        require_local: bool,
     }
     impl Local {
         fn new() -> Self {
@@ -763,6 +914,7 @@ mod tests {
             Self {
                 directory,
                 applied: 0,
+                require_local: false,
             }
         }
     }
@@ -776,7 +928,22 @@ mod tests {
             if matches!(&request, Request::Apply { .. }) {
                 self.applied += 1;
             }
-            super::super::telegram_admin::execute(&self.directory, request)
+            let inspect = matches!(&request, Request::Inspect);
+            let mut reply = super::super::telegram_admin::execute(&self.directory, request)?;
+            if inspect
+                && self.require_local
+                && let Reply::Data(value) = &mut reply
+            {
+                value["local_configured"] = json!(self.directory.join("control.json").exists());
+            }
+            Ok(reply)
+        }
+        fn finish_local_setup(&mut self, config: &ControlConfig) -> Result<ControlConfig> {
+            if let Some(bytes) = layouts::read_private(&self.directory.join("control.json"))? {
+                return ControlConfig::parse(&bytes);
+            }
+            super::super::setup::SetupPlan::fresh(&self.directory, config.clone())?.apply()?;
+            Ok(config.clone())
         }
         fn refresh(&mut self, _: &ControlConfig) -> Result<Observations> {
             unreachable!()
@@ -810,6 +977,68 @@ mod tests {
         for text in ["fixture", "123", "456", "group", "-100789"] {
             answer(menu, local, seq, json!(text));
         }
+    }
+    #[test]
+    fn quick_connection_derives_bot_id_defaults_to_owner_dm_and_redacts_token() {
+        let (mut menu, mut local, mut seq) = (Menu::default(), Local::new(), 0);
+        menu.start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        answer(&mut menu, &mut local, &mut seq, json!("dm"));
+        let retry = answer(&mut menu, &mut local, &mut seq, json!("invalid"));
+        assert_eq!(retry.frames[0]["secret"], true);
+        answer(&mut menu, &mut local, &mut seq, json!("123:fixture_secret"));
+        let retry = answer(&mut menu, &mut local, &mut seq, json!("@owner"));
+        assert_eq!(retry.frames[0]["title"], "Telegram owner user ID");
+        let review = answer(&mut menu, &mut local, &mut seq, json!("456"));
+        assert!(!format!("{review:?}").contains("fixture_secret"));
+        assert!(!local.directory.join("telegram-service.json").exists());
+        let token_review = answer(&mut menu, &mut local, &mut seq, json!("apply"));
+        assert!(!format!("{token_review:?}").contains("fixture_secret"));
+        answer(&mut menu, &mut local, &mut seq, json!("apply"));
+        let saved = ServiceConfig::load(&local.directory.join("telegram-service.json")).unwrap();
+        assert_eq!(saved.bot_id, 123);
+        assert_eq!((saved.grants[0].chat, saved.grants[0].actor), (456, 456));
+        assert_eq!(saved.read_token().unwrap(), "123:fixture_secret");
+        assert!(!local.directory.join("telegram-process.json").exists());
+        menu.cancel();
+        let settings = menu
+            .start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        assert_eq!(settings.frames[0]["title"], "Telegram configuration");
+        answer(&mut menu, &mut local, &mut seq, json!("names"));
+        answer(&mut menu, &mut local, &mut seq, json!("0"));
+        answer(&mut menu, &mut local, &mut seq, json!("Personal DM"));
+        answer(&mut menu, &mut local, &mut seq, json!("apply"));
+        let Reply::Data(status) = local.telegram(Request::Inspect).unwrap() else {
+            panic!()
+        };
+        assert_eq!(status["chats"][0]["title"], "Personal DM");
+        assert_eq!(
+            ServiceConfig::load(&local.directory.join("telegram-service.json"))
+                .unwrap()
+                .read_token()
+                .unwrap(),
+            "123:fixture_secret"
+        );
+    }
+    #[test]
+    fn telegram_setup_saves_local_configuration_only_after_confirmation() {
+        let (mut menu, mut local, mut seq) = (Menu::default(), Local::new(), 0);
+        local.require_local = true;
+        let result = menu
+            .start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        assert_eq!(result.frames[0]["title"], "Save local configuration");
+        assert!(!local.directory.join("control.json").exists());
+        answer(&mut menu, &mut local, &mut seq, json!("cancel"));
+        assert!(!local.directory.join("control.json").exists());
+        menu.start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        let next = answer(&mut menu, &mut local, &mut seq, json!("save"));
+        assert!(next.configuration.is_some());
+        assert_eq!(next.frames[0]["title"], "Connect Telegram");
+        assert!(local.directory.join("control.json").exists());
+        assert!(!local.directory.join("telegram-service.json").exists());
     }
     #[test]
     fn starting_an_unconfigured_connection_opens_setup_without_starting_service() {
@@ -906,7 +1135,7 @@ mod tests {
         menu.cancel();
         menu.start("telegram.details", &mut local, &config(), &mut seq)
             .unwrap();
-        for text in ["456", "group", "-100789", "apply"] {
+        for text in ["add", "456", "group", "-100789", "apply"] {
             answer(&mut menu, &mut local, &mut seq, json!(text));
         }
         let saved = ServiceConfig::load(&local.directory.join("telegram-service.json")).unwrap();

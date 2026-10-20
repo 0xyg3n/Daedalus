@@ -1093,6 +1093,29 @@ impl NativeOperations {
         .map_err(
             |_| "Native conversation discovery could not be verified; inspect hook diagnostics",
         )?;
+        // Existing sessions can predate hook enrollment. Use the same verified
+        // native process/session observation as the hook installer, never a title.
+        let store = super::session_actions::SessionStore {
+            directory: self.directory.clone(),
+        };
+        if let Some(panes) = snapshot["panes"].as_array_mut() {
+            for pane in panes {
+                if pane["agent_session"]["kind"] == "id" {
+                    continue;
+                }
+                if let Ok((checkpoint, _)) = store.freeze_live_source(
+                    &self.terminals,
+                    &self.config,
+                    &self.environment,
+                    pane,
+                    "",
+                ) && checkpoint.origin == "Native metadata"
+                    && !checkpoint.sid.is_empty()
+                {
+                    pane["agent_session"] = serde_json::json!({"kind":"id", "agent":checkpoint.harness,"value":checkpoint.sid});
+                }
+            }
+        }
         if snapshot["errors"]
             .as_array()
             .is_some_and(|errors| !errors.is_empty())

@@ -104,6 +104,10 @@ pub fn inspect(directory: &Path) -> Result<Value> {
 pub enum Request {
     Inspect,
     Discover,
+    NameChat {
+        chat: i64,
+        title: String,
+    },
     Routes,
     RouteBindings {
         chat: i64,
@@ -144,9 +148,78 @@ pub enum Reply {
 pub enum Plan {
     Configuration(telegram_config::ServicePlan),
     Token(TokenPlan),
+    ChatName(ChatNamePlan),
     Service(ServicePlan),
     Route(Box<RoutePlan>),
     Binding(Box<BindingPlan>),
+}
+pub struct ChatNamePlan {
+    directory: PathBuf,
+    configuration: Vec<u8>,
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+    chat: i64,
+    title: String,
+}
+impl ChatNamePlan {
+    fn prepare(directory: &Path, chat: i64, title: String) -> Result<Self> {
+        if title.trim().is_empty()
+            || title.chars().count() > 120
+            || title.chars().any(char::is_control)
+        {
+            return Err("Use a chat name of 1–120 characters without control characters".into());
+        }
+        let _lock = telegram_config::configuration_lock(directory)?;
+        let configuration = layouts::read_private(&directory.join("telegram-service.json"))?
+            .ok_or("Configure Telegram first")?;
+        let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+        if !config.grants.iter().any(|g| g.chat == chat) {
+            return Err("Register this chat before naming it".into());
+        }
+        let before = layouts::read_private(&directory.join("telegram-chats.json"))?;
+        let mut names = chat_names(directory, config.bot_id)?;
+        names.insert(chat, title.trim().to_owned());
+        if names.len() > 1000 {
+            return Err("Chat catalog exceeds limit".into());
+        }
+        let after = serde_json::to_vec(&json!({"bot_id":config.bot_id,"chats":names.into_iter().map(|(chat,title)|json!({"chat":chat,"title":title})).collect::<Vec<_>>()})).map_err(|_| "Cannot encode chat names")?;
+        Ok(Self {
+            directory: directory.into(),
+            configuration,
+            before,
+            after,
+            chat,
+            title,
+        })
+    }
+    fn approval(&self) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    &self.directory,
+                    &self.configuration,
+                    &self.before,
+                    &self.after
+                ))
+                .expect("serializable chat plan")
+            )
+        )
+    }
+    fn apply(self, directory: &Path) -> Result<Value> {
+        if self.directory != directory {
+            return Err("Chat name plan belongs to another instance".into());
+        }
+        let _lock = telegram_config::configuration_lock(directory)?;
+        if layouts::read_private(&directory.join("telegram-service.json"))?.as_ref()
+            != Some(&self.configuration)
+            || layouts::read_private(&directory.join("telegram-chats.json"))? != self.before
+        {
+            return Err("Telegram settings changed; review the chat name again".into());
+        }
+        layouts::write_private(&directory.join("telegram-chats.json"), &self.after)?;
+        Ok(json!({"state":"saved","chat":self.chat}))
+    }
 }
 pub struct ServicePlan {
     directory: PathBuf,
@@ -159,6 +232,7 @@ impl Plan {
         match self {
             Self::Configuration(plan) => plan.approval_token(),
             Self::Token(plan) => plan.approval(),
+            Self::ChatName(plan) => plan.approval(),
             Self::Route(plan) => plan.approval(),
             Self::Binding(plan) => plan.approval(),
             Self::Service(plan) => format!(
@@ -179,6 +253,9 @@ impl Plan {
         match self {
             Self::Configuration(plan) => plan.review(),
             Self::Token(plan) => plan.review(),
+            Self::ChatName(plan) => {
+                json!({"operation":"name_chat","chat":plan.chat,"name":plan.title,"effect":"Private display name only; permissions and routes stay unchanged."})
+            }
             Self::Route(plan) => plan.review(),
             Self::Binding(plan) => plan.review(),
             Self::Service(plan) => {
@@ -189,6 +266,9 @@ impl Plan {
 }
 pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
     match request {
+        Request::NameChat { chat, title } => Ok(Reply::Plan(Box::new(Plan::ChatName(
+            ChatNamePlan::prepare(directory, chat, title)?,
+        )))),
         Request::Discover => {
             if super::telegram_supervisor::inspect(directory)?.state != "stopped" {
                 return Err("Stop this bot's managed service before discovering chats".into());
@@ -203,7 +283,7 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
                 if let (Some(chat), Some(title)) =
                     (candidate["chat"].as_i64(), candidate["title"].as_str())
                 {
-                    names.insert(chat, title.to_owned());
+                    names.entry(chat).or_insert_with(|| title.to_owned());
                 }
             }
             if names.len() > 1000 {
@@ -321,6 +401,11 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
                 )?)
                 .map_err(|_| "Cannot encode Telegram settings")?;
             }
+            if value["configured"] == true {
+                let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+                let names = chat_names(directory, config.bot_id)?;
+                value["chats"] = json!(config.grants.iter().map(|g|json!({"chat":g.chat,"actor":g.actor,"title":names.get(&g.chat).map(String::as_str).unwrap_or(if g.chat > 0 {"Direct message"} else {"Group"})})).collect::<Vec<_>>());
+            }
             Ok(Reply::Data(value))
         }
         Request::Configure { expected, config } => {
@@ -371,6 +456,7 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
                 return Err("Telegram approval does not match the reviewed plan".into());
             }
             let result = match *plan {
+                Plan::ChatName(plan) => plan.apply(directory)?,
                 Plan::Route(plan) => plan.apply(directory, &live_terminals(directory)?)?,
                 Plan::Binding(plan) => plan.apply(directory, &live_terminals(directory)?)?,
                 Plan::Configuration(plan) => {
@@ -869,6 +955,30 @@ impl BindingPlan {
             super::hook_runtime::verify_process(process, Path::new("/proc"))
                 .map_err(|_| "Hook process changed; reinstall hooks")?;
         }
+        // Enrollment may discover a session after the route was first saved.
+        // Refresh the verified inventory without changing the selected route or
+        // rewriting any already-queued message's conversation identity.
+        let terminal = &self.binding.goal_scope.terminal;
+        let endpoint = live
+            .iter()
+            .filter(|t| {
+                t.identity.backend == terminal.backend && t.identity.endpoint == terminal.endpoint
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut registry = crate::core::routes::Registry::from_connection(
+            telegram_config::private_connection(&directory.join("routes.sqlite3"))?,
+        )
+        .map_err(|e| e.to_string())?;
+        registry
+            .inventory(
+                terminal.backend.clone(),
+                &terminal.endpoint,
+                &endpoint,
+                true,
+                true,
+            )
+            .map_err(|e| e.to_string())?;
         let backup = directory.join(format!(
             "telegram-service.backup-{:x}.json",
             Sha256::digest(&self.configuration)
@@ -950,6 +1060,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn chat_names_require_registered_chat_and_reject_stale_review() {
+        let f = Fixture::new();
+        assert!(ChatNamePlan::prepare(&f.0, -100, "Team".into()).is_err());
+        let path = f.0.join("telegram-service.json");
+        let mut config = ServiceConfig::load(&path).unwrap();
+        config.grants.push(telegram_config::Grant {
+            chat: -100,
+            actor: 42,
+            permissions: vec![telegram_config::Access::Read],
+        });
+        layouts::write_private(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(ChatNamePlan::prepare(&f.0, -100, "bad\nname".into()).is_err());
+        let plan = ChatNamePlan::prepare(&f.0, -100, "Team".into()).unwrap();
+        assert!(!f.0.join("telegram-chats.json").exists());
+        let stale = ChatNamePlan::prepare(&f.0, -100, "Stale".into()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        plan.apply(&f.0).unwrap();
+        assert!(stale.apply(&f.0).is_err());
+        assert_eq!(chat_names(&f.0, 123).unwrap().get(&-100).unwrap(), "Team");
+        assert_eq!(before, std::fs::read(&path).unwrap());
     }
     #[test]
     fn preview_redacts_and_apply_saves_private_raw_token() {
@@ -1141,6 +1273,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn binding_refreshes_session_discovered_after_route_selection() {
+        let (f, target, path) = binding_fixture();
+        let mut registry = crate::core::routes::Registry::from_connection(
+            telegram_config::private_connection(&f.0.join("routes.sqlite3")).unwrap(),
+        )
+        .unwrap();
+        let mut stale = target.clone();
+        stale.conversation = None;
+        registry
+            .inventory(
+                stale.identity.backend.clone(),
+                &stale.identity.endpoint,
+                std::slice::from_ref(&stale),
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .terminal(&target.identity)
+                .unwrap()
+                .unwrap()
+                .conversation,
+            None
+        );
+        BindingPlan::prepare(&f.0, &path, 42, 7, std::slice::from_ref(&target))
+            .unwrap()
+            .apply(&f.0, std::slice::from_ref(&target))
+            .unwrap();
+        assert_eq!(
+            registry
+                .terminal(&target.identity)
+                .unwrap()
+                .unwrap()
+                .conversation,
+            target.conversation
+        );
+    }
     #[test]
     fn binding_requires_explicit_recipient_and_preserves_settings() {
         let (f, target, path) = binding_fixture();

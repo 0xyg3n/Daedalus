@@ -22,6 +22,7 @@ pub mod hook_effects;
 pub mod hook_install;
 pub mod hook_launch;
 pub mod hook_menu;
+pub mod hook_reload;
 pub mod hook_runtime;
 pub mod hook_uninstall;
 pub mod hooks;

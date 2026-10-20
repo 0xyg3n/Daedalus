@@ -121,6 +121,12 @@ pub trait Source {
     ) -> Result<super::herdr_hooks::Receipt> {
         Err("Herdr integration installation is unavailable".into())
     }
+    fn prepare_hook_reload(&mut self) -> Result<super::hook_reload::Plan> {
+        Err("Hook reload is unavailable".into())
+    }
+    fn apply_hook_reload(&mut self, _plan: super::hook_reload::Plan) -> Result<Value> {
+        Err("Hook reload is unavailable".into())
+    }
     fn managed_hooks(&mut self, _harness: &str) -> Result<Vec<super::hook_uninstall::Entry>> {
         Err("Managed hook removal is unavailable".into())
     }
@@ -136,6 +142,13 @@ pub trait Source {
     }
     fn rollback_hook_removal(&mut self, _path: &Path) -> Result<()> {
         Err("Managed hook rollback is unavailable".into())
+    }
+    fn default_hook_spec(
+        &mut self,
+        _config: &ControlConfig,
+        _pane: &Value,
+    ) -> Result<Option<super::hook_menu::Spec>> {
+        Ok(None)
     }
     fn prepare_hooks(
         &mut self,
@@ -1193,9 +1206,17 @@ impl Source for NativeSource {
         &mut self,
         request: super::telegram_admin::Request,
     ) -> Result<super::telegram_admin::Reply> {
-        if !matches!(&request, super::telegram_admin::Request::Inspect) {
-            self.require_configuration()?;
+        if matches!(&request, super::telegram_admin::Request::Inspect) {
+            let super::telegram_admin::Reply::Data(mut value) =
+                super::telegram_admin::execute(&self.directory, request)?
+            else {
+                return Err("Invalid Telegram settings response".into());
+            };
+            value["local_configured"] =
+                json!(layouts::read_private(&self.directory.join("control.json"))?.is_some());
+            return Ok(super::telegram_admin::Reply::Data(value));
         }
+        self.require_configuration()?;
         if matches!(&request, super::telegram_admin::Request::Apply { .. }) {
             self.require_configuration()?;
             super::control_audit::perform(
@@ -1289,6 +1310,18 @@ impl Source for NativeSource {
             },
         )
     }
+    fn prepare_hook_reload(&mut self) -> Result<super::hook_reload::Plan> {
+        super::hook_reload::prepare(
+            &self.directory,
+            super::hook_install::installed_launcher(
+                std::env::current_exe().map_err(|_| "Cannot locate Daedalus")?,
+            ),
+            &self.terminals,
+        )
+    }
+    fn apply_hook_reload(&mut self, plan: super::hook_reload::Plan) -> Result<Value> {
+        plan.apply(&self.directory)
+    }
     fn managed_hooks(&mut self, harness: &str) -> Result<Vec<super::hook_uninstall::Entry>> {
         self.require_configuration()?;
         super::hook_uninstall::list(&self.directory, harness)
@@ -1321,6 +1354,43 @@ impl Source for NativeSource {
             || super::hook_uninstall::rollback(path),
             |_| super::control_audit::State::Completed,
         )
+    }
+    fn default_hook_spec(
+        &mut self,
+        config: &ControlConfig,
+        pane: &Value,
+    ) -> Result<Option<super::hook_menu::Spec>> {
+        let store = super::session_actions::SessionStore {
+            directory: self.directory.clone(),
+        };
+        let (checkpoint, frozen) = store.freeze_live_source(
+            &self.terminals,
+            config,
+            &crate::platform::environment(),
+            pane,
+            "",
+        )?;
+        // Only use the profile observed on this exact process, never the backend's own account.
+        let profile = frozen["_daedalus_handoff_process"]["profile"]
+            .as_str()
+            .filter(|p| !p.is_empty());
+        let Some(profile) = profile else {
+            return Ok(None);
+        };
+        let filename = match checkpoint.harness.as_str() {
+            "codex" => "hooks.json",
+            "claude" => "settings.json",
+            _ => return Ok(None),
+        };
+        let profile = PathBuf::from(profile).join(filename);
+        crate::core::layouts::check_path(&profile)?;
+        Ok(Some(super::hook_menu::Spec {
+            pane: frozen,
+            profile,
+            transcript: None,
+            options: super::hook_runtime::Options::guided(),
+            goal_id: None,
+        }))
     }
     fn prepare_hooks(
         &mut self,

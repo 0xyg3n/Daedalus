@@ -278,6 +278,7 @@ pub fn available(id: &str) -> bool {
                 | "hooks.profile"
                 | "hooks.adapter"
                 | "hooks.all"
+                | "hooks.reload"
                 | "activity.events"
                 | "activity.discovery"
                 | "activity.health"
@@ -463,6 +464,9 @@ impl SessionMenu {
         }
         if action == "hooks.adapter" {
             return self.hooks.start(view, seq);
+        }
+        if action == "hooks.reload" {
+            return self.hooks.reload(source, seq);
         }
         if action == "hooks.all" {
             return self.hooks.start_all(view, seq);
@@ -2543,7 +2547,7 @@ mod tests {
     #[test]
     fn every_registered_static_action_has_a_native_dispatch_path() {
         let registry = registry::builtin();
-        assert_eq!(registry.actions.len(), 44);
+        assert_eq!(registry.actions.len(), 45);
         for action in &registry.actions {
             assert!(
                 action.id == "instances.saved" || available(&action.id),

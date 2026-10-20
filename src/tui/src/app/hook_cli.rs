@@ -173,8 +173,16 @@ pub fn run(
     let path = registration.ok_or("Missing --registration")?;
     layouts::check_path(&path)?;
     if family == "hook" && command == "run" {
-        hook_runtime::run_expected(reader, writer, &path, event_id, event_kind)
-            .map_err(|e| e.to_string())?;
+        let result = hook_runtime::run_expected(reader, writer, &path, event_id, event_kind);
+        // Hook stdout is the provider protocol. Keep a private, payload-free
+        // last-result record so the UI can explain a nonzero native exit.
+        if !result
+            .as_ref()
+            .is_ok_and(|outcome| outcome.event_id == "unbound-codex-session")
+        {
+            let _ = hook_runtime::record_run_result(&path, event_kind, result.as_ref().err());
+        }
+        result.map_err(|e| e.to_string())?;
         return Ok(());
     }
     if event_id.is_some() || event_kind.is_some() {
