@@ -135,7 +135,9 @@ impl Registration {
                 return Err(Error::Invalid("Duplicate hook lifecycle event"));
             }
         }
-        if self.scope.harness == Harness::Opencode {
+        if self.scope.harness == Harness::Opencode
+            || (self.scope.harness == Harness::Hermes && self.server_emitter.is_some())
+        {
             let server = self.server_emitter.as_ref().ok_or(Error::Invalid(
                 "OpenCode requires an explicit local server emitter",
             ))?;
@@ -150,7 +152,7 @@ impl Registration {
             layouts::check_path(&server.executable).map_err(|_| Error::PrivateState)?;
         } else if self.server_emitter.is_some() {
             return Err(Error::Invalid(
-                "Server emitter is only supported for OpenCode",
+                "Server emitter is only supported for OpenCode and Hermes",
             ));
         }
         if !matches!(
@@ -875,7 +877,10 @@ fn native_turn(harness: Harness, payload: &Value) -> Option<&str> {
             "turn_id"
         })
         .and_then(Value::as_str)
-        .filter(|id| identifier(id))
+        .filter(|id| {
+            identifier(id)
+                || (harness == Harness::Hermes && id.len() <= 384 && id.split(':').all(identifier))
+        })
 }
 fn native_prompt(harness: Harness, payload: &Value) -> Option<&str> {
     if harness == Harness::Hermes {
@@ -3202,13 +3207,13 @@ mod tests {
         observe(
             "prompt-0",
             EventKind::UserPromptSubmit,
-            json!({"extra":{"turn_id":"turn-0","user_message":"initial"}}),
+            json!({"extra":{"turn_id":"local-session:task-0:nonce-0","user_message":"initial"}}),
             None,
         );
         observe(
             "stop-0",
             EventKind::Stop,
-            json!({"extra":{"turn_id":"turn-0","assistant_response":"answer"}}),
+            json!({"extra":{"turn_id":"local-session:task-0:nonce-0","assistant_response":"answer"}}),
             Some(&Reply::Empty),
         );
         assert_eq!(readiness(&path, 1, 1000).unwrap(), Readiness::Idle);
@@ -3224,40 +3229,40 @@ mod tests {
         observe(
             "prompt-1",
             EventKind::UserPromptSubmit,
-            json!({"extra":{"turn_id":"turn-1","user_message":text}}),
+            json!({"extra":{"turn_id":"local-session:task-1:nonce-1","user_message":text}}),
             None,
         );
         observe(
             "late-stop",
             EventKind::Stop,
-            json!({"extra":{"turn_id":"turn-old","assistant_response":"answer"}}),
+            json!({"extra":{"turn_id":"local-session:task-old:nonce-old","assistant_response":"answer"}}),
             Some(&Reply::Empty),
         );
         assert_eq!(readiness(&path, 1, 1000).unwrap(), Readiness::Busy);
         observe(
             "stop-1",
             EventKind::Stop,
-            json!({"extra":{"turn_id":"turn-1","assistant_response":"answer"}}),
+            json!({"extra":{"turn_id":"local-session:task-1:nonce-1","assistant_response":"answer"}}),
             Some(&Reply::Empty),
         );
         assert_eq!(readiness(&path, 1, 1000).unwrap(), Readiness::Idle);
         observe(
             "prompt-2",
             EventKind::UserPromptSubmit,
-            json!({"extra":{"turn_id":"turn-2","user_message":"a new local user input"}}),
+            json!({"extra":{"turn_id":"local-session:task-2:nonce-2","user_message":"a new local user input"}}),
             None,
         );
         observe(
             "delayed-old-stop",
             EventKind::Stop,
-            json!({"extra":{"turn_id":"turn-1","assistant_response":"answer"}}),
+            json!({"extra":{"turn_id":"local-session:task-1:nonce-1","assistant_response":"answer"}}),
             Some(&Reply::Empty),
         );
         assert_eq!(readiness(&path, 1, 1000).unwrap(), Readiness::Busy);
         observe(
             "stop-2",
             EventKind::Stop,
-            json!({"extra":{"turn_id":"turn-2","assistant_response":"answer"}}),
+            json!({"extra":{"turn_id":"local-session:task-2:nonce-2","assistant_response":"answer"}}),
             Some(&Reply::Empty),
         );
         assert_eq!(readiness(&path, 1, 1000).unwrap(), Readiness::Idle);

@@ -63,7 +63,81 @@ pub fn matches_registration(registration: &super::hook_runtime::Registration) ->
     let root = harnesses::profile_directory(&tool, &environment, &profiles)?;
     let fingerprint =
         serde_json::json!({"pid":process.pid.to_string(),"start":process.start_ticks.to_string()});
-    Ok(live(&root, &fingerprint)?.is_some_and(|(id, _)| id == registration.scope.conversation))
+    let Some((id, profile)) = live(&root, &fingerprint)? else {
+        return Ok(false);
+    };
+    if id != registration.scope.conversation {
+        return Ok(false);
+    }
+    let current = gateway(&profile, std::path::Path::new("unused"))?;
+    Ok(current == registration.server_emitter)
+}
+
+fn gateway_pid(bytes: &[u8], creation_time: u64) -> Result<u32> {
+    if bytes.len() > 1_048_576 {
+        return Err("Hermes gateway state exceeds limit".into());
+    }
+    let state: Value = serde_json::from_slice(bytes).map_err(|_| "Invalid Hermes gateway state")?;
+    let pid = state["pid"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .ok_or("Missing Hermes gateway PID")?;
+    let unix = creation_time
+        .checked_sub(116_444_736_000_000_000)
+        .ok_or("Invalid Hermes gateway birth time")?;
+    let centiseconds = (unix as f64 / 100_000.0).round() as u64;
+    if state["kind"] != "hermes-gateway"
+        || state["gateway_state"] != "running"
+        || state["start_time"].as_u64() != Some(centiseconds)
+    {
+        return Err("Hermes gateway process changed or is not running".into());
+    }
+    Ok(pid)
+}
+
+/// The profile's native daemon record binds the hook emitter separately from
+/// the frontend. Never infer a shared Python process from its name alone.
+#[cfg(windows)]
+pub fn gateway(
+    profile: &std::path::Path,
+    proc_root: &std::path::Path,
+) -> Result<Option<super::hook_runtime::ServerEmitter>> {
+    use crate::{
+        app::{hook_install, hook_runtime},
+        platform,
+    };
+    let path = profile.join("gateway_state.json");
+    let Some(bytes) = hook_install::read_profile(&path)? else {
+        return Ok(None);
+    };
+    let state: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid Hermes gateway state")?;
+    let pid = state["pid"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or("Missing Hermes gateway PID")?;
+    let process =
+        platform::process_identity(pid).map_err(|_| "Hermes gateway process disappeared")?;
+    if process.owner != platform::current_identity().map_err(|e| e.to_string())?
+        || gateway_pid(&bytes, process.creation_time)? != pid
+    {
+        return Err("Hermes gateway identity changed".into());
+    }
+    let pin = hook_runtime::capture_server_emitter(
+        hook_runtime::ProcessIdentity {
+            pid,
+            start_ticks: process.creation_time,
+        },
+        &process.executable,
+        proc_root,
+    )
+    .map_err(|e| e.to_string())?;
+    let again = hook_install::read_profile(&path)?.ok_or("Hermes gateway state disappeared")?;
+    if gateway_pid(&again, process.creation_time)? != pid {
+        return Err("Hermes gateway changed during discovery".into());
+    }
+    Ok(Some(pin))
 }
 
 #[cfg(windows)]
@@ -153,6 +227,28 @@ pub fn live(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn gateway_requires_native_kind_running_state_and_exact_process_birth() {
+        let ticks = 116_444_736_000_000_000 + 1_792_000_000 * 10_000_000;
+        let state = json!({"pid":42,"kind":"hermes-gateway","gateway_state":"running","start_time":179200000000_u64});
+        assert_eq!(
+            gateway_pid(&serde_json::to_vec(&state).unwrap(), ticks).unwrap(),
+            42
+        );
+        for changed in [
+            json!({"pid":0}),
+            json!({"kind":"other"}),
+            json!({"gateway_state":"stopped"}),
+            json!({"start_time":179199999999_u64}),
+        ] {
+            let mut invalid = state.clone();
+            for (k, v) in changed.as_object().unwrap() {
+                invalid[k] = v.clone();
+            }
+            assert!(gateway_pid(&serde_json::to_vec(&invalid).unwrap(), ticks).is_err());
+        }
+        assert!(gateway_pid(&serde_json::to_vec(&state).unwrap(), ticks + 100_000).is_err());
+    }
     #[test]
     fn leases_require_exact_live_process_and_reject_ambiguity() {
         let processes = BTreeMap::from([(42, 1792000000.123456)]);

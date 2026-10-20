@@ -199,3 +199,5 @@ best effort: unsupported reactions, rate limits and connectivity errors do not
 block agent input or replies. Expired feedback is dropped and reactions are not
 replayed on restart. See Telegram's [chat actions](https://core.telegram.org/bots/api#sendchataction)
 and [message reactions](https://core.telegram.org/bots/api#setmessagereaction).
+
+Windows Hermes gateway sessions bind the foreground terminal and the native profile gateway separately. Enrollment pins the daemon executable, owner and process birth time; delivery checks the current native lease and gateway record again. A stale lease is not proof of the selected conversation. Reopen the exact canonical session with Hermes `--resume` before reconnecting its hooks when the native frontend still advertises a provisional ID.

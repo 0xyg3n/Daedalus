@@ -141,6 +141,18 @@ pub fn preview_live(
                 Err(error) => return Err(error),
             },
         )
+    } else if cfg!(windows) && harness == Harness::Hermes {
+        #[cfg(windows)]
+        {
+            super::hermes_sessions::gateway(
+                &std::path::PathBuf::from(&checkpoint.profile),
+                &terminals.proc_root,
+            )?
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     } else {
         None
     };
