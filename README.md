@@ -214,7 +214,7 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, the Start Menu shortcut opens Daedalus in a console; Windows Terminal is recommended for the best display. No additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
-The Windows preview is cross-compiled; platform-independent tests have also run under Wine. Actual Windows Terminal/ConPTY, NTFS permissions and live backend/provider behavior still need validation on Windows. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
+The Windows preview is cross-compiled and tested on Windows 11: library and TUI tests, native ConPTY shell control, NTFS permissions, installer fixtures and an isolated Herdr echo flow. Live provider login and message round trips require separate validation. Hook support differs by platform, guided launch with hooks is unavailable on Windows, and Herdr duplicate attachment is unavailable there. See the [Windows boundaries](docs/HARNESSES.md#native-windows-boundaries) and [local Windows checks](docs/INSTALL.md#windows-local-validation). macOS and native Windows ARM64 are not currently validated or distributed.
 
 ## Install
 
