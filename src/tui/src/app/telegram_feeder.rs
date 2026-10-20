@@ -53,9 +53,18 @@ impl NativeFeeder {
 impl Feeder for NativeFeeder {
     fn live(&mut self) -> Result<Vec<TerminalId>> {
         let registered = self.registrations()?;
+        // Retired process bindings remain available for audit after a relaunch.
+        // Only currently verified input owners can make a terminal ambiguous.
+        let verified = registered
+            .iter()
+            .filter(|(_, r)| {
+                r.harness_process.is_some()
+                    && hook_runtime::verify_live_session(r, &self.terminals).is_ok()
+            })
+            .collect::<Vec<_>>();
         let mut live = Vec::new();
-        for (_, r) in &registered {
-            if registered
+        for (_, r) in &verified {
+            if verified
                 .iter()
                 .filter(|(_, other)| other.scope.terminal == r.scope.terminal)
                 .count()
@@ -63,11 +72,7 @@ impl Feeder for NativeFeeder {
             {
                 continue;
             }
-            if r.harness_process.is_some()
-                && hook_runtime::verify_live_session(r, &self.terminals).is_ok()
-            {
-                live.push(r.scope.terminal.clone());
-            }
+            live.push(r.scope.terminal.clone());
         }
         Ok(live)
     }
@@ -79,20 +84,20 @@ impl Feeder for NativeFeeder {
         let candidates = registrations
             .iter()
             .filter(|(_, r)| r.scope.terminal == frame.terminal)
+            .filter_map(|(path, r)| {
+                r.harness_process.as_ref()?;
+                hook_runtime::verify_live_session(r, &self.terminals)
+                    .ok()
+                    .map(|actual| (path, r, actual))
+            })
             .collect::<Vec<_>>();
         if candidates.len() != 1 {
             return Ok(Submission::Unavailable);
         }
-        let (path, r) = candidates[0];
-        if frame.conversation.as_deref() != Some(r.scope.conversation.as_str())
-            || r.harness_process.is_none()
-        {
+        let (path, r, actual) = &candidates[0];
+        if frame.conversation.as_deref() != Some(r.scope.conversation.as_str()) {
             return Ok(Submission::Unavailable);
         }
-        let actual = match hook_runtime::verify_live_session(r, &self.terminals) {
-            Ok(a) => a,
-            Err(_) => return Ok(Submission::Unavailable),
-        };
         let snapshot = match hook_runtime::ready_snapshot(path, &self.terminals.proc_root) {
             Ok(s) => s,
             Err(_) => return Ok(Submission::Unavailable),
@@ -124,7 +129,7 @@ impl Feeder for NativeFeeder {
         if hook_runtime::verify_live_session(r, &self.terminals).is_err() {
             return Ok(Submission::Unavailable);
         }
-        match self.terminals.action(&actual, Action::Send(text)) {
+        match self.terminals.action(actual, Action::Send(text)) {
             Ok(receipt)
                 if matches!(
                     receipt.state,
@@ -444,6 +449,46 @@ mod tests {
             "42 (reused) S 0",
         )
         .unwrap();
+        assert_eq!(f.feeder.submit(&f.frame).unwrap(), Submission::Unavailable);
+        assert!(!f.directory.join("sent").exists());
+    }
+    #[test]
+    fn retired_process_binding_does_not_block_relaunched_terminal() {
+        let mut f = Fixture::new();
+        let mut retired = f.registration.clone();
+        retired.id = "retired".into();
+        retired.scope.conversation = "previous-session".into();
+        // The PID has been reused: the old process incarnation must not count
+        // as a second live registration or authorize the old conversation.
+        retired.harness_process.as_mut().unwrap().start_ticks += 1;
+        let retired_path = hook_runtime::install(&retired).unwrap();
+        f.feeder.registrations.insert(0, retired_path.clone());
+        f.event("Stop", "ready", None);
+        assert_eq!(f.feeder.live().unwrap(), vec![f.frame.terminal.clone()]);
+        let mut old_frame = f.frame.clone();
+        old_frame.conversation = Some(retired.scope.conversation);
+        assert_eq!(
+            f.feeder.submit(&old_frame).unwrap(),
+            Submission::Unavailable
+        );
+        assert!(!f.directory.join("sent").exists());
+        assert!(matches!(
+            f.feeder.submit(&f.frame).unwrap(),
+            Submission::Accepted(_)
+        ));
+        assert!(retired_path.exists());
+    }
+    #[test]
+    fn two_live_conversation_bindings_still_require_review() {
+        let mut f = Fixture::new();
+        let mut other = f.registration.clone();
+        other.id = "other-live".into();
+        other.scope.conversation = "other-session".into();
+        f.feeder
+            .registrations
+            .push(hook_runtime::install(&other).unwrap());
+        f.event("Stop", "ready", None);
+        assert!(f.feeder.live().unwrap().is_empty());
         assert_eq!(f.feeder.submit(&f.frame).unwrap(), Submission::Unavailable);
         assert!(!f.directory.join("sent").exists());
     }

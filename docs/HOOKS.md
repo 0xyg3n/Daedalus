@@ -18,6 +18,9 @@ that exact terminal. It rejects stale or ambiguous servers and changed policy.
 Rebinding invalidates previous readiness and preserves uncertain input records;
 it does not replay messages or claim that a queued message was delivered.
 A newly selected conversation needs its own reviewed recipient binding.
+Retired process registrations remain in the local audit history. They do not
+block Telegram input to the verified replacement process; multiple live
+registrations for the same terminal still require review.
 
 ## Features
 
