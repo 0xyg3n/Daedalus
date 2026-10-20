@@ -5812,9 +5812,16 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
             };
             let pad = w.saturating_sub(width(&shown) + 2);
             let caption = if dialog.secret {
-                "Hidden · saved privately outside the repository"
+                if dialog.input.is_empty() {
+                    "Empty · paste or type your token, then Enter".to_owned()
+                } else {
+                    format!(
+                        "{} characters entered · hidden · Enter to continue",
+                        dialog.input.chars().count()
+                    )
+                }
             } else {
-                "Paste or type, then press Enter"
+                "Paste or type, then press Enter".to_owned()
             };
             f.render_widget(
                 Paragraph::new(vec![
@@ -6159,6 +6166,10 @@ mod tests {
         let rendered = text(&render(&mut ui, 100, 30));
         assert!(!rendered.contains("private-test-value"));
         assert!(rendered.contains("•"));
+        assert!(rendered.contains("18 characters entered"));
+        ui.dialog.as_mut().unwrap().input.clear();
+        let empty = text(&render(&mut ui, 100, 30));
+        assert!(empty.contains("Empty · paste or type"));
     }
     #[test]
     fn no_color_uses_attributes_not_colors() {

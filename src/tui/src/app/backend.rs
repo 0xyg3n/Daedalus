@@ -796,6 +796,11 @@ impl<S: Source> Backend<S> {
             .get("op")
             .and_then(Value::as_str)
             .ok_or("Missing operation")?;
+        // Layout persistence is independent of the outstanding dialog reply.
+        if op == "view" {
+            self.observe_view(request.get("view").ok_or("Missing view")?, false)?;
+            return Ok((vec![], false));
+        }
         if self.menu.pending() {
             if op == "quit" {
                 self.menu.cancel();
@@ -824,10 +829,6 @@ impl<S: Source> Backend<S> {
         match op {
             "refresh" => Ok((vec![self.refresh()?], false)),
             "previews" => Ok((vec![self.preview(request)?], false)),
-            "view" => {
-                self.observe_view(request.get("view").ok_or("Missing view")?, false)?;
-                Ok((vec![], false))
-            }
             "quit" => {
                 if let Some(view) = request.get("view") {
                     self.observe_view(view, true)?;
@@ -2452,6 +2453,23 @@ mod tests {
         assert_eq!(first["workspace"]["apply"]["mode"], "tree");
         assert!(backend.state().unwrap().get("catalog").is_none());
         assert_eq!(first["overview"]["connections"][0]["state"], "unknown");
+    }
+    #[test]
+    fn layout_persistence_does_not_consume_an_outstanding_setup_dialog() {
+        let mut backend = backend();
+        backend.refresh().unwrap();
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"action","page":0,"action":"setup"}))
+            .unwrap();
+        let id = frames[0]["id"].clone();
+        let (frames, _) = backend.handle(&json!({"version":2,"op":"view","view":{"mode":"tiles","selected":"","motion":"off"}})).unwrap();
+        assert!(frames.is_empty());
+        assert!(backend.menu.pending());
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"reply","id":id,"value":null}))
+            .unwrap();
+        assert_eq!(frames[0]["kind"], "state");
+        assert!(!backend.menu.pending());
     }
     #[test]
     fn catalog_dialog_requires_matching_reply_and_never_executes_reference() {

@@ -43,7 +43,9 @@ numeric user ID and the chat ID. The bot ID is the portion before the colon in t
 a minus sign. Invalid identity entries can be corrected without restarting setup.
 
 After each saved step, close its summary to continue or choose **Finish later**.
-The full token goes into a masked field and is stored privately. Saving it validates
+The full token goes into a masked field and is stored privately. Paste works even
+with an attached terminal behind the form; a character count confirms entry without
+revealing the token. Empty input keeps the form open for correction. Saving it validates
 its format and bot ID; it does not verify Telegram connectivity. Starting the service
 requires a separate review. Choose a destination terminal and connect its installed
 reply hook, then start a conversation with your bot. Check connection status before

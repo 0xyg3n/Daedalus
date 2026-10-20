@@ -630,6 +630,8 @@ fn main() -> io::Result<()> {
             }
             // Panel sizes need no answer, so they never wait behind an action.
             if ui.dragging.is_none()
+                && ui.dialog.is_none()
+                && !ui.busy
                 && ui
                     .sizes_changed
                     .is_some_and(|at| at.elapsed() > SIZES_SETTLE)
@@ -838,6 +840,18 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
         return Step::Continue;
     }
 
+    // A form owns paste even when a controlled terminal remains behind it.
+    if let Some(dialog) = ui.dialog.as_mut() {
+        if dialog.mode == "input" {
+            let clean: String = text
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(8192)
+                .collect();
+            dialog.input.push_str(&clean);
+        }
+        return Step::Continue;
+    }
     if ui.dialog.is_none()
         && ui.options.is_none()
         && ui.page == WORKSPACES
@@ -859,11 +873,7 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
         .filter(|c| !c.is_control())
         .take(8192)
         .collect();
-    if let Some(d) = ui.dialog.as_mut() {
-        if d.mode == "input" {
-            d.input.push_str(&clean);
-        }
-    } else if ui.searching {
+    if ui.searching {
         ui.filter.push_str(&clean);
         ui.select(0, true);
         ui.select_tile(0);
@@ -3576,6 +3586,14 @@ mod cli_tests {
             assert!(ui.status.contains("paused"));
             paste(&mut ui, "do not submit\n");
             assert!(ui.status.contains("Paste paused"));
+            ui.dialog = Some(Dialog {
+                mode: "input".into(),
+                secret: true,
+                ..Dialog::default()
+            });
+            paste(&mut ui, "123:fixture_value\r\n");
+            assert_eq!(ui.dialog.as_ref().unwrap().input, "123:fixture_value");
+            assert!(ui.embed.is_some());
             if layout.grid() {
                 // A hidden input surface must not trap ordinary navigation.
                 key_event(&mut ui, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));

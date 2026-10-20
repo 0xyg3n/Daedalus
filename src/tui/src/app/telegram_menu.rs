@@ -110,6 +110,7 @@ struct Pending {
     mode: &'static str,
     choices: Vec<String>,
     stage: Stage,
+    frame: Value,
 }
 #[derive(Default)]
 pub struct Menu {
@@ -174,6 +175,7 @@ impl Menu {
             id: *seq,
             mode,
             stage,
+            frame: frame.clone(),
         });
         Ok(Outcome {
             frames: vec![frame],
@@ -323,10 +325,29 @@ impl Menu {
         let value = request.get("value").ok_or("Missing Telegram reply")?;
         if !value.is_null() {
             let text = value.as_str().ok_or("Invalid Telegram reply")?;
+            if pending.mode == "input"
+                && (text.is_empty() || text.len() > 1024 || text.chars().any(char::is_control))
+            {
+                let mut frame = pending.frame.clone();
+                let hint = if text.is_empty() {
+                    "This field is empty. Paste or type a value, then press Enter."
+                } else {
+                    "Use at most 1024 characters without control characters."
+                };
+                frame["description"] = json!(format!(
+                    "{hint}\n\n{}",
+                    frame["description"].as_str().unwrap_or("")
+                ));
+                *seq = seq.checked_add(1).ok_or("Dialog sequence exhausted")?;
+                frame["id"] = json!(*seq);
+                self.pending.as_mut().unwrap().id = *seq;
+                return Ok(Outcome {
+                    frames: vec![frame],
+                    ..Outcome::default()
+                });
+            }
             if (pending.mode == "output" && text != "close")
                 || (pending.mode == "choose" && !pending.choices.iter().any(|v| v == text))
-                || (pending.mode == "input"
-                    && (text.is_empty() || text.len() > 1024 || text.chars().any(char::is_control)))
             {
                 return Err("Invalid Telegram reply".into());
             }
@@ -1242,6 +1263,19 @@ mod tests {
         menu.cancel();
         menu.start("telegram.token", &mut local, &config(), &mut seq)
             .unwrap();
+        let previous = seq;
+        let empty = answer(&mut menu, &mut local, &mut seq, json!(""));
+        assert_eq!(empty.frames[0]["secret"], true);
+        assert!(
+            empty.frames[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("field is empty")
+        );
+        assert!(seq > previous);
+        let too_long = answer(&mut menu, &mut local, &mut seq, json!("x".repeat(1025)));
+        assert_eq!(too_long.frames[0]["title"], "Telegram bot token");
+        assert!(!format!("{too_long:?}").contains(&"x".repeat(1025)));
         let rejected = answer(&mut menu, &mut local, &mut seq, json!("999:fixture_secret"));
         assert_eq!(rejected.frames[0]["secret"], true);
         assert!(!format!("{rejected:?}").contains("fixture_secret"));
