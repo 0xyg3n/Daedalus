@@ -954,6 +954,16 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
         }
         KeyCode::PageDown => dialog.scroll = dialog.scroll.saturating_add(10),
         KeyCode::PageUp => dialog.scroll = dialog.scroll.saturating_sub(10),
+        KeyCode::Home if dialog.mode == "choose" => {
+            dialog.selected = 0;
+            dialog.moved = Some(Instant::now());
+        }
+        KeyCode::End if dialog.mode == "choose" => {
+            dialog.selected = dialog.options.len().saturating_sub(1);
+            dialog.moved = Some(Instant::now());
+        }
+        KeyCode::Home if dialog.mode != "input" => dialog.scroll = 0,
+        KeyCode::End if dialog.mode != "input" => dialog.scroll = u16::MAX,
         KeyCode::Backspace if dialog.mode == "input" => {
             dialog.input.pop();
         }
@@ -1260,12 +1270,12 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
         KeyCode::Tab => {
             leave_focus(ui);
-            ui.navigate((ui.page + 1) % pages);
+            ui.navigate(ui.adjacent_page(true));
             return Step::Continue;
         }
         KeyCode::BackTab => {
             leave_focus(ui);
-            ui.navigate((ui.page + pages - 1) % pages);
+            ui.navigate(ui.adjacent_page(false));
             return Step::Continue;
         }
         // Number keys follow the sidebar; 0 is the tenth page.
@@ -2695,6 +2705,22 @@ mod cli_tests {
         assert!(is_action(
             &json!({"op":"action","page":OVERVIEW,"action":"setup"})
         ));
+    }
+    #[test]
+    fn tab_follows_sidebar_groups_and_number_keys_keep_their_pages() {
+        let mut ui = Ui::default();
+        ui.navigate(3);
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.page, 5);
+        press(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.page, 4);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.page, 5);
+        press(&mut ui, KeyCode::Char('5'));
+        assert_eq!(ui.page, 4);
+        ui.navigate(0);
+        press(&mut ui, KeyCode::BackTab);
+        assert_eq!(ui.page, COMMANDS);
     }
     #[test]
     fn resize_keys_move_borders_within_limits() {

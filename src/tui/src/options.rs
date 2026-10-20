@@ -92,6 +92,43 @@ impl Item {
             Item::Settings => "options",
         }
     }
+    /// Explain the selected preference without crowding every row.
+    pub fn description(self) -> &'static str {
+        match self {
+            Item::Order => "Choose activity order or keep terminals in their workspace positions.",
+            Item::Details => "Show facts and actions beside the selected entry in Tree view.",
+            Item::Screen => {
+                "Show a read-only terminal preview inside Details. Adjust its share with + and -."
+            }
+            Item::Tiles => "Change the space allocated to terminal previews in Tiles view.",
+            Item::Sidebar => "Keep section names visible or fold the sidebar into an icon rail.",
+            Item::Pinned => "Show your pinned terminal shortcuts in the sidebar.",
+            Item::Recent => "Show recently visited terminals for quick switching.",
+            Item::Badges => "Show section counts beside navigation labels.",
+            Item::Vitals => "Show terminal and connection totals in the sidebar.",
+            Item::Look => {
+                "Choose the dashboard background. Terminal previews keep their own colors."
+            }
+            Item::Saver => {
+                "Show the artwork after the idle interval (15 seconds by default). Any key returns to work."
+            }
+            Item::Motion => {
+                "Enable transition effects. Your system reduced-motion preference takes priority."
+            }
+            Item::Keys => {
+                "Show contextual shortcuts along the bottom. F1 always opens searchable bindings."
+            }
+            Item::Reset => {
+                "Restore panel proportions without changing accounts, routes or terminal sessions."
+            }
+            Item::Updates => {
+                "Review the latest release before downloading. Ctrl+U opens the same update check."
+            }
+            Item::Settings => {
+                "Open persistent configuration for Telegram, detected harnesses, accounts and hooks."
+            }
+        }
+    }
     /// The key that makes the same change outside Options, if any.
     pub fn key(self) -> &'static str {
         match self {
@@ -145,7 +182,9 @@ pub fn value(ui: &Ui, item: Item) -> String {
         Item::Tiles => format!("{}%", ui.sizes.get(Split::Tiles)),
         Item::Sidebar if ui.sizes.sidebar == 0 => "Icons only".into(),
         Item::Sidebar => format!("Open · {} columns", ui.sizes.sidebar),
-        Item::Look if !ui.theme.backdrop => "Plain · needs true color".into(),
+        Item::Look if !ui.theme.color || !ui.theme.truecolor => "Plain · needs true color".into(),
+        Item::Look if ui.theme.ascii => "Plain · Unicode artwork disabled".into(),
+        Item::Look if !ui.theme.backdrop => "Plain · background disabled".into(),
         Item::Look => ui.look.describe().into(),
         Item::Saver if !ui.saver.enabled => "Off".into(),
         Item::Saver => "On".into(),

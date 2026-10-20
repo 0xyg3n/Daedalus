@@ -5,7 +5,8 @@ use daedalus_tui::app::update::{self, InstallReceipt, UpdateReview, UpdateStatus
 use ratatui::{
     Frame,
     layout::Rect,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 #[cfg(any(windows, test))]
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ pub struct Controller {
     pending_prompt: bool,
     update_selected: bool,
     installing: bool,
+    body_scroll: u16,
     #[cfg(any(windows, test))]
     pending_installer: Option<PathBuf>,
     later_hit: Rect,
@@ -59,6 +61,7 @@ impl Controller {
             pending_prompt: false,
             update_selected: false,
             installing: false,
+            body_scroll: 0,
             #[cfg(any(windows, test))]
             pending_installer: None,
             later_hit: Rect::default(),
@@ -77,6 +80,7 @@ impl Controller {
         self.review = None;
         self.banner = None;
         self.notice = "Checking for updates…".into();
+        self.body_scroll = 0;
         let (tx, rx) = mpsc::channel();
         self.worker = Some(rx);
         std::thread::spawn(move || {
@@ -274,6 +278,12 @@ impl Controller {
             KeyCode::Esc | KeyCode::Char('n' | 'N') => self.dismiss(),
             KeyCode::Char('y' | 'Y') => self.install(),
             KeyCode::Char('r' | 'R') => self.start_check(update::check),
+            KeyCode::Up => self.body_scroll = self.body_scroll.saturating_sub(1),
+            KeyCode::Down => self.body_scroll = self.body_scroll.saturating_add(1),
+            KeyCode::PageUp => self.body_scroll = self.body_scroll.saturating_sub(8),
+            KeyCode::PageDown => self.body_scroll = self.body_scroll.saturating_add(8),
+            KeyCode::Home => self.body_scroll = 0,
+            KeyCode::End => self.body_scroll = u16::MAX,
             KeyCode::Left | KeyCode::Right | KeyCode::Tab if self.review.is_some() => {
                 self.update_selected = !self.update_selected;
             }
@@ -314,10 +324,12 @@ impl Controller {
                 } else if let Some(review) = &self.review {
                     format!("Update {} available · Ctrl+U", review.version)
                 } else {
-                    format!(
-                        "{} · Ctrl+U details",
-                        self.banner.as_deref().unwrap_or_default()
-                    )
+                    let banner = self.banner.as_deref().unwrap_or_default();
+                    if banner.contains("Ctrl+U") {
+                        banner.to_owned()
+                    } else {
+                        format!("{banner} · Ctrl+U details")
+                    }
                 };
                 let toast = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
                 frame.render_widget(Paragraph::new(text).style(theme.fg(Tone::Accent)), toast);
@@ -325,7 +337,7 @@ impl Controller {
             return;
         }
         let width = area.width.min(76);
-        let height = area.height.min(15);
+        let height = area.height.min(18);
         let popup = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -347,11 +359,11 @@ impl Controller {
         frame.render_widget(block, popup);
         let detail = match &self.review {
             Some(review) => format!(
-                "{}\n\nVersion: {} · {}\nDownload: {} bytes\nInstall: {}\n\nExisting binary is retained. Update only with your approval.",
+                "{}\n\nRelease: {}\nPlatform: {}\nDownload: {}\nInstall: {}\n\nYour terminals stay open. Installation starts only after you choose Update.",
                 self.notice,
                 review.version,
                 review.platform,
-                review.size,
+                download_size(review.size),
                 if review.platform.ends_with("windows") {
                     "Current-user Windows installation"
                 } else {
@@ -360,18 +372,58 @@ impl Controller {
             ),
             None => self.notice.clone(),
         };
+        let version = format!(" Installed {}", env!("CARGO_PKG_VERSION"));
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                crate::view::fit(&version, inner.width as usize, theme),
+                theme.fg(Tone::Muted),
+            )),
+            Rect::new(inner.x, inner.y, inner.width, 1.min(inner.height)),
+        );
         let body = Rect::new(
             inner.x,
-            inner.y,
+            (inner.y + 2).min(inner.bottom()),
             inner.width,
-            inner.height.saturating_sub(2),
+            inner.height.saturating_sub(4),
         );
-        frame.render_widget(
-            Paragraph::new(detail)
-                .wrap(Wrap { trim: true })
-                .style(theme.fg(Tone::Text)),
-            body,
-        );
+        let lines = crate::view::wrap(&detail, body.width.saturating_sub(2) as usize)
+            .into_iter()
+            .map(|line| {
+                if let Some((label, value)) = line.split_once(": ")
+                    && matches!(label, "Release" | "Platform" | "Download" | "Install")
+                {
+                    Line::from(vec![
+                        Span::styled(format!(" {label}: "), theme.fg(Tone::Info)),
+                        Span::styled(value.to_owned(), theme.fg(Tone::Text)),
+                    ])
+                } else {
+                    Line::from(Span::styled(format!(" {line}"), theme.fg(Tone::Text)))
+                }
+            })
+            .collect::<Vec<_>>();
+        let most = lines
+            .len()
+            .saturating_sub(body.height as usize)
+            .min(u16::MAX as usize) as u16;
+        self.body_scroll = self.body_scroll.min(most);
+        frame.render_widget(Paragraph::new(lines).scroll((self.body_scroll, 0)), body);
+        if most > 0 && inner.height >= 3 {
+            let hint = format!(
+                " {} Scroll details · {}–{} / {}",
+                theme.glyph("↑↓", "Up/Dn"),
+                self.body_scroll + 1,
+                (self.body_scroll as usize + body.height as usize)
+                    .min(most as usize + body.height as usize),
+                most as usize + body.height as usize
+            );
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    crate::view::fit(&hint, inner.width as usize, theme),
+                    theme.fg(Tone::Muted),
+                )),
+                Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
+            );
+        }
         if inner.height >= 2 {
             self.later_hit = Rect::new(inner.x, inner.bottom() - 1, inner.width.min(17), 1);
             let later = if self.exiting && !self.installing {
@@ -409,12 +461,65 @@ impl Controller {
     }
 }
 
+fn download_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+    #[test]
+    fn long_update_errors_can_be_read_to_the_end_without_starting_an_update() {
+        let mut ui = Controller::new(false);
+        ui.show();
+        ui.notice = format!(
+            "{}END-OF-DETAILS",
+            "A detailed diagnostic line. ".repeat(80)
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(44, 14)).unwrap();
+        let render =
+            |ui: &mut Controller,
+             terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+                terminal
+                    .draw(|f| ui.draw(f, f.area(), &Theme::default()))
+                    .unwrap();
+                terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            };
+        let first = render(&mut ui, &mut terminal);
+        assert!(first.contains("Installed"));
+        assert!(first.contains("Scroll details"));
+        assert!(!first.contains("END-OF-DETAILS"));
+        ui.key(key(KeyCode::End));
+        let last = render(&mut ui, &mut terminal);
+        assert!(last.contains("END-OF-DETAILS"));
+        assert!(!ui.installing);
+        ui.key(key(KeyCode::Home));
+        assert_eq!(ui.body_scroll, 0);
+        assert_eq!(download_size(1024 * 1024 + 512 * 1024), "1.5 MiB");
+    }
+    #[test]
+    fn failed_update_toast_has_one_details_shortcut() {
+        let mut ui = Controller::new(false);
+        ui.complete(Completion::Check(Err("offline".into())));
+        let text = screen(&mut ui);
+        assert_eq!(text.matches("Ctrl+U").count(), 1);
     }
     fn available() -> Completion {
         Completion::Check(Ok(serde_json::from_value(serde_json::json!({
@@ -540,7 +645,7 @@ mod tests {
         assert!(screen(&mut ui).contains("Checking for updates"));
         drain(&mut ui, true);
         let rendered = screen(&mut ui);
-        assert!(rendered.contains("Version: 1.1.0"));
+        assert!(rendered.contains("Release: 1.1.0"));
         assert!(rendered.contains("Update [Y]"));
         assert!(!ui.update_selected);
         ui.key(key(KeyCode::Enter)); // Default is Later, never installs.

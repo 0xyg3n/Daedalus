@@ -363,6 +363,7 @@ pub fn icon(name: &str) -> (&'static str, &'static str) {
         "hooks" => ("↯", "&"),
         "armonia" => ("⊛", "*"),
         "help" | "guide" => ("?", "?"),
+        "info" => ("ⓘ", "i"),
         "commands" => ("⌘", ">"),
         "setup" => ("✧", "*"),
         "add" => ("⊕", "+"),

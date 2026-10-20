@@ -20,8 +20,8 @@
 
 | <img src="assets/icons/linux.png" height="42" alt="Linux"> Linux | <img src="assets/icons/windows.svg" height="42" alt="Windows"> Windows |
 | :---: | :---: |
-| [**Download for Linux**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/daedalus-0.2.0-beta.31-x86_64-linux) | [**Download Windows installer**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/Daedalus-0.2.0-beta.31-setup.exe) |
-| x86-64 executable · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/daedalus-0.2.0-beta.31-x86_64-linux.sha256) | x64 setup · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/Daedalus-0.2.0-beta.31-setup.exe.sha256) |
+| [**Download for Linux**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.32/daedalus-0.2.0-beta.32-x86_64-linux) | [**Download Windows installer**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.32/Daedalus-0.2.0-beta.32-setup.exe) |
+| x86-64 executable · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.32/daedalus-0.2.0-beta.32-x86_64-linux.sha256) | x64 setup · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.32/Daedalus-0.2.0-beta.32-setup.exe.sha256) |
 
 [Release notes and all downloads](https://github.com/0xyg3n/Daedalus/releases).
 
@@ -58,8 +58,8 @@ setup file. It installs Daedalus and creates a Start Menu shortcut.
 then launch setup:
 
 ```sh
-chmod +x daedalus-0.2.0-beta.31-x86_64-linux
-./daedalus-0.2.0-beta.31-x86_64-linux setup
+chmod +x daedalus-0.2.0-beta.32-x86_64-linux
+./daedalus-0.2.0-beta.32-x86_64-linux setup
 ```
 
 To install from source on Linux:

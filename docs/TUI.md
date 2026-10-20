@@ -12,7 +12,8 @@ terminal it cannot identify exactly.
 | Connect | Telegram, Hooks |
 | System | Settings, Activity, Instances, Armonia (optional), Help |
 
-Tab or 0-9 switches pages, Ctrl+P searches every command, `?` shows the key bar and
+Tab follows these groups; Shift+Tab moves back. Number shortcuts keep the page
+shown beside each name. Ctrl+P searches every command, `?` shows the key bar and
 `q` quits. The Details panel explains the selected item. Help includes the
 [command reference](COMMANDS.md).
 
@@ -49,6 +50,15 @@ Press **F1** to search keyboard shortcuts by key, action or category (for exampl
 `Telegram`, `cube`, `resize` or `shell`). Arrow keys scroll the results; F1 or Esc
 closes the window. It also works while attached: typing in this search does not
 reach the terminal. **Ctrl+P** searches executable commands; **Ctrl+K** finds terminals.
+
+Shortcut descriptions wrap to the available width. Home/End moves to the first
+or last result. **Options** (`,`) explains the selected preference below its list;
+changes apply immediately. **Settings** holds connection and harness configuration.
+
+Forms keep pasted secrets hidden and show how many characters were entered.
+Enter continues to the next step; Esc cancels. Choice menus support Home/End.
+Long result dialogs scroll with arrows, PageUp/PageDown or Home/End and show
+their position when space permits. Empty results explain the next step.
 
 ## Workspaces
 
@@ -186,6 +196,8 @@ double-click to attach in place. Long lists keep the selection visible. Only tha
 screen is captured in this mode, reducing background terminal reads.
 
 **Ctrl+U** opens release details. While attached, use **Ctrl+]**, then **U**.
+The dialog shows the installed version and download size. Long details scroll
+with arrows, PageUp/PageDown or Home/End.
 Updates require explicit approval; the startup check can be disabled with
 `DAEDALUS_UPDATE_CHECK=0`. See [installation](INSTALL.md#update-and-removal).
 
@@ -223,7 +235,7 @@ Click a disclosure arrow to expand or collapse children; clicking the pane name
 watches that pane. Clicking an agent-session child watches its parent pane.
 Hierarchy connectors continue through the extra metadata lines.
 
-## Type without changing layouts (source builds from main)
+## Type without changing layouts
 
 In Cube, click a face once to select and attach it; click empty space outside the
 faces to detach without leaving Cube. Faces too small to type into refuse attachment.

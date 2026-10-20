@@ -1745,6 +1745,43 @@ impl Ui {
             .filter(|r| r.kind != Kind::Header)
             .cloned()
     }
+    /// Group navigation without changing the stable numeric page shortcuts.
+    pub fn navigation_order(&self) -> Vec<usize> {
+        let mut pages: Vec<_> = (0..self.page_count()).collect();
+        pages.sort_by_key(|&page| {
+            let category = self
+                .snapshot
+                .sections
+                .get(page)
+                .map(|s| s.category.as_str());
+            match category {
+                Some("Work") => 0,
+                Some("Connect") => 1,
+                Some("System") => 2,
+                Some("Find") => 3,
+                Some(_) => 4,
+                None => match page {
+                    0..=2 => 0,
+                    3 | 5 => 1,
+                    4 | 6..=9 => 2,
+                    10 => 3,
+                    _ => 4,
+                },
+            }
+        });
+        pages
+    }
+    pub fn adjacent_page(&self, forward: bool) -> usize {
+        let pages = self.navigation_order();
+        let Some(at) = pages.iter().position(|&page| page == self.page) else {
+            return OVERVIEW;
+        };
+        pages[if forward {
+            (at + 1) % pages.len()
+        } else {
+            (at + pages.len() - 1) % pages.len()
+        }]
+    }
     pub fn navigate(&mut self, page: usize) {
         if page != self.page {
             self.paged_at = Some(Instant::now());

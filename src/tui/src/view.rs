@@ -53,7 +53,7 @@ fn yielding_note(note: &str, free: usize) -> &str {
     note
 }
 /// Truncate to a display width, marking the cut.
-fn fit(s: &str, max: usize, theme: &Theme) -> String {
+pub(crate) fn fit(s: &str, max: usize, theme: &Theme) -> String {
     let s = clean(s).replace('\n', " ");
     if width(&s) <= max {
         return s;
@@ -75,8 +75,23 @@ fn fit(s: &str, max: usize, theme: &Theme) -> String {
     }
     out
 }
+/// Keep the end of an editable value visible without splitting UTF-8 or
+/// using a wide glyph's second cell for the cursor.
+pub(crate) fn input_tail(value: &str, room: usize) -> String {
+    let mut start = value.len();
+    let mut used = 0;
+    for (at, ch) in value.char_indices().rev() {
+        let columns = width(&ch.to_string());
+        if used + columns > room {
+            break;
+        }
+        start = at;
+        used += columns;
+    }
+    value[start..].to_owned()
+}
 /// Word wrap by display width; long words are split.
-fn wrap(text: &str, max: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, max: usize) -> Vec<String> {
     let max = max.max(1);
     let mut lines = Vec::new();
     for paragraph in clean(text).split('\n') {
@@ -100,9 +115,21 @@ fn wrap(text: &str, max: usize) -> Vec<String> {
             }
             let mut rest = word.to_owned();
             while width(&rest) > room {
-                let cut: String = rest.chars().take(room).collect();
-                rest = rest.chars().skip(room).collect();
-                lines.push(format!("{indent}{cut}"));
+                let cut = rest
+                    .char_indices()
+                    .skip(1)
+                    .map(|(at, _)| at)
+                    .take_while(|&at| width(&rest[..at]) <= room)
+                    .last()
+                    .unwrap_or_else(|| rest.chars().next().map(char::len_utf8).unwrap_or(0));
+                // A single wide glyph cannot fit in a one-column region.
+                // Keep the line bounded instead of painting over its border.
+                let part = &rest[..cut];
+                lines.push(format!(
+                    "{indent}{}",
+                    if width(part) > room { "?" } else { part }
+                ));
+                rest = rest[cut..].to_owned();
             }
             line = rest;
         }
@@ -130,6 +157,79 @@ fn page_meta(ui: &Ui, page: usize) -> (String, String, String) {
 }
 fn tone_of(ui: &Ui) -> Tone {
     Tone::category(&page_meta(ui, ui.page).2)
+}
+fn page_hint(page: usize) -> &'static str {
+    match page {
+        0 => "Open a workspace to start work, or finish the setup steps below.",
+        1 => "Select a terminal to watch, attach, save a checkpoint or assign a chat.",
+        2 => "Save a checkpoint from a terminal, then resume, fork or hand off its context.",
+        3 => "Connect a bot, authorize a chat, choose its pane and start the connection.",
+        4 => "Manage connections and harness profiles here. Display preferences are in Options.",
+        5 => "Install a profile for a running harness, then activate its native hooks.",
+        6 => "Inspect action receipts, delivery outcomes and component diagnostics.",
+        7 => "Choose the configuration to manage. Each instance keeps its own connections.",
+        8 => "Inspect the optional identity registry before previewing organization changes.",
+        9 => "Read the everyday controls or open the complete command reference.",
+        _ => "Search by action, command or alias. Details show where each command runs.",
+    }
+}
+fn empty_page(page: usize) -> (&'static str, &'static str) {
+    match page {
+        0 => (
+            "Your workspace is ready to set up",
+            "Open Settings to choose harnesses and connections.",
+        ),
+        1 => (
+            "No terminals to show",
+            "Create a shell in a workspace or refresh connected terminal backends.",
+        ),
+        2 => (
+            "No sessions to show",
+            "Open an agent terminal and save a checkpoint from its terminal menu.",
+        ),
+        3 => (
+            "No Telegram connections to show",
+            "Open Settings to connect a bot and register your DM or group.",
+        ),
+        4 => (
+            "Settings are not available yet",
+            "Refresh the configuration or reopen setup from Options.",
+        ),
+        5 => (
+            "No hook profiles to show",
+            "Open a harness conversation, then install its standard hooks.",
+        ),
+        6 => (
+            "No activity to show",
+            "Action history and delivery receipts are available after work is recorded.",
+        ),
+        7 => (
+            "No instances to show",
+            "Show saved configurations or open another private configuration directory.",
+        ),
+        8 => (
+            "Armonia is optional",
+            "Configure an existing identity registry to inspect agents and organization.",
+        ),
+        9 => (
+            "Help is not available yet",
+            "Refresh this page or use daedalus --help from a shell.",
+        ),
+        _ => (
+            "No commands to show",
+            "Refresh the command catalog or use daedalus --help from a shell.",
+        ),
+    }
+}
+fn page_count_label(page: usize, count: usize) -> String {
+    let (one, many) = match page {
+        WORKSPACES => ("node / action", "nodes / actions"),
+        COMMANDS => ("command", "commands"),
+        4 => ("setting", "settings"),
+        9 => ("guide", "guides"),
+        _ => ("entry", "entries"),
+    };
+    format!("{count} {}", if count == 1 { one } else { many })
 }
 fn panel<'a>(theme: &Theme, title: Line<'a>) -> Block<'a> {
     Block::default()
@@ -815,7 +915,7 @@ fn rail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let mut y = area.y + 2;
     let mut last = String::new();
     let tip = |rect: Rect, label: String| (Rect::new(rect.right() + 1, rect.y, 0, 1), label);
-    for i in 0..ui.page_count() {
+    for i in ui.navigation_order() {
         let (title, icon, category) = page_meta(ui, i);
         if !last.is_empty() && category != last {
             y += 1;
@@ -3252,21 +3352,25 @@ fn rule(f: &mut Frame, area: Rect, ui: &Ui) {
 /// Narrow navigation: numbered icons, with the current section spelled out.
 fn tabs(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let theme = ui.theme;
-    let count = ui.page_count();
-    let full: usize = (0..count)
+    let pages = ui.navigation_order();
+    let full: usize = pages
+        .iter()
+        .copied()
         .map(|i| {
-            let (t, ..) = page_meta(ui, i);
-            if i == ui.page { width(&t) + 6 } else { 4 }
+            let (title, icon, _) = page_meta(ui, i);
+            width(&shortcut(i))
+                + width(theme.icon(&icon))
+                + if i == ui.page { width(&title) + 4 } else { 3 }
         })
         .sum();
     let digits = full <= area.width as usize;
     let mut x = area.x;
-    for i in 0..count {
+    for i in pages {
         let (title, icon, category) = page_meta(ui, i);
         let text = match (i == ui.page, digits) {
-            (true, true) => format!(" {} {} {} ", i + 1, theme.icon(&icon), title),
+            (true, true) => format!(" {} {} {} ", shortcut(i), theme.icon(&icon), title),
             (true, false) => format!(" {} {} ", theme.icon(&icon), title),
-            (false, true) => format!(" {}{} ", i + 1, theme.icon(&icon)),
+            (false, true) => format!(" {}{} ", shortcut(i), theme.icon(&icon)),
             (false, false) => format!("{} ", theme.icon(&icon)),
         };
         let w = width(&text) as u16;
@@ -3315,7 +3419,7 @@ fn sidebar(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let fade = ease(since(ui.paged_at, &theme, 0.18));
     let mut y = inner.y;
     let mut last = String::new();
-    for i in 0..ui.page_count() {
+    for i in ui.navigation_order() {
         let (title, icon, category) = page_meta(ui, i);
         let tone = Tone::category(&category);
         if category != last {
@@ -3526,11 +3630,7 @@ fn main_panel(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], peek: bool) 
     let (title, icon, _) = page_meta(ui, ui.page);
     let tone = tone_of(ui);
     let count = rows.iter().filter(|r| r.kind != Kind::Header).count();
-    let noun = match ui.page {
-        WORKSPACES => "nodes & actions",
-        COMMANDS => "commands",
-        _ => "items",
-    };
+    let count_label = page_count_label(ui.page, count);
     let workspaces = ui.page == WORKSPACES;
     let heading = if workspaces {
         // The view switcher takes the title's place.
@@ -3546,7 +3646,7 @@ fn main_panel(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], peek: bool) 
     };
     let block = panel(&theme, heading).title_top(
         Line::from(Span::styled(
-            format!(" {count} {noun} "),
+            format!(" {count_label} "),
             theme.fg(Tone::Faint),
         ))
         .right_aligned(),
@@ -3557,7 +3657,7 @@ fn main_panel(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], peek: bool) 
     if workspaces {
         let room = area
             .width
-            .saturating_sub(width(&format!(" {count} {noun} ")) as u16 + 6);
+            .saturating_sub(width(&format!(" {count_label} ")) as u16 + 6);
         switcher(f, area.x + 2, area.y, room, ui);
     }
     if inner.height < 3 || inner.width < 10 {
@@ -3591,6 +3691,33 @@ fn main_panel(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], peek: bool) 
     }
     search(f, Rect::new(inner.x, y, inner.width, 1), ui, &title);
     y += if inner.height >= 12 { 2 } else { 1 };
+    if !workspaces && inner.height >= 22 && !ui.switching {
+        let hints = wrap(page_hint(ui.page), inner.width.saturating_sub(4) as usize);
+        let height = hints.len().min(2) as u16;
+        let lines: Vec<_> = hints
+            .into_iter()
+            .take(usize::from(height))
+            .enumerate()
+            .map(|(i, hint)| {
+                Line::from(vec![
+                    Span::styled(
+                        if i == 0 {
+                            format!(" {} ", theme.glyph("›", ">"))
+                        } else {
+                            "   ".into()
+                        },
+                        theme.fg(tone),
+                    ),
+                    Span::styled(hint, theme.fg(Tone::Muted)),
+                ])
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).style(theme.base()),
+            Rect::new(inner.x, y, inner.width, height),
+        );
+        y += height + 1;
+    }
     let peek_height = if peek && inner.height >= 16 { 3 } else { 0 };
     let list = Rect::new(
         inner.x,
@@ -3652,19 +3779,21 @@ fn search(f: &mut Frame, area: Rect, ui: &Ui, title: &str) {
     };
     let icon = theme.icon("search");
     let line = if ui.searching {
+        let prefix = format!(" {icon} {}", if ui.switching { "Switch: " } else { "" });
+        let query = input_tail(
+            &clean(&ui.filter),
+            (area.width as usize).saturating_sub(width(&prefix) + 1),
+        );
         Line::from(vec![
-            Span::styled(
-                format!(" {icon} {}", if ui.switching { "Switch: " } else { "" }),
-                field.patch(theme.fg(Tone::Accent)),
-            ),
-            Span::styled(clean(&ui.filter), field.patch(theme.fg(Tone::Text))),
+            Span::styled(prefix, field.patch(theme.fg(Tone::Accent))),
+            Span::styled(query, field.patch(theme.fg(Tone::Text))),
             Span::styled(theme.glyph("▏", "_"), field.patch(theme.fg(Tone::Accent))),
         ])
     } else if !ui.filter.is_empty() {
         Line::from(vec![
             Span::styled(format!(" {icon} "), field.patch(theme.fg(Tone::Accent))),
             Span::styled(
-                clean(&ui.filter),
+                fit(&ui.filter, (area.width as usize).saturating_sub(16), &theme),
                 field.patch(theme.fg(Tone::Accent).add_modifier(Modifier::BOLD)),
             ),
             Span::styled("   Esc clears", field.patch(theme.fg(Tone::Faint))),
@@ -3833,18 +3962,46 @@ fn tree_node_spans(
 
 fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: bool) {
     let theme = ui.theme;
-    if rows.is_empty() {
-        let text = if ui.busy && ui.snapshot.sections.is_empty() {
-            "Discovering…"
+    if rows.iter().all(|row| row.kind == Kind::Header) {
+        let (title, note) = if ui.busy && ui.snapshot.sections.is_empty() {
+            (
+                "Loading your workspace",
+                "Discovering terminals and reading this instance's configuration.",
+            )
         } else if ui.filter.is_empty() {
-            "Nothing here yet."
+            empty_page(ui.page)
         } else {
-            "No matches. Esc clears the search."
+            (
+                "No matches",
+                "Try a shorter name or press Esc to clear the search.",
+            )
         };
-        f.render_widget(
-            Paragraph::new(Span::styled(format!(" {text}"), theme.fg(Tone::Muted))),
-            area,
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        " {} ",
+                        theme.icon(if ui.filter.is_empty() {
+                            "info"
+                        } else {
+                            "search"
+                        })
+                    ),
+                    theme.fg(tone_of(ui)),
+                ),
+                Span::styled(
+                    fit(title, area.width.saturating_sub(4) as usize, &theme),
+                    theme.fg(Tone::Text).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+        ];
+        lines.extend(
+            wrap(note, area.width.saturating_sub(3) as usize)
+                .into_iter()
+                .map(|line| Line::from(Span::styled(format!(" {line}"), theme.fg(Tone::Muted)))),
         );
+        f.render_widget(Paragraph::new(lines), area);
         return;
     }
     let tone = tone_of(ui);
@@ -3921,6 +4078,8 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
             let active = i == selected;
             let base = if active {
                 theme.selected(fade)
+            } else if hovered(ui, Rect::new(body.x, y, body.width, h)) {
+                theme.selected(0.3).remove_modifier(Modifier::BOLD)
             } else {
                 theme.surface()
             };
@@ -3995,7 +4154,8 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
                             bar.clone(),
                             Span::styled(
                                 format!("     {}", fit(&row.note, w.saturating_sub(7), &theme)),
-                                base.patch(theme.fg(if active { Tone::Text } else { Tone::Muted })),
+                                base.patch(theme.fg(Tone::Muted))
+                                    .remove_modifier(Modifier::BOLD),
                             ),
                         ]));
                     } else {
@@ -4362,6 +4522,17 @@ fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row>) {
                 return;
             };
             title(&mut lines, theme.icon(&item.icon), &item.title, tone);
+            if !item.status.0.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled(" ", theme.fg(Tone::Muted)),
+                    Span::styled(
+                        format!(" {} ", fit(&item.status.0, w.saturating_sub(3), &theme)),
+                        theme
+                            .fg(Tone::named(&item.status.1))
+                            .bg(theme.rgb(theme::RAISED)),
+                    ),
+                ]));
+            }
             para(
                 &mut lines,
                 &format!("{section} {} {}", theme.glyph("›", ">"), item.group),
@@ -4371,10 +4542,12 @@ fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row>) {
                 lines.extend(badge_chips(&theme, &item.badges, w));
             }
             lines.push(Line::from(""));
+            para(&mut lines, "ABOUT THIS ACTION", Tone::Faint);
             para(&mut lines, &item.note, Tone::Text);
             // Aliases are search words; finding works without listing them.
             if !item.context.is_empty() {
                 lines.push(Line::from(""));
+                para(&mut lines, "TERMINAL SHORTCUT", Tone::Faint);
                 para(
                     &mut lines,
                     &format!("Also on a terminal's Enter menu as \"{}\"", item.context),
@@ -4406,6 +4579,7 @@ fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row>) {
             lines.push(Line::from(""));
             para(&mut lines, &entry.description, Tone::Text);
             lines.push(Line::from(""));
+            para(&mut lines, "REFERENCE", Tone::Faint);
             para(&mut lines, &entry.detail, Tone::Muted);
             if !entry.badges.is_empty() {
                 lines.push(Line::from(""));
@@ -4417,7 +4591,7 @@ fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row>) {
                 .all(|a| entry.detail.contains(a.as_str()));
             if !entry.aliases.is_empty() && !mentioned {
                 lines.push(Line::from(""));
-                para(&mut lines, "Also found by", Tone::Faint);
+                para(&mut lines, "SEARCH ALIASES", Tone::Faint);
                 para(&mut lines, &entry.aliases.join(" · "), Tone::Muted);
             }
             let guided = entry.id.starts_with("action:");
@@ -4736,7 +4910,18 @@ fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
                         Span::raw(" "),
                     ]),
                     Line::from(Span::styled(
-                        format!(" {}", fit(label, room.saturating_sub(1), &theme)),
+                        format!(
+                            " {}",
+                            fit(
+                                if *label == "saved routes" && room < 13 {
+                                    "routes"
+                                } else {
+                                    label
+                                },
+                                room.saturating_sub(1),
+                                &theme
+                            )
+                        ),
                         theme.fg(Tone::Muted),
                     )),
                 ]),
@@ -4766,19 +4951,34 @@ fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
     }
     // Connections and setup, side by side when there is room.
     let items = ui.rows();
+    let action_height: u16 = items
+        .iter()
+        .map(|row| if row.kind == Kind::Header { 1 } else { 2 })
+        .sum();
     let side = inner.width >= 76;
     let block_height = (s.overview.connections.len() + 2).max(s.overview.setup.len() + 1) as u16;
+    let available = inner
+        .bottom()
+        .saturating_sub(y.saturating_add(action_height.min(4) + 1));
     let columns = if side {
         split(
-            Rect::new(inner.x, y, inner.width, block_height),
+            Rect::new(inner.x, y, inner.width, block_height.min(available)),
             Direction::Horizontal,
             vec![Constraint::Percentage(48), Constraint::Percentage(52)],
         )
     } else {
         split(
-            Rect::new(inner.x, y, inner.width, block_height * 2 + 1),
+            Rect::new(
+                inner.x,
+                y,
+                inner.width,
+                available.min((s.overview.connections.len() + s.overview.setup.len() + 3) as u16),
+            ),
             Direction::Vertical,
-            vec![Constraint::Length(block_height + 1), Constraint::Min(1)],
+            vec![
+                Constraint::Length((s.overview.connections.len() as u16 + 2).min(available / 2)),
+                Constraint::Min(1),
+            ],
         )
     };
     let heading = |text: &str, note: String| {
@@ -4794,30 +4994,42 @@ fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
     for light in &s.overview.connections {
         let (glyph, t) = match light.state.as_str() {
             "running" => (theme.glyph("●", "*"), Tone::Ok),
-            "absent" => (theme.glyph("○", "o"), Tone::Faint),
-            _ => (theme.glyph("◌", "?"), Tone::Warn),
+            "absent" | "stopped" => (theme.glyph("○", "o"), Tone::Faint),
+            "failed" | "error" => (theme.glyph("!", "!"), Tone::Danger),
+            _ => (theme.glyph("◌", "?"), Tone::Muted),
         };
-        let pad = 18usize.saturating_sub(width(&light.label));
+        let label_room = columns[0].width.saturating_sub(8).min(16) as usize;
+        let label = fit(&light.label, label_room, &theme);
+        let pad = label_room.saturating_sub(width(&label)) + 2;
         left.push(Line::from(vec![
             Span::styled(format!("{glyph} "), theme.fg(t)),
-            Span::styled(light.label.clone(), theme.fg(Tone::Text)),
+            Span::styled(label, theme.fg(Tone::Text)),
             Span::raw(" ".repeat(pad)),
             Span::styled(
-                light.detail.clone(),
+                fit(
+                    &light.detail,
+                    (columns[0].width as usize).saturating_sub(label_room + 4),
+                    &theme,
+                ),
                 theme.fg(if t == Tone::Ok { Tone::Ok } else { Tone::Muted }),
             ),
         ]));
     }
-    left.push(Line::from(Span::styled(
-        "A running process is not proof of delivery.",
-        theme.fg(Tone::Faint),
-    )));
+    if s.overview.connections.is_empty() {
+        left.push(Line::from(Span::styled(
+            "Manage connections in Settings.",
+            theme.fg(Tone::Muted),
+        )));
+    }
     f.render_widget(Paragraph::new(left), columns[0]);
     let done = s.overview.setup.iter().filter(|x| x.done).count();
     let total = s.overview.setup.len();
-    let bar: String = (0..total)
-        .map(|i| {
-            if i < done {
+    let bar: String = s
+        .overview
+        .setup
+        .iter()
+        .map(|step| {
+            if step.done {
                 theme.glyph("▰", "#")
             } else {
                 theme.glyph("▱", "-")
@@ -4835,15 +5047,17 @@ fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
         } else {
             (theme.icon("pending"), Tone::Faint)
         };
-        let pad = 15usize.saturating_sub(width(&step.label));
+        let label_room = columns[1].width.saturating_sub(8).min(15) as usize;
+        let label = fit(&step.label, label_room, &theme);
+        let pad = label_room.saturating_sub(width(&label)) + 2;
         right.push(Line::from(vec![
             Span::styled(format!("{glyph} "), theme.fg(t)),
-            Span::styled(step.label.clone(), theme.fg(Tone::Text)),
+            Span::styled(label, theme.fg(Tone::Text)),
             Span::raw(" ".repeat(pad)),
             Span::styled(
                 fit(
                     &step.detail,
-                    (columns[1].width as usize).saturating_sub(19),
+                    (columns[1].width as usize).saturating_sub(label_room + 4),
                     &theme,
                 ),
                 theme.fg(Tone::Muted),
@@ -4853,11 +5067,7 @@ fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
     f.render_widget(Paragraph::new(right), columns[1]);
     y = columns[columns.len() - 1].bottom() + 1;
     // The one action that lives here.
-    let wanted: u16 = items
-        .iter()
-        .map(|r| if r.kind == Kind::Header { 1 } else { 2 })
-        .sum();
-    let start_height = wanted.min(inner.bottom().saturating_sub(y));
+    let start_height = action_height.min(inner.bottom().saturating_sub(y));
     let list = Rect::new(inner.x, y, inner.width, start_height);
     render_list(f, list, ui, &items, true);
     y = list.bottom() + 1;
@@ -5350,7 +5560,7 @@ fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         rows.push(OptionRow::Item(i));
     }
     let modal_width = area.width.saturating_sub(6).min(78);
-    let height = (rows.len() as u16 + 6).min(area.height.saturating_sub(2));
+    let height = (rows.len() as u16 + 10).min(area.height.saturating_sub(2));
     let modal = Rect::new(
         area.x + (area.width - modal_width) / 2,
         area.y + (area.height - height) / 2,
@@ -5411,11 +5621,12 @@ fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    let help_height = if inner.height >= 12 { 3 } else { 0 };
     let list = Rect::new(
         inner.x,
         inner.y + 2,
         inner.width,
-        inner.height.saturating_sub(3),
+        inner.height.saturating_sub(3 + help_height),
     );
     let at = rows
         .iter()
@@ -5507,7 +5718,10 @@ fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         } else {
             label
         };
-        let label = format!("{label:<label_w$}");
+        let label = format!(
+            "{label}{}",
+            " ".repeat(label_w.saturating_sub(width(&label)))
+        );
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -5552,13 +5766,25 @@ fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let enter = theme.glyph("⏎", "Enter");
     let arrows = theme.glyph("↑↓", "Up/Dn");
     let change = theme.glyph("←→", "Lt/Rt");
+    if help_height > 0 {
+        let help = Rect::new(inner.x, inner.bottom() - 4, inner.width, 2);
+        let text = wrap(Item::ALL[selected].description(), help.width as usize);
+        f.render_widget(
+            Paragraph::new(
+                text.into_iter()
+                    .take(2)
+                    .map(|text| Line::from(Span::styled(text, theme.fg(Tone::Muted))))
+                    .collect::<Vec<_>>(),
+            ),
+            help,
+        );
+    }
     f.render_widget(
         Paragraph::new(keys(
             &theme,
             &[
                 (arrows, "Choose"),
-                (change, "Change"),
-                (enter, "Change"),
+                (&format!("{change} / {enter}"), "Change"),
                 ("Esc", "Close"),
             ],
             inner.width as usize,
@@ -5576,13 +5802,17 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
         && dialog.options.iter().any(|o| o.0 == "cancel");
     let tone = if confirm { Tone::Warn } else { Tone::Accent };
     let modal_width = area.width.saturating_sub(6).min(96);
-    let description = wrap(
-        &dialog.description,
-        modal_width.saturating_sub(4).max(1) as usize,
-    );
+    let description = if dialog.description.trim().is_empty() {
+        Vec::new()
+    } else {
+        wrap(
+            &dialog.description,
+            modal_width.saturating_sub(4).max(1) as usize,
+        )
+    };
     let wanted = match dialog.mode.as_str() {
         "input" => 9 + description.len() as u16,
-        "external" => 8,
+        "external" => 10 + description.len() as u16,
         "choose" => 5 + description.len() as u16 + dialog.options.len() as u16 * 3,
         _ => 34,
     };
@@ -5599,7 +5829,11 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let opening = since(dialog.opened, &theme, 0.35);
     let seed = dialog.id;
     let title = neon::decode(
-        &fit(&dialog.title, modal_width as usize - 6, &theme),
+        &fit(
+            &dialog.title,
+            (modal_width as usize).saturating_sub(6),
+            &theme,
+        ),
         opening,
         seed,
         theme.ascii,
@@ -5647,7 +5881,7 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ..inner
     };
     // Keep two choices visible while long review details scroll independently.
-    let reserve = if dialog.mode == "choose" { 8 } else { 3 };
+    let reserve = if dialog.mode == "choose" { 6 } else { 5 };
     let desc_height = (description.len() as u16).min(inner.height.saturating_sub(reserve));
     let description_scroll = if dialog.mode == "choose" {
         dialog.scroll = dialog.scroll.min(
@@ -5683,9 +5917,35 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let w = regions[1].width as usize;
     let enter = theme.glyph("⏎", "Enter");
     let arrows = theme.glyph("↑↓", "Up/Dn");
+    let mut position = None;
     let hints: Vec<(&str, &str)> = match dialog.mode.as_str() {
         "choose" => {
-            let per = 3usize;
+            if dialog.options.is_empty() {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        fit(
+                            "No choices available. Close and refresh the list.",
+                            w,
+                            &theme,
+                        ),
+                        theme.fg(Tone::Muted),
+                    )),
+                    regions[1],
+                );
+            }
+            if !dialog.options.is_empty() {
+                dialog.selected = dialog.selected.min(dialog.options.len() - 1);
+                position = Some(format!(
+                    "{} / {}",
+                    dialog.selected + 1,
+                    dialog.options.len()
+                ));
+            }
+            let per = if regions[1].height < 6 {
+                1usize
+            } else {
+                3usize
+            };
             let capacity = (regions[1].height as usize / per).max(1);
             let start = dialog.selected.saturating_sub(capacity - 1);
             let mut lines = Vec::new();
@@ -5751,22 +6011,24 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 let indent = " ".repeat(width(&icon));
                 let note = fit(note, w.saturating_sub(3 + indent.len()), &theme);
                 let pad = w.saturating_sub(width(&note) + indent.len() + 2);
-                lines.push(Line::from(vec![
-                    bar,
-                    Span::styled(
-                        format!(" {indent}{note}"),
-                        base.patch(theme.fg(Tone::Muted)),
-                    ),
-                    Span::styled(" ".repeat(pad), base),
-                ]));
-                lines.push(Line::from(""));
+                if per > 1 {
+                    lines.push(Line::from(vec![
+                        bar,
+                        Span::styled(
+                            format!(" {indent}{note}"),
+                            base.patch(theme.fg(Tone::Muted)),
+                        ),
+                        Span::styled(" ".repeat(pad), base),
+                    ]));
+                    lines.push(Line::from(""));
+                }
             }
             f.render_widget(Paragraph::new(lines), regions[1]);
             // A neon wash under the selected choice, brightest at its bar.
-            if theme.truecolor && !confirm {
-                let row = regions[1].y + (dialog.selected - start) as u16 * 3;
+            if theme.truecolor && !confirm && !dialog.options.is_empty() {
+                let row = regions[1].y + dialog.selected.saturating_sub(start) as u16 * per as u16;
                 let area = regions[1];
-                for y in row..(row + 2).min(area.bottom()) {
+                for y in row..(row + per.min(2) as u16).min(area.bottom()) {
                     for x in area.left()..area.right() {
                         let fx = (x - area.left()) as f32 / area.width.max(1) as f32;
                         let cell = &mut f.buffer_mut()[(x, y)];
@@ -5781,7 +6043,11 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                     }
                 }
             }
-            let mut hints = vec![(arrows, "Choose"), (enter, "Select"), ("Esc", "Cancel")];
+            let mut hints = if dialog.options.is_empty() {
+                vec![("Esc", "Close")]
+            } else {
+                vec![(arrows, "Choose"), (enter, "Select"), ("Esc", "Cancel")]
+            };
             if description.len() > desc_height as usize {
                 hints.push(("PgUp/PgDn", "Details"));
             }
@@ -5793,18 +6059,7 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
             } else {
                 clean(&dialog.input)
             };
-            let shown = if width(&value) + 3 > w {
-                value
-                    .chars()
-                    .rev()
-                    .take(w.saturating_sub(4))
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect()
-            } else {
-                value
-            };
+            let shown = input_tail(&value, w.saturating_sub(3));
             let field = if theme.color {
                 Style::default().bg(theme.rgb(theme::SELECT))
             } else {
@@ -5835,33 +6090,48 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                         Span::styled(theme.glyph("▏", "_"), field.patch(theme.fg(Tone::Accent))),
                         Span::styled(" ".repeat(pad), field),
                     ]),
-                    Line::from(Span::styled(format!(" {caption}"), theme.fg(Tone::Faint))),
+                    Line::from(Span::styled(
+                        fit(&format!(" {caption}"), w, &theme),
+                        theme.fg(if dialog.input.is_empty() {
+                            Tone::Muted
+                        } else {
+                            Tone::Info
+                        }),
+                    )),
                 ]),
                 regions[1],
             );
-            vec![(enter, "Save"), ("Esc", "Cancel")]
+            vec![(enter, "Continue"), ("Esc", "Cancel")]
         }
         "external" => {
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Enter opens the native program in this terminal.",
-                        theme.fg(Tone::Text),
-                    )),
-                    Line::from(Span::styled(
-                        "The dashboard returns when the program exits.",
-                        theme.fg(Tone::Muted),
-                    )),
-                ]),
-                regions[1],
-            );
+            let lines = [
+                (
+                    "Enter opens the native program in this terminal.",
+                    Tone::Text,
+                ),
+                ("The dashboard returns when the program exits.", Tone::Muted),
+            ]
+            .into_iter()
+            .flat_map(|(text, tone)| {
+                wrap(text, w)
+                    .into_iter()
+                    .map(move |line| Line::from(Span::styled(line, theme.fg(tone))))
+            })
+            .collect::<Vec<_>>();
+            f.render_widget(Paragraph::new(lines), regions[1]);
             vec![(enter, "Open"), ("Esc", "Cancel")]
         }
         _ => {
-            let lines = wrap(&dialog.text, w);
+            let lines = wrap(
+                if dialog.text.trim().is_empty() {
+                    "No output was returned. Close this view to continue."
+                } else {
+                    &dialog.text
+                },
+                w,
+            );
             let visible = regions[1].height as usize;
-            let most = lines.len().saturating_sub(visible) as u16;
+            let most = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
             dialog.scroll = dialog.scroll.min(most);
             let shown: Vec<Line> = lines
                 .iter()
@@ -5871,22 +6141,42 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 .collect();
             f.render_widget(Paragraph::new(shown), regions[1]);
             if most > 0 {
-                let position = format!(
-                    " {}–{} of {} ",
+                position = Some(format!(
+                    "{}–{} / {}",
                     dialog.scroll + 1,
                     (dialog.scroll as usize + visible).min(lines.len()),
                     lines.len()
-                );
-                f.render_widget(
-                    Paragraph::new(Span::styled(position, theme.fg(Tone::Faint)))
-                        .alignment(Alignment::Right),
-                    regions[2],
-                );
+                ));
             }
-            vec![(arrows, "Scroll"), ("PgUp/PgDn", "Page"), (enter, "Close")]
+            if most > 0 {
+                vec![("PgUp/PgDn", "Scroll"), (enter, "Close")]
+            } else {
+                vec![(enter, "Close")]
+            }
         }
     };
-    f.render_widget(Paragraph::new(keys(&theme, &hints, w)), regions[2]);
+    let position_width = position.as_ref().map_or(0, |text| width(text) + 2);
+    let show_position = position_width > 0 && w >= position_width + 24;
+    let hint_width = w.saturating_sub(if show_position { position_width } else { 0 });
+    f.render_widget(
+        Paragraph::new(keys(&theme, &hints, hint_width)),
+        Rect {
+            width: hint_width as u16,
+            ..regions[2]
+        },
+    );
+    if show_position && let Some(position) = position {
+        f.render_widget(
+            Paragraph::new(Span::styled(position, theme.fg(Tone::Muted)))
+                .alignment(Alignment::Right),
+            Rect::new(
+                regions[2].right() - position_width as u16,
+                regions[2].y,
+                position_width as u16,
+                1,
+            ),
+        );
+    }
 }
 
 /// Give structured review labels a consistent accent without recoloring values.
@@ -5998,6 +6288,87 @@ mod tests {
         buffer.content().iter().map(|c| c.symbol()).collect()
     }
     #[test]
+    fn editable_tail_respects_wide_characters_and_cursor_space() {
+        assert_eq!(input_tail("abc界語", 4), "界語");
+        assert_eq!(input_tail("abc界語", 3), "語");
+        assert_eq!(input_tail("界", 1), "");
+        assert_eq!(input_tail("abc", 0), "");
+        for room in 0..50 {
+            assert!(width(&input_tail("e\u{301} Ελληνικά 日本語 input", room)) <= room);
+        }
+    }
+
+    #[test]
+    fn compact_forms_keep_choices_and_input_feedback_inside_the_dialog() {
+        let mut ui = fixture(Theme {
+            reduced_motion: true,
+            ..Theme::default()
+        });
+        for (w, h) in [(44, 14), (60, 18), (80, 24), (160, 48)] {
+            ui.dialog = Some(Dialog {
+                mode: "choose".into(),
+                title: "Choose a chat".into(),
+                description: "Select the chat to receive this terminal's replies.".into(),
+                options: vec![
+                    ("dm".into(), "Direct messages".into(), "Owner chat".into()),
+                    (
+                        "group".into(),
+                        "Project group".into(),
+                        "Authorized group chat".into(),
+                    ),
+                ],
+                selected: 1,
+                ..Dialog::default()
+            });
+            assert!(
+                text(&render(&mut ui, w, h)).contains("Project group"),
+                "{w}x{h}"
+            );
+            ui.dialog = Some(Dialog {
+                mode: "input".into(),
+                title: "Bot token".into(),
+                secret: true,
+                input: "never-render-this-token".into(),
+                ..Dialog::default()
+            });
+            let output = text(&render(&mut ui, w, h));
+            assert!(!output.contains("never-render-this-token"));
+            assert!(output.contains("23 characters"), "{w}x{h}: {output}");
+        }
+    }
+
+    #[test]
+    fn empty_dialogs_explain_their_state_and_do_not_offer_selection() {
+        let mut ui = fixture(Theme::default());
+        ui.dialog = Some(Dialog {
+            mode: "choose".into(),
+            title: "Choices".into(),
+            ..Dialog::default()
+        });
+        let output = text(&render(&mut ui, 100, 30));
+        assert!(output.contains("No choices available"));
+        assert!(!output.contains("Select"));
+        assert!(!output.contains("PgUp/PgDn"));
+        ui.dialog = Some(Dialog {
+            mode: "output".into(),
+            title: "Result".into(),
+            ..Dialog::default()
+        });
+        let output = text(&render(&mut ui, 100, 30));
+        assert!(output.contains("No output was returned"));
+        assert!(!output.contains("PgUp/PgDn"));
+    }
+
+    #[test]
+    fn header_only_workspace_is_presented_as_empty() {
+        let mut ui = fixture(Theme::default());
+        ui.snapshot.tree.clear();
+        ui.snapshot.sections[WORKSPACES].items.clear();
+        assert!(ui.rows().iter().all(|row| row.kind == Kind::Header));
+        assert!(text(&render(&mut ui, 120, 40)).contains("No terminals to show"));
+    }
+
+    #[test]
     fn every_page_renders_at_small_and_large_sizes() {
         for (w, h) in [(40, 12), (60, 16), (80, 24), (120, 36), (160, 48)] {
             for page in 0..FALLBACK.len() {
@@ -6026,7 +6397,13 @@ mod tests {
         let (x, y) = (0..area.height)
             .flat_map(|y| (0..area.width).map(move |x| (x, y)))
             .find(|&(x, y)| {
-                (0..7).all(|i| buffer[(x + i, y)].symbol() == &"Running"[i as usize..=i as usize])
+                x + 7 <= area.width
+                    && (0..7)
+                        .all(|i| buffer[(x + i, y)].symbol() == &"Running"[i as usize..=i as usize])
+                    && (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("Action title")
             })
             .expect("status rendered");
         let row: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
@@ -6051,6 +6428,36 @@ mod tests {
         assert!(!rendered.contains(&entry("11", "commands", "Commands")));
     }
     #[test]
+    fn compact_overview_keeps_the_setup_action_visible() {
+        let mut ui = fixture(Theme::default());
+        ui.snapshot.overview = serde_json::from_value(serde_json::json!({
+            "connections":[{"label":"Telegram","state":"unknown","detail":"Not configured"}],
+            "setup":[
+                {"label":"AI tools","done":false,"detail":"Select harnesses"},
+                {"label":"Terminals","done":true,"detail":"10 found"},
+                {"label":"Telegram","done":false,"detail":"Optional"},
+                {"label":"Checkpoints","done":false,"detail":"None saved"}
+            ]
+        }))
+        .unwrap();
+        ui.navigate(0);
+        let rendered = text(&render(&mut ui, 80, 24));
+        assert!(rendered.contains("Action title"));
+        assert!(!ui.list_hits.is_empty());
+        assert!(rendered.contains("▱▰▱▱"));
+    }
+    #[test]
+    fn compact_navigation_uses_real_help_and_command_shortcuts() {
+        let mut ui = fixture(Theme::default());
+        ui.navigate(9);
+        let rendered = render(&mut ui, 96, 28);
+        let tabs: String = (0..96).map(|x| rendered[(x, 1)].symbol()).collect();
+        assert!(tabs.contains("0 ? Help"), "{tabs}");
+        assert!(tabs.contains("^P"), "{tabs}");
+        assert!(!tabs.contains("10?"));
+        assert!(!tabs.contains("11"));
+    }
+    #[test]
     fn sidebar_lists_each_section_once_with_categories() {
         let mut ui = fixture(Theme::default());
         let rendered = text(&render(&mut ui, 140, 44));
@@ -6062,11 +6469,60 @@ mod tests {
         }
         // Every section once, in order; then the totals, each opening its section.
         let pages: Vec<usize> = ui.nav_hits.iter().map(|(_, p)| *p).collect();
-        assert_eq!(
-            pages[..FALLBACK.len()],
-            (0..FALLBACK.len()).collect::<Vec<_>>()
-        );
+        assert_eq!(pages[..FALLBACK.len()], [0, 1, 2, 3, 5, 4, 6, 7, 8, 9, 10]);
         assert_eq!(pages[FALLBACK.len()..], [WORKSPACES, WORKSPACES, 3, 2, 6]);
+    }
+    #[test]
+    fn long_unicode_words_stay_inside_their_display_columns() {
+        for max in 1..=12 {
+            for input in [
+                "界面工作区",
+                "αβγδεζηθ",
+                "path/界面/terminal",
+                "a\u{301}bcdefgh",
+            ] {
+                let lines = wrap(input, max);
+                assert!(
+                    lines.iter().all(|line| width(line) <= max),
+                    "{max}: {lines:?}"
+                );
+                if max >= 2 {
+                    assert_eq!(lines.concat(), input);
+                }
+            }
+        }
+    }
+    #[test]
+    fn output_review_keeps_scroll_position_separate_from_shortcuts() {
+        let mut ui = fixture(Theme::default());
+        ui.dialog = Some(Dialog {
+            mode: "output".into(),
+            title: "Review changes".into(),
+            text: (0..80).map(|n| format!("Review item {n}\n")).collect(),
+            ..Dialog::default()
+        });
+        let rendered = render(&mut ui, 120, 40);
+        let rows: Vec<String> = (0..40)
+            .map(|y| (0..120).map(|x| rendered[(x, y)].symbol()).collect())
+            .collect();
+        let footer = rows
+            .iter()
+            .find(|line| line.contains("/ 81"))
+            .expect("visible scroll position");
+        assert!(footer.contains("Close"), "{footer}");
+        assert!(footer.find("Close").unwrap() < footer.find("/ 81").unwrap());
+    }
+    #[test]
+    fn empty_screens_offer_a_next_step_without_inventing_records() {
+        for page in [2, 3, 4, 5, 6, 7, 8, 9] {
+            let mut ui = fixture(Theme::default());
+            ui.snapshot.sections[page].items.clear();
+            ui.navigate(page);
+            let rendered = text(&render(&mut ui, 140, 44));
+            let (title, _) = empty_page(page);
+            assert!(rendered.contains(title), "page {page}");
+            assert!(ui.list_hits.is_empty());
+        }
     }
     #[test]
     fn the_sidebar_counts_folds_and_lists_terminals_to_jump_to() {

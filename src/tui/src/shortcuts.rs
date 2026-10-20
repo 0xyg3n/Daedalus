@@ -5,7 +5,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 #[derive(Clone)]
 pub struct Binding {
@@ -259,6 +259,7 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
         }
         KeyCode::PageUp => ui.binding_scroll = ui.binding_scroll.saturating_sub(10),
         KeyCode::Home => ui.binding_scroll = 0,
+        KeyCode::End => ui.binding_scroll = matching(ui).len().saturating_sub(1),
         KeyCode::Backspace => {
             ui.binding_search.as_mut().unwrap().pop();
             ui.binding_scroll = 0;
@@ -291,41 +292,113 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
         h,
     );
     f.render_widget(Clear, rect);
+    let theme = ui.theme;
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Keyboard shortcuts · F1 / Esc close ")
-        .style(ui.theme.surface());
+        .border_set(theme.border())
+        .border_style(theme.fg(Tone::Accent))
+        .title(" Keyboard shortcuts ")
+        .style(theme.surface());
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let rows = matching(ui);
-    let mut lines = vec![
+    let room = inner.width.saturating_sub(2) as usize;
+    let query = ui.binding_search.as_deref().unwrap_or("");
+    let query = crate::view::input_tail(query, room.saturating_sub(9));
+    let header = vec![
         Line::from(vec![
-            Span::styled("Search: ", ui.theme.fg(Tone::Info)),
-            Span::raw(ui.binding_search.as_deref().unwrap_or("")),
+            Span::styled(" Search  ", theme.fg(Tone::Info)),
+            Span::styled(
+                if query.is_empty() {
+                    "Type a key or action"
+                } else {
+                    &query
+                },
+                theme.fg(if query.is_empty() {
+                    Tone::Muted
+                } else {
+                    Tone::Text
+                }),
+            ),
         ]),
-        Line::from(format!(
-            "{} matches · type to filter · arrows scroll",
-            rows.len()
+        Line::from(Span::styled(
+            format!(
+                " {} {}",
+                rows.len(),
+                if rows.len() == 1 {
+                    "shortcut"
+                } else {
+                    "shortcuts"
+                }
+            ),
+            theme.fg(Tone::Muted),
         )),
-        Line::default(),
     ];
+    f.render_widget(
+        Paragraph::new(header),
+        Rect::new(inner.x, inner.y, inner.width, 2.min(inner.height)),
+    );
+    let body = Rect::new(
+        inner.x,
+        (inner.y + 3).min(inner.bottom()),
+        inner.width,
+        inner.height.saturating_sub(4),
+    );
+    let start = ui.binding_scroll.min(rows.len().saturating_sub(1));
+    let mut lines = Vec::new();
+    let mut shown = 0;
     if rows.is_empty() {
-        lines.push(Line::from(
-            "No matching shortcuts. Try a key, Telegram, cube, shell or resize.",
-        ));
+        for line in crate::view::wrap(
+            "No shortcuts match. Try Telegram, cube, shell or resize.",
+            room,
+        ) {
+            lines.push(Line::from(Span::styled(
+                format!(" {line}"),
+                theme.fg(Tone::Muted),
+            )));
+        }
     }
-    for row in rows
-        .iter()
-        .skip(ui.binding_scroll)
-        .take((inner.height.saturating_sub(3) / 2) as usize)
-    {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<25}", row.key), ui.theme.fg(Tone::Info)),
-            Span::styled(&row.scope, ui.theme.fg(Tone::Muted)),
-        ]));
-        lines.push(Line::from(format!("  {}", row.description)));
+    for row in rows.iter().skip(start) {
+        let mut entry = vec![Line::from(vec![
+            Span::styled(" ", theme.fg(Tone::Text)),
+            Span::styled(format!(" {} ", row.key), theme.keycap()),
+        ])];
+        if room >= row.key.chars().count() + row.scope.chars().count() + 6 {
+            entry[0].spans.push(Span::styled(
+                format!("  {}", row.scope),
+                theme.fg(Tone::Muted),
+            ));
+        }
+        entry.extend(
+            crate::view::wrap(&row.description, room.saturating_sub(2))
+                .into_iter()
+                .map(|line| Line::from(Span::styled(format!("  {line}"), theme.fg(Tone::Text)))),
+        );
+        if lines.len() + entry.len() > body.height as usize {
+            break;
+        }
+        lines.extend(entry);
+        shown += 1;
     }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    f.render_widget(Paragraph::new(lines), body);
+    if inner.height >= 4 {
+        let position = if rows.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}–{} / {}", start + 1, start + shown, rows.len())
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                crate::view::fit(
+                    &format!(" Esc Close · ↑↓ Scroll{position}"),
+                    inner.width as usize,
+                    &theme,
+                ),
+                theme.fg(Tone::Muted),
+            )),
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        );
+    }
 }
 #[cfg(test)]
 mod tests {
