@@ -363,7 +363,7 @@ fn target_bytes(path: &Path) -> Result<Vec<u8>, String> {
         if bytes.len() as u64 > BINARY_LIMIT {
             return Err("Running executable exceeds update size limit".into());
         }
-        return Ok(bytes);
+        Ok(bytes)
     }
     #[cfg(unix)]
     {

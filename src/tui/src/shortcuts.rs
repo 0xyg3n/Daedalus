@@ -184,6 +184,11 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
             "Ctrl+] then Ctrl+]",
             "Send literal Ctrl+] to the terminal",
         ),
+        (
+            "Windows forms",
+            "Ctrl+V / Shift+Insert",
+            "Paste clipboard text into the input field",
+        ),
         ("Dialogs", "Esc", "Cancel or close without applying changes"),
         (
             "Dialogs",

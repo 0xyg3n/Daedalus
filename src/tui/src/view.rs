@@ -5813,7 +5813,11 @@ fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
             let pad = w.saturating_sub(width(&shown) + 2);
             let caption = if dialog.secret {
                 if dialog.input.is_empty() {
-                    "Empty · paste or type your token, then Enter".to_owned()
+                    if cfg!(windows) {
+                        "Empty · Ctrl+V to paste, then Enter".to_owned()
+                    } else {
+                        "Empty · paste or type your token, then Enter".to_owned()
+                    }
                 } else {
                     format!(
                         "{} characters entered · hidden · Enter to continue",
@@ -6169,7 +6173,11 @@ mod tests {
         assert!(rendered.contains("18 characters entered"));
         ui.dialog.as_mut().unwrap().input.clear();
         let empty = text(&render(&mut ui, 100, 30));
-        assert!(empty.contains("Empty · paste or type"));
+        assert!(empty.contains(if cfg!(windows) {
+            "Empty · Ctrl+V"
+        } else {
+            "Empty · paste or type"
+        }));
     }
     #[test]
     fn no_color_uses_attributes_not_colors() {

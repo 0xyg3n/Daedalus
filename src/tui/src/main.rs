@@ -1,4 +1,6 @@
 mod backdrop;
+#[cfg(any(windows, test))]
+mod clipboard;
 mod embed;
 mod graphics;
 mod model;
@@ -674,12 +676,12 @@ fn main() -> io::Result<()> {
     );
     ratatui::restore();
     #[cfg(windows)]
-    if result.is_ok() {
-        if let Some(installer) = updater.take_installer() {
-            std::process::Command::new(installer)
-                .arg(format!("/PARENT_PID={}", std::process::id()))
-                .spawn()?;
-        }
+    if result.is_ok()
+        && let Some(installer) = updater.take_installer()
+    {
+        std::process::Command::new(installer)
+            .arg(format!("/PARENT_PID={}", std::process::id()))
+            .spawn()?;
     }
     result
 }
@@ -883,6 +885,17 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
 
 /// Returns true when a native program now owns the real terminal.
 fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -> io::Result<bool> {
+    #[cfg(windows)]
+    if dialog.mode == "input" && clipboard::paste_key(key) {
+        match clipboard::read() {
+            Ok(text) => dialog
+                .input
+                .extend(text.chars().filter(|c| !c.is_control()).take(8192)),
+            Err(message) => dialog.description = message.into(),
+        }
+        ui.dialog = Some(dialog);
+        return Ok(false);
+    }
     let mut reply = None;
     match key.code {
         KeyCode::Esc => reply = Some(Value::Null),
