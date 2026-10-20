@@ -3,8 +3,9 @@
 Daedalus is one native executable: `daedalus` on Linux x86_64/ARM64 or
 `daedalus.exe` on Windows x64. It provides the TUI, CLI, Telegram service and
 hook runtime. Agent tools keep their own runtimes and accounts. macOS is not
-supported. Windows support is implemented but has not been validated on real
-Windows hardware; run the local checks below before deploying it.
+supported. Windows 11 validation covers native shell control, private permissions, installer
+fixtures and selected hooks. Provider compatibility still depends on the installed
+upstream tools.
 
 ## Linux install
 
@@ -36,7 +37,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-Download **Daedalus-0.2.0-beta.22-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.22), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer and `daedalus.exe` use `assets/daedalus.png` as their Windows icon. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
+Download **Daedalus-0.2.0-beta.23-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.23), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer and `daedalus.exe` use `assets/daedalus.png` as their Windows icon. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
 
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
@@ -149,7 +150,9 @@ This runs format, tests, Clippy and release build plus isolated installer fixtur
 for read-only planning, PE/checksum validation and changed-file protection. It
 uses no real bots or paid providers. It is a local workflow and creates no GitHub
 Actions billing. Linux cross-compilation alone does not establish Windows console,
-ConPTY, ACL, Herdr or provider behavior; real Windows validation remains required.
+ConPTY, ACL, Herdr or provider behavior. Native Windows 11 checks cover the library
+suite, including ConPTY shell control, plus isolated installer and Herdr echo
+fixtures. Live provider and Telegram delivery need their own end-to-end checks.
 
 ## First run
 
@@ -256,6 +259,9 @@ Daedalus and runs that installer. The installer waits for the old process to exi
 then replaces the current-user installation and opens Daedalus. The command-line
 `update install` returns the verified installer path for manual launch after
 closing Daedalus. Neither path restarts Telegram or changes private configuration.
+Stop the managed Telegram service from Telegram settings before approving a Windows
+update, and close other Daedalus instances: Windows cannot replace an executable
+while another process is using it. Start Telegram again after installation.
 
 On Windows, close Daedalus and stop its Telegram service before deleting its
 installation prefix; private configuration remains separate.

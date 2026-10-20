@@ -5,12 +5,13 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -330,7 +331,9 @@ pub fn start(mut options: StartOptions) -> Result<SessionInfo> {
     };
     let plan = root.join(format!("{}.launch", launch.id));
     save(&plan, &launch)?;
+    #[cfg(unix)]
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    #[cfg(unix)]
     command
         .args(["terminal-native", "serve", &launch.id])
         .stdin(Stdio::null())
@@ -350,12 +353,14 @@ pub fn start(mut options: StartOptions) -> Result<SessionInfo> {
             });
         }
     }
+    #[cfg(unix)]
+    let spawned = command.spawn();
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000008 | 0x00000200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    }
-    let mut daemon = match command.spawn() {
+    let spawned = crate::platform::spawn_background(
+        &std::env::current_exe().map_err(|e| e.to_string())?,
+        &["terminal-native", "serve", &launch.id],
+    );
+    let mut daemon = match spawned {
         Ok(child) => child,
         Err(error) => {
             let _ = fs::remove_file(plan);
@@ -889,6 +894,9 @@ fn serve(root: &Path, id: &str) -> Result<()> {
 
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Winsock accepted sockets inherit the listener's nonblocking mode.
+                // The authenticated exchange needs bounded blocking reads on every OS.
+                stream.set_nonblocking(false).map_err(|e| e.to_string())?;
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
                 let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
@@ -1427,19 +1435,16 @@ pub fn cli(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     struct Fixture {
         root: PathBuf,
         id: String,
         generation: String,
         worker: Option<thread::JoinHandle<Result<()>>>,
     }
-    #[cfg(unix)]
     impl Fixture {
         fn call(&self, value: Value) -> Result<Value> {
             rpc_at(&self.root, &self.id, &self.generation, value)
         }
-        #[cfg(unix)]
         fn shell() -> Self {
             let root = std::env::temp_dir().join(format!("daedalus-native-{}", random().unwrap()));
             ensure_private(&root).unwrap();
@@ -1451,11 +1456,17 @@ mod tests {
                     name: "Fixture shell".into(),
                     workspace: "Fixture workspace".into(),
                     cwd: root.clone(),
+                    #[cfg(unix)]
                     argv: vec!["/bin/sh".into()],
+                    #[cfg(windows)]
+                    argv: vec!["cmd.exe".into(), "/D".into(), "/Q".into()],
+                    #[cfg(unix)]
                     environment: Some(std::collections::BTreeMap::from([
                         ("PATH".into(), "/usr/bin:/bin".into()),
                         ("PS1".into(), String::new()),
                     ])),
+                    #[cfg(windows)]
+                    environment: None,
                     cols: 80,
                     rows: 24,
                 },
@@ -1471,8 +1482,11 @@ mod tests {
                 worker: Some(worker),
             };
             let deadline = Instant::now() + Duration::from_secs(5);
-            while fixture.call(json!({"op":"info"})).is_err() {
-                assert!(Instant::now() < deadline, "Fixture shell failed to start");
+            while let Err(error) = fixture.call(json!({"op":"info"})) {
+                assert!(
+                    Instant::now() < deadline,
+                    "Fixture shell failed to start: {error}"
+                );
                 thread::sleep(Duration::from_millis(20));
             }
             fixture
@@ -1494,7 +1508,6 @@ mod tests {
             }
         }
     }
-    #[cfg(unix)]
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = self.call(json!({"op":"close"}));
@@ -1654,6 +1667,41 @@ mod tests {
         assert!(label("Name\x1b]52;secret").is_err());
         assert!(size(0, 24).is_err());
         assert!(size(80, 65535).is_err());
+    }
+    #[test]
+    #[cfg(windows)]
+    fn windows_conpty_capture_input_resize_identity_and_cleanup() {
+        let fixture = Fixture::shell();
+        fixture
+            .call(json!({"op":"input","bytes":STANDARD.encode(b"echo WINDOWS_NATIVE_OK\r")}))
+            .unwrap();
+        let capture = fixture.wait_text("WINDOWS_NATIVE_OK");
+        assert!(capture.session.pid > 0);
+        fixture
+            .call(json!({"op":"resize","cols":93,"rows":31}))
+            .unwrap();
+        fixture
+            .call(json!({"op":"rename","name":"Renamed","workspace":"Another project"}))
+            .unwrap();
+        let info = fixture.call(json!({"op":"info"})).unwrap();
+        assert_eq!(info["cols"], 93);
+        assert_eq!(info["rows"], 31);
+        assert_eq!(info["workspace"], "Another project");
+        assert!(
+            rpc_at(
+                &fixture.root,
+                &fixture.id,
+                &random().unwrap(),
+                json!({"op":"close"})
+            )
+            .is_err()
+        );
+        fixture.call(json!({"op":"close"})).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.root.join(format!("{}.json", fixture.id)).exists() {
+            assert!(Instant::now() < deadline, "Native fixture was not removed");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     #[test]
     #[cfg(unix)]

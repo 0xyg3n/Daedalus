@@ -47,6 +47,17 @@ if (-not $SkipInstallerFixtures) {
         & $installer -Binary $binary -Sha256 $hash -Prefix $prefix -Confirm:$false
         $installed = Join-Path $prefix 'bin/daedalus.exe'
         if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $hash) { throw 'Installer copy mismatch.' }
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        foreach ($path in @($prefix, (Split-Path $installed), $installed, (Join-Path $prefix 'install.json'))) {
+            $acl = Get-Acl -LiteralPath $path
+            if (-not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid) -or -not $acl.AreAccessRulesProtected) {
+                throw 'Installer did not preserve private individual ownership.'
+            }
+        }
+        $receipt = [IO.File]::ReadAllBytes((Join-Path $prefix 'install.json'))
+        if ($receipt[0] -ne [byte][char]'{') { throw 'Installer receipt must be UTF-8 JSON without a BOM.' }
+        # A repeat install exercises receipt validation and private atomic replacement.
+        & $installer -Binary $binary -Sha256 $hash -Prefix $prefix -Confirm:$false
         $rejected = $false
         try { & $installer -Binary $binary -Sha256 ('0' * 64) -Prefix $prefix -Confirm:$false } catch { $rejected = $true }
         if (-not $rejected) { throw 'Installer accepted a mismatched checksum.' }

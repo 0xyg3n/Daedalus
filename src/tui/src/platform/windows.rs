@@ -806,6 +806,105 @@ pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// A background process with no inherited console, pipes, files or locks.
+/// Rust's default Windows spawn inherits additional handles even with null stdio.
+pub struct BackgroundProcess(File);
+impl BackgroundProcess {
+    pub fn try_wait(&mut self) -> io::Result<Option<u32>> {
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                if unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut code) } == 0 {
+                    return Err(last());
+                }
+                Ok(Some(code))
+            }
+            _ => Err(last()),
+        }
+    }
+    pub fn wait(&mut self) -> io::Result<()> {
+        if unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+            return Err(last());
+        }
+        Ok(())
+    }
+    pub fn kill(&mut self) -> io::Result<()> {
+        if unsafe { TerminateProcess(self.0.as_raw_handle(), 1) } == 0 {
+            return Err(last());
+        }
+        Ok(())
+    }
+}
+pub fn spawn_background(executable: &Path, args: &[&str]) -> io::Result<BackgroundProcess> {
+    let program = wide(executable)?;
+    let mut command = Vec::new();
+    for arg in std::iter::once(executable.as_os_str()).chain(args.iter().map(std::ffi::OsStr::new))
+    {
+        if !command.is_empty() {
+            command.push(b' ' as u16);
+        }
+        command.push(b'"' as u16);
+        let mut slashes = 0;
+        for unit in arg.encode_wide() {
+            if unit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Argument contains NUL",
+                ));
+            }
+            if unit == b'\\' as u16 {
+                slashes += 1;
+                continue;
+            }
+            command.extend(std::iter::repeat_n(
+                b'\\' as u16,
+                if unit == b'"' as u16 {
+                    slashes * 2 + 1
+                } else {
+                    slashes
+                },
+            ));
+            slashes = 0;
+            command.push(unit);
+        }
+        command.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+        command.push(b'"' as u16);
+    }
+    command.push(0);
+    if command.len() > 32_767 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Command exceeds Windows limit",
+        ));
+    }
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of_val(&startup) as u32;
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe {
+        CreateProcessW(
+            program.as_ptr(),
+            command.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+            ptr::null(),
+            ptr::null(),
+            &startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(last());
+    }
+    // Take ownership immediately; neither handle is inheritable.
+    let _thread = unsafe { File::from_raw_handle(process.hThread) };
+    Ok(BackgroundProcess(unsafe {
+        File::from_raw_handle(process.hProcess)
+    }))
+}
 /// Atomic no-replace move used by migration publication.
 pub fn rename_new(source: &Path, destination: &Path) -> io::Result<()> {
     check_path(source)?;
@@ -852,6 +951,55 @@ pub fn user_local_data_directory() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn background_process_does_not_keep_inheritable_files_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = fixture();
+        let path = root.join("exclusive-file");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert_ne!(
+            unsafe {
+                SetHandleInformation(
+                    file.as_raw_handle(),
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT,
+                )
+            },
+            0
+        );
+        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut child = spawn_background(
+            &executable,
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 20",
+            ],
+        )
+        .unwrap();
+        drop(file);
+        let reopened = fs::OpenOptions::new().write(true).share_mode(0).open(&path);
+        let running = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            running,
+            "Background fixture must remain alive during the handle check"
+        );
+        assert!(
+            reopened.is_ok(),
+            "Detached child inherited an unrelated exclusive file handle"
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
     fn fixture() -> PathBuf {
         let mut random = [0; 16];
         random_bytes(&mut random).unwrap();

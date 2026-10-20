@@ -143,6 +143,7 @@ impl ControlConfig {
                 return Err("Invalid Herdr metadata session".into());
             }
             validate_path(socket)?;
+            #[cfg(unix)]
             if socket.len() >= 108 {
                 return Err("Herdr metadata socket path exceeds Unix socket limit".into());
             }
@@ -239,6 +240,23 @@ mod tests {
             .herdr_sockets
             .insert("work".into(), format!("/{}", "x".repeat(108)));
         assert!(config.validate().is_err());
+    }
+    #[test]
+    fn metadata_socket_length_uses_the_native_transport() {
+        let mut config =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/work"))).unwrap();
+        config.discovery.herdr_sockets.insert(
+            "work".into(),
+            format!(
+                "{}{}.sock",
+                crate::test_support::path("/tmp/"),
+                "x".repeat(120)
+            ),
+        );
+        #[cfg(unix)]
+        assert!(config.validate().is_err());
+        #[cfg(windows)]
+        assert!(config.validate().is_ok());
     }
     #[test]
     fn rejects_unsafe_or_unknown_configuration() {

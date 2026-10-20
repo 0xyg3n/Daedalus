@@ -19,6 +19,42 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "$Command failed (exit $LASTEXITCODE)." }
 }
 function Get-Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function New-PrivateInstallAcl([bool]$Directory) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    if ($Directory) { $acl = New-Object Security.AccessControl.DirectorySecurity }
+    else { $acl = New-Object Security.AccessControl.FileSecurity }
+    $acl.SetOwner($identity)
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritance = if ($Directory) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $identity, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance,
+        [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $acl
+}
+function New-PrivateInstallDirectory([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        # Set the individual owner at creation, including in an elevated shell.
+        $acl = New-PrivateInstallAcl $true
+        if ($PSVersionTable.PSEdition -eq 'Core') { [void][IO.FileSystemAclExtensions]::CreateDirectory($acl, $Path) }
+        else { [void][IO.Directory]::CreateDirectory($Path, $acl) }
+    }
+    Set-PrivateInstallAcl $Path
+}
+function Write-NewPrivateInstallFile([string]$Path, [byte[]]$Bytes) {
+    $acl = New-PrivateInstallAcl $false
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $stream = [IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path), [IO.FileMode]::CreateNew,
+            [Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 81920, [IO.FileOptions]::None, $acl)
+    } else {
+        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew,
+            [Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 81920, [IO.FileOptions]::None, $acl)
+    }
+    try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+}
 function Set-PrivateInstallAcl([string]$Path) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = Get-Acl -LiteralPath $Path
@@ -157,24 +193,29 @@ try {
     $hash = Get-Hash $candidate
     if (-not $Source -and $hash -ne $Sha256.ToLowerInvariant()) { throw 'Downloaded/copied executable checksum mismatch.' }
     $release = Join-Path $Prefix ('share/daedalus/native/' + $hash)
-    [void][IO.Directory]::CreateDirectory($release)
-    [void][IO.Directory]::CreateDirectory($binDirectory)
-    Set-PrivateInstallAcl $release
-    Set-PrivateInstallAcl $binDirectory
+    New-PrivateInstallDirectory $Prefix
+    New-PrivateInstallDirectory $release
+    New-PrivateInstallDirectory $binDirectory
     $releaseBinary = Join-Path $release 'daedalus.exe'
     if (Test-Path -LiteralPath $releaseBinary) {
         if ((Get-Hash $releaseBinary) -ne $hash) { throw 'Existing versioned executable has changed.' }
-    } else { Copy-Item -LiteralPath $candidate -Destination $releaseBinary }
+    } else { Write-NewPrivateInstallFile $releaseBinary ([IO.File]::ReadAllBytes($candidate)) }
     Set-PrivateInstallAcl $releaseBinary
     $staged = Join-Path $binDirectory ('daedalus-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        Copy-Item -LiteralPath $releaseBinary -Destination $staged
+        Write-NewPrivateInstallFile $staged ([IO.File]::ReadAllBytes($releaseBinary))
         Set-PrivateInstallAcl $staged
         if ((Get-Hash $staged) -ne $hash) { throw 'Installed copy failed checksum verification.' }
         Move-Item -LiteralPath $staged -Destination $destination -Force
         Set-PrivateInstallAcl $destination
     } finally { if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force } }
-    @{ version = 1; sha256 = $hash; target = 'x86_64-pc-windows-msvc' } | ConvertTo-Json | Set-Content -LiteralPath $receiptPath -Encoding UTF8
+    if (Test-Path -LiteralPath $receiptPath) { Set-PrivateInstallAcl $receiptPath }
+    $receiptStage = Join-Path $Prefix ('install-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $record = @{ version = 1; sha256 = $hash; target = 'x86_64-pc-windows-msvc' } | ConvertTo-Json
+        Write-NewPrivateInstallFile $receiptStage ((New-Object Text.UTF8Encoding($false)).GetBytes($record))
+        Move-Item -LiteralPath $receiptStage -Destination $receiptPath -Force
+    } finally { if (Test-Path -LiteralPath $receiptStage) { Remove-Item -LiteralPath $receiptStage -Force } }
     Write-Host "Installed $destination"
     Write-Host "Run: & '$destination' setup"
 } finally { Remove-Item -LiteralPath $temporary -Recurse -Force }

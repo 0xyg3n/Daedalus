@@ -268,7 +268,7 @@ mod tests {
         layouts::write_private(&binary, b"fixture").unwrap();
         let plan = Plan {
             directory: root.clone(),
-            target: binary.clone(),
+            target: std::fs::canonicalize(&binary).unwrap(),
             binary,
             registrations: vec![],
             rows: vec![],
@@ -285,7 +285,8 @@ mod tests {
                 },
             ],
         };
-        assert!(plan.apply(&root).unwrap_err().contains("profile changed"));
+        let error = plan.apply(&root).unwrap_err();
+        assert!(error.contains("profile changed"), "{error}");
         assert_eq!(std::fs::read(&a).unwrap(), b"original-a");
         assert_eq!(std::fs::read(&b).unwrap(), b"manual-edit");
         assert!(!root.join("hook-reloads").exists());

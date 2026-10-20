@@ -10,6 +10,12 @@ use std::{
 
 const MAX_BINARY: u64 = 256 * 1024 * 1024;
 
+fn receipt_record(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    // Windows PowerShell 5.1 installers previously wrote UTF-8 with a BOM.
+    serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+        .map_err(|_| "Invalid Daedalus installer receipt".into())
+}
+
 fn private_dir(path: &Path) -> Result<(), String> {
     platform::secure_owned_dir(path).map_err(|e| format!("Cannot secure install directory: {e}"))
 }
@@ -80,8 +86,7 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
             .map_err(|e| format!("Cannot secure install receipt: {e}"))?;
         let record = layouts::read_private(&receipt)?
             .ok_or("Existing Daedalus installer receipt disappeared")?;
-        let record: serde_json::Value =
-            serde_json::from_slice(&record).map_err(|_| "Invalid Daedalus installer receipt")?;
+        let record = receipt_record(&record)?;
         let expected = record
             .get("sha256")
             .and_then(serde_json::Value::as_str)
@@ -161,4 +166,20 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
         &serde_json::to_vec(&record).map_err(|e| e.to_string())?,
     )?;
     Ok(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_powershell_receipts_and_native_receipts_have_the_same_fields() {
+        let json = br#"{"version":1,"sha256":"fixture-checksum"}"#;
+        let mut legacy = b"\xef\xbb\xbf".to_vec();
+        legacy.extend_from_slice(json);
+        assert_eq!(
+            receipt_record(json).unwrap(),
+            receipt_record(&legacy).unwrap()
+        );
+        assert!(receipt_record(b"\xef\xbb\xbfnot-json").is_err());
+    }
 }

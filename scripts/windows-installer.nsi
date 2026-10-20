@@ -50,7 +50,7 @@ Section "Install"
   Pop $0
   Pop $1
   ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONSTOP "Daedalus could not install for this user. Close any running Daedalus window and try again. The existing installation was not removed."
+    MessageBox MB_OK|MB_ICONSTOP "Daedalus could not install for this user. Stop its Telegram service from Telegram settings, close all Daedalus windows and try again. The existing installation was not removed."
     Abort
   ${EndIf}
 

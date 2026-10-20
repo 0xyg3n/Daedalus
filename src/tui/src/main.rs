@@ -3188,7 +3188,7 @@ mod cli_tests {
         ui.reveal("a");
         let plan = json!({
             "adapter":"herdr-session", "mode":"control", "node":"a",
-            "argv":[crate::test_support::path("/bin/sh"), "-c", "while read line; do :; done"]
+            "argv": idle_stream_argv()
         });
         open_embed(&mut ui, &plan);
         assert!(ui.embed.is_some());
@@ -3730,6 +3730,37 @@ mod cli_tests {
     }
     #[cfg(windows)]
     #[test]
+    #[ignore = "child process fixture; invoked explicitly by the detach tests"]
+    fn idle_stream_fixture() {
+        loop {
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).unwrap() == 0
+                || line.contains("terminal.release")
+            {
+                break;
+            }
+        }
+    }
+    fn idle_stream_argv() -> Vec<String> {
+        #[cfg(unix)]
+        return vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while read line; do :; done".into(),
+        ];
+        #[cfg(windows)]
+        return vec![
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "--exact".into(),
+            "cli_tests::idle_stream_fixture".into(),
+            "--ignored".into(),
+        ];
+    }
+    #[cfg(windows)]
+    #[test]
     fn quit_fixture_worker() {
         let Ok(mode) = std::env::var("DAEDALUS_TEST_WORKER") else {
             return;
@@ -4214,7 +4245,7 @@ mod cli_tests {
             ui.reveal("a");
             let plan = json!({
                 "adapter":"herdr-session", "mode":"control", "node":"a",
-                "argv":[crate::test_support::path("/bin/sh"), "-c", "while read line; do :; done"]
+                "argv": idle_stream_argv()
             });
             open_embed(&mut ui, &plan);
             assert!(ui.embed.is_some());

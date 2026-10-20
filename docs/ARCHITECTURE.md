@@ -89,8 +89,10 @@ git diff --check
 
 On native Windows, run `./scripts/check-windows.ps1` in PowerShell. It adds
 isolated PE/checksum installer fixtures and performs the same Cargo checks.
-Cross-compilation is compile evidence only; console, ACL, multiplexer and provider
-behavior still require real Windows validation. No hosted workflow is required.
+The native Windows suite includes a real isolated ConPTY shell test for input,
+capture, resize, identity refusal and cleanup. Installer fixtures verify individual
+ownership and BOM-free receipts. Cross-compilation alone does not validate runtime
+behavior; live provider delivery needs separate checks. No hosted workflow is required.
 
 `scripts/check.sh` runs `cargo fmt --check`, `cargo test --locked --all-targets`,
 `cargo clippy -D warnings` and a release build for `src/tui`.
