@@ -1413,7 +1413,9 @@ impl Source for NativeSource {
             instance: config.agent_name.clone(),
             directory: self.directory.clone(),
             profile: spec.profile,
-            binary: std::env::current_exe().map_err(|_| "Cannot locate native hook executable")?,
+            binary: super::hook_install::installed_launcher(
+                std::env::current_exe().map_err(|_| "Cannot locate native hook executable")?,
+            ),
             transcript: spec.transcript,
             registration_id,
             options: spec.options,

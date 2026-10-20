@@ -84,9 +84,11 @@ profile. A Daedalus registration belongs to one exact conversation and terminal:
 events from other conversations receive an empty response and create no delivery
 record. When Codex resumes a conversation into a new rollout file, Daedalus uses
 the registered session and process identity; the older transcript path does not
-invalidate the hook. Existing profile commands can remain pinned to an older
-binary after an application update; review a profile update and then trust the
-changed commands in Codex `/hooks` before expecting them to run.
+invalidate the hook. Installed profiles use the stable Daedalus launcher when it
+points to the running release, so later application updates keep the same hook
+command. Profiles installed by older releases can still contain a pinned binary
+path. Review and reinstall those profiles, trust changed commands in Codex
+`/hooks`, and resume already running Codex sessions so they load the new command.
 
 ## Native Windows
 

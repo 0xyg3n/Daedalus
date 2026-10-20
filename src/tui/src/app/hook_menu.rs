@@ -15,7 +15,7 @@ type Result<T> = std::result::Result<T, String>;
 pub struct Spec {
     pub pane: Value,
     pub profile: PathBuf,
-    pub transcript: PathBuf,
+    pub transcript: Option<PathBuf>,
     pub options: Options,
     pub goal_id: Option<String>,
 }
@@ -34,6 +34,7 @@ enum Stage {
     RemovalResult(PathBuf),
     Pane(Vec<Value>),
     BatchStart(Vec<Value>),
+    BatchError(Value),
     Profile(Value),
     Transcript(Spec),
     Preset(Spec),
@@ -64,6 +65,7 @@ struct Pending {
 pub struct Menu {
     pending: Option<Pending>,
     batch: VecDeque<Value>,
+    batch_active: bool,
 }
 impl Menu {
     pub fn pending(&self) -> bool {
@@ -72,6 +74,7 @@ impl Menu {
     pub fn cancel(&mut self) {
         self.pending = None;
         self.batch.clear();
+        self.batch_active = false;
     }
     fn frame(
         &mut self,
@@ -109,6 +112,7 @@ impl Menu {
             return Err("Finish the current hook dialog first".into());
         }
         self.batch.clear();
+        self.batch_active = false;
         if let Some(pane) = view.selected {
             return self.profile(pane, seq);
         }
@@ -143,6 +147,7 @@ impl Menu {
             return Err("Finish the current hook dialog first".into());
         }
         self.batch.clear();
+        self.batch_active = false;
         let mut seen = std::collections::HashSet::new();
         let panes = view.snapshot["panes"]
             .as_array()
@@ -185,21 +190,45 @@ impl Menu {
     fn next_batch(&mut self, seq: &mut u64) -> Result<Outcome> {
         match self.batch.pop_front() {
             Some(pane) => self.profile(pane, seq),
-            None => Ok(Outcome {
-                message: "All selected hook sessions were reviewed".into(),
-                refresh: true,
-                ..Default::default()
-            }),
+            None => {
+                self.batch_active = false;
+                Ok(Outcome {
+                    message: "Finished reviewing detected hook sessions".into(),
+                    refresh: true,
+                    ..Default::default()
+                })
+            }
         }
+    }
+    fn batch_error(&mut self, pane: Value, error: String, seq: &mut u64) -> Result<Outcome> {
+        self.frame(
+            seq,
+            "choose",
+            "Hook preview failed",
+            json!({"description":error,"options":[
+                ["retry","Retry this agent","Enter its profile and transcript again"],
+                ["skip","Skip this agent","Continue with the next detected session"],
+                ["stop","Stop setup","Keep any previously installed profiles"]]}),
+            Stage::BatchError(pane),
+        )
     }
     fn profile(&mut self, pane: Value, seq: &mut u64) -> Result<Outcome> {
         self.frame(
             seq,
             "input",
             "Native hook profile file (absolute path)",
-            json!({"secret":false}),
+            json!({"secret":false,"description": if self.batch_active {"Enter the exact native profile path, or type skip to continue to the next agent."} else {"Enter the exact native profile path."}}),
             Stage::Profile(pane),
         )
+    }
+    fn preset(&mut self, spec: Spec, seq: &mut u64) -> Result<Outcome> {
+        self.frame(seq, "choose", "Choose hook setup", json!({
+            "description": "The standard set tracks lifecycle and enables Telegram final replies and progress. Delivery still needs an authorized chat binding.",
+            "options": [
+                ["defaults", "Install standard hooks", "Review the recommended settings"],
+                ["custom", "Choose features", "Adjust Telegram, notifications, memory and goal binding"]
+            ]
+        }), Stage::Preset(spec))
     }
     fn options(&mut self, spec: Spec, seq: &mut u64) -> Result<Outcome> {
         let toggles = [
@@ -271,7 +300,7 @@ impl Menu {
                 "Set the endpoint and registration bank"
             ]),
         ];
-        if !self.batch.is_empty() {
+        if self.batch_active {
             options.push(json!([
                 "next",
                 "Next detected agent",
@@ -475,7 +504,12 @@ impl Menu {
         spec: Spec,
         seq: &mut u64,
     ) -> Result<Outcome> {
-        let plan = source.prepare_hooks(config, spec)?;
+        let pane = spec.pane.clone();
+        let plan = match source.prepare_hooks(config, spec) {
+            Ok(plan) => plan,
+            Err(error) if self.batch_active => return self.batch_error(pane, error, seq),
+            Err(error) => return Err(error),
+        };
         let summary = json!({
             "profile": plan.profile,
             "registration": plan.registration.id,
@@ -586,6 +620,8 @@ impl Menu {
         }
         let pending = self.pending.take().unwrap();
         if value.is_null() {
+            self.batch.clear();
+            self.batch_active = false;
             return Ok(Outcome::default());
         }
         let text = value.as_str().unwrap();
@@ -593,8 +629,14 @@ impl Menu {
             Stage::BatchStart(panes) => {
                 if text == "cancel" { return Ok(Outcome::default()); }
                 self.batch = panes.into();
+                self.batch_active = true;
                 self.next_batch(seq)
             }
+            Stage::BatchError(pane) => match text {
+                "retry" => self.profile(pane,seq),
+                "skip" => self.next_batch(seq),
+                _ => { self.batch.clear(); self.batch_active=false; Ok(Outcome::default()) }
+            },
             Stage::HerdrReview(plan) => self.frame(seq, "choose", "Confirm Herdr integration installation",
                 json!({"options":[["cancel","Cancel","Keep the profile unchanged"],["yes","Install or update","Back up reviewed files, run Herdr and verify its status"]]}), Stage::HerdrApply(plan)),
             Stage::HerdrApply(plan) => {
@@ -638,32 +680,36 @@ impl Menu {
                 self.profile(pane, seq)
             }
             Stage::Profile(pane) => {
+                if text == "skip" && self.batch_active { return self.next_batch(seq); }
                 let profile = PathBuf::from(text);
-                crate::core::layouts::check_path(&profile)?;
+                if let Err(error)=crate::core::layouts::check_path(&profile) {
+                    if self.batch_active { return self.batch_error(pane,error,seq); }
+                    return Err(error);
+                }
+                let opencode = pane["agent"].as_str().is_some_and(|agent| agent.eq_ignore_ascii_case("opencode"));
+                let spec = Spec { pane, profile, transcript: None, options: Options::guided(), goal_id: None };
+                if opencode {
+                    return self.preset(spec, seq);
+                }
                 self.frame(
                     seq,
                     "input",
-                    "Native transcript file (absolute path)",
-                    json!({"secret": false}),
-                    Stage::Transcript(Spec {
-                        pane,
-                        profile,
-                        transcript: PathBuf::new(),
-                        options: Options::guided(),
-                        goal_id: None,
-                    }),
+                    "Native transcript file (absolute path or none)",
+                    json!({"secret": false,"description":if self.batch_active {"Enter an absolute transcript path, none if unused, or skip to continue to the next agent."} else {"Enter an absolute transcript path, or none if unused."}}),
+                    Stage::Transcript(spec),
                 )
             }
             Stage::Transcript(mut spec) => {
-                spec.transcript = text.into();
-                crate::core::layouts::check_path(&spec.transcript)?;
-                self.frame(seq, "choose", "Choose hook setup", json!({
-                    "description": "The standard set tracks lifecycle and enables Telegram final replies and progress. Delivery still needs an authorized chat binding.",
-                    "options": [
-                        ["defaults", "Install standard hooks", "Review the recommended settings"],
-                        ["custom", "Choose features", "Adjust Telegram, notifications, memory and goal binding"]
-                    ]
-                }), Stage::Preset(spec))
+                if text == "skip" && self.batch_active { return self.next_batch(seq); }
+                if text != "none" {
+                    let path = PathBuf::from(text);
+                    if let Err(error)=crate::core::layouts::check_path(&path) {
+                        if self.batch_active { return self.batch_error(spec.pane,error,seq); }
+                        return Err(error);
+                    }
+                    spec.transcript = Some(path);
+                }
+                self.preset(spec, seq)
             }
             Stage::Preset(spec) => {
                 if text == "custom" {
@@ -709,6 +755,7 @@ impl Menu {
             Stage::Apply(plan) => {
                 if text == "cancel" {
                     self.batch.clear();
+                    self.batch_active = false;
                     return Ok(Outcome::default());
                 }
                 let receipt = source.apply_hooks(*plan)?;
@@ -716,7 +763,7 @@ impl Menu {
                     json!(["telegram", "Connect Telegram", "Choose an explicitly authorized recipient and review its route"]),
                     json!(["memory", "Configure Hindsight", "Set an explicit endpoint and memory bank for this registration"]),
                     json!(["rollback", "Restore previous profile", "Restore only if installed bytes still match; preserve later edits"])];
-                if !self.batch.is_empty() { options.push(json!(["next","Next detected agent","Review the next native profile"])); }
+                if self.batch_active { options.push(json!(["next","Next detected agent","Review the next native profile"])); }
                 self.frame(
                     seq,
                     "choose",
@@ -734,6 +781,7 @@ impl Menu {
                 "next" => self.next_batch(seq),
                 _ => {
                     self.batch.clear();
+                    self.batch_active = false;
                     let message = if text == "rollback" {
                         source.rollback_hooks(receipt)?;
                         "Previous hook profile restored"
@@ -841,6 +889,8 @@ mod tests {
         previews: usize,
         applies: usize,
         fail: bool,
+        fail_preview: bool,
+        last_transcript: Option<Option<PathBuf>>,
     }
     impl Mock {
         fn new() -> Self {
@@ -876,6 +926,8 @@ mod tests {
                 previews: 0,
                 applies: 0,
                 fail: false,
+                fail_preview: false,
+                last_transcript: None,
             }
         }
     }
@@ -994,6 +1046,10 @@ mod tests {
         }
         fn prepare_hooks(&mut self, _: &ControlConfig, spec: Spec) -> Result<Preview> {
             self.previews += 1;
+            self.last_transcript = Some(spec.transcript.clone());
+            if self.fail_preview {
+                return Err("Native profile is unsupported".into());
+            }
             hook_install::preview(
                 &hook_install::Request {
                     harness: Harness::Claude,
@@ -1012,7 +1068,7 @@ mod tests {
                     directory: self.dir.clone(),
                     profile: spec.profile,
                     binary: self.terminals.herdr.clone(),
-                    transcript: Some(spec.transcript),
+                    transcript: spec.transcript,
                     server_emitter: None,
                     registration_id: "hook-fixture".into(),
                     options: spec.options,
@@ -1050,6 +1106,20 @@ mod tests {
             checkpoint: None,
             node: String::new(),
         }
+    }
+    #[test]
+    fn opencode_profile_does_not_force_an_invalid_transcript() {
+        let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+        let mut selected = view();
+        selected.selected.as_mut().unwrap()["agent"] = json!("opencode");
+        menu.start(selected, &mut seq).unwrap();
+        let profile = mock.dir.join("bridge.mjs");
+        let result = reply(&mut menu, &mut mock, &mut seq, json!(profile));
+        assert_eq!(result.unwrap().frames[0]["title"], "Choose hook setup");
+        assert_eq!(mock.last_transcript, None);
+        let review = reply(&mut menu, &mut mock, &mut seq, json!("defaults")).unwrap();
+        assert_eq!(review.frames[0]["mode"], "output");
+        assert_eq!(mock.last_transcript, Some(None));
     }
     #[test]
     fn fleet_setup_lists_only_agent_sessions_and_does_not_install_before_review() {
@@ -1108,6 +1178,28 @@ mod tests {
             "Native hook profile file (absolute path)"
         );
         assert_eq!(mock.applies, 1);
+    }
+    #[test]
+    fn fleet_preview_failure_can_skip_without_installing_anything() {
+        let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+        mock.fail_preview = true;
+        let mut fleet = view();
+        fleet.selected = None;
+        fleet.snapshot = json!({"panes":[{"backend":"herdr","pane_id":"pane","terminal_id":"terminal","agent":"claude"}]});
+        menu.start_all(fleet, &mut seq).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("start")).unwrap();
+        let profile = mock.dir.join("hooks.json");
+        let transcript = mock.dir.join("transcript.jsonl");
+        reply(&mut menu, &mut mock, &mut seq, json!(profile)).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!(transcript)).unwrap();
+        let failed = reply(&mut menu, &mut mock, &mut seq, json!("defaults")).unwrap();
+        assert_eq!(failed.frames[0]["title"], "Hook preview failed");
+        assert_eq!(mock.applies, 0);
+        let finish = reply(&mut menu, &mut mock, &mut seq, json!("skip")).unwrap();
+        assert!(finish.message.contains("Finished reviewing"));
+        assert!(!menu.pending());
+        assert!(!menu.batch_active);
+        assert_eq!(mock.applies, 0);
     }
     fn reply(menu: &mut Menu, mock: &mut Mock, seq: &mut u64, value: Value) -> Result<Outcome> {
         menu.reply(

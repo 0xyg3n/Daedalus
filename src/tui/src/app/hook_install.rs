@@ -54,11 +54,40 @@ pub struct LiveRequest {
     pub directory: PathBuf,
     pub profile: PathBuf,
     pub binary: PathBuf,
-    pub transcript: PathBuf,
+    pub transcript: Option<PathBuf>,
     pub registration_id: String,
     pub options: Options,
     pub goal_id: Option<String>,
     pub harness_version: String,
+}
+
+/// Prefer the updater's stable launcher for installed hooks. Codex keeps hook
+/// commands in memory for the lifetime of a session; a content-addressed
+/// release path makes those commands stale after an update.
+pub fn installed_launcher(current: PathBuf) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let Some(home) = std::env::var_os("HOME") else {
+            return current;
+        };
+        installed_launcher_in(current, &PathBuf::from(home))
+    }
+    #[cfg(not(unix))]
+    current
+}
+
+#[cfg(unix)]
+fn installed_launcher_in(current: PathBuf, home: &Path) -> PathBuf {
+    let launcher = home.join(".local/bin/daedalus");
+    if std::fs::symlink_metadata(&launcher).is_ok_and(|meta| meta.file_type().is_symlink())
+        && std::fs::canonicalize(&current)
+            .ok()
+            .is_some_and(|running| std::fs::canonicalize(&launcher).ok() == Some(running))
+    {
+        launcher
+    } else {
+        current
+    }
 }
 pub fn preview_live(
     request: &LiveRequest,
@@ -103,7 +132,7 @@ pub fn preview_live(
         directory: request.directory.clone(),
         profile: request.profile.clone(),
         binary: request.binary.clone(),
-        transcript: Some(request.transcript.clone()),
+        transcript: request.transcript.clone(),
         registration_id: request.registration_id.clone(),
         options: request.options.clone(),
         goal_id: request.goal_id.clone(),
@@ -1027,6 +1056,21 @@ mod tests {
         }
     }
     #[test]
+    fn updater_launcher_keeps_hook_command_stable() {
+        let f = Fixture::new();
+        let bin = f.dir.join("release/daedalus");
+        let launcher = f.dir.join(".local/bin/daedalus");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        fs::write(&bin, b"fixture").unwrap();
+        std::os::unix::fs::symlink(&bin, &launcher).unwrap();
+        assert_eq!(installed_launcher_in(bin.clone(), &f.dir), launcher);
+        assert_eq!(
+            installed_launcher_in(f.request.binary.clone(), &f.dir),
+            f.request.binary
+        );
+    }
+    #[test]
     fn direct_windows_hook_preserves_paths_as_argv() {
         let mut handler = json!({"type":"command","timeout":15,"statusMessage":"managed"});
         let binary = r"C:\Program Files\Daedalus\daedalus.exe";
@@ -1167,7 +1211,7 @@ mod tests {
             directory: f.dir.clone(),
             profile: f.request.profile.clone(),
             binary: f.request.binary.clone(),
-            transcript: f.request.transcript.clone().unwrap(),
+            transcript: f.request.transcript.clone(),
             registration_id: "live".into(),
             options: Options::default(),
             goal_id: None,
