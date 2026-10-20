@@ -129,10 +129,22 @@ The selected pane stays selected; other chats keep their defaults. After saving,
 connect its installed reply hook when prompted to enable responses. If no matching
 hook exists, **Set up standard hooks** opens the installer for that exact terminal
 and continues to the selected chat's recipient review. Codex and Claude profiles
-are detected from the live process; other adapters request an explicit profile.
+are detected from the live process. OpenCode defaults to a separate plugin file
+for the selected terminal and conversation under its configuration directory;
+its account/session data directory is not a plugin destination. Other adapters
+request an explicit profile.
 Native trust/reload requirements still apply. A saved route alone does not confirm
 delivery: the Telegram service must be running, and ordinary group messages require
 listening to be enabled.
+
+OpenCode enrollment requires its selected conversation ID to be reported by the
+terminal integration. A running executable alone does not identify a conversation.
+The guided installer verifies a single native local server directly owned by that
+UI and includes both process identities in its review. Shared or remote servers
+require an explicit local server binding through `hook profile-preview`; they are
+never inferred from a pane name. Installing a plugin and observing its first
+accepted event are separate steps. Load the plugin in the owning OpenCode server
+before testing delivery; reconnecting a UI alone does not load server plugins.
 
 On Linux, an existing Codex session with no recorded hook observations can establish
 initial readiness from the native rollout still held open by its registered process.

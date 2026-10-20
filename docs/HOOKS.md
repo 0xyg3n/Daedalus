@@ -33,6 +33,14 @@ one at a time. For Codex and Claude Code, the profile field suggests the detecte
 process profile, or the selected harness's configured/default profile when process
 environment details are unavailable (including Windows). Press Enter to accept the
 shown path, or supply a different absolute path. Changes still require review.
+OpenCode suggests a dedicated plugin file under `OPENCODE_CONFIG_DIR`,
+`XDG_CONFIG_HOME/opencode`, or `~/.config/opencode`. Each terminal/conversation
+gets a separate file and plugin ID. Enrollment verifies the reported conversation
+and one directly owned local native server; shared servers need an explicit
+server binding using the CLI.
+After the first installation or server reload, complete one turn directly in
+OpenCode before sending Telegram input. The prompt and successful completion
+hooks establish readiness; loading a plugin alone does not mark an agent idle.
 If no default is detected, empty input keeps the form open. Type `skip` or press
 Esc to leave setup without installing hooks; a saved Telegram route does not yet
 have replies connected. The optional transcript field accepts Enter for `none`.
@@ -104,6 +112,12 @@ Claude Code 2.1.296+, Hermes, Pi and OpenCode. Windows guided hooked first launc
 Codex/Grok/Cursor hooks and hooks through native tmux-compatible backends are
 unverified and fail closed. Native terminal controls and ordinary launch are
 separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boundaries).
+
+Native harness profile folders created from an elevated terminal may be owned by
+the local Administrators group. Daedalus accepts these when the ACL explicitly
+grants the current user access and contains only that user, SYSTEM and local
+Administrators. Ordinary shared access is rejected. Daedalus state, tokens,
+registrations and backups retain their stricter current-user ownership checks.
 
 ### Grok idle readiness
 

@@ -104,6 +104,9 @@ pub fn preview_live(
     let (checkpoint, frozen) =
         sessions.freeze_live_source(terminals, config, environment, pane, "")?;
     if checkpoint.sid.is_empty() || checkpoint.origin != "Native metadata" {
+        if checkpoint.harness == "opencode" {
+            return Err("OpenCode has not reported its selected conversation ID. Check the terminal integration, open or reselect the conversation, and refresh before connecting Telegram. A running process alone cannot identify the recipient session.".into());
+        }
         return Err(
             "Harness has not reported a native conversation ID; wait for session registration"
                 .into(),
@@ -117,20 +120,26 @@ pub fn preview_live(
     };
     let harness = serde_json::from_value::<Harness>(json!(checkpoint.harness))
         .map_err(|_| "Native hook adapter is unavailable")?;
+    let process = ProcessIdentity {
+        pid: numeric("pid")?
+            .parse()
+            .map_err(|_| "Invalid foreground PID")?,
+        start_ticks: numeric("start")?
+            .parse()
+            .map_err(|_| "Invalid foreground generation")?,
+    };
+    let server_emitter = if harness == Harness::Opencode {
+        Some(local_opencode_server(&process, &terminals.proc_root)?)
+    } else {
+        None
+    };
     let request = Request {
         harness,
         instance: request.instance.clone(),
         terminal: crate::adapters::terminals::identity(&frozen)?,
         conversation: checkpoint.sid,
-        process: ProcessIdentity {
-            pid: numeric("pid")?
-                .parse()
-                .map_err(|_| "Invalid foreground PID")?,
-            start_ticks: numeric("start")?
-                .parse()
-                .map_err(|_| "Invalid foreground generation")?,
-        },
-        server_emitter: None,
+        process,
+        server_emitter,
         directory: request.directory.clone(),
         profile: request.profile.clone(),
         binary: request.binary.clone(),
@@ -141,6 +150,123 @@ pub fn preview_live(
         harness_version: request.harness_version.clone(),
     };
     preview(&request, terminals)
+}
+
+// A shared/remote server cannot be inferred from a terminal label. Guided
+// enrollment supports one native local server directly owned by the selected UI.
+// The review pins both process incarnations and the executable's file identity.
+#[cfg(windows)]
+fn local_opencode_server(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+) -> Result<hook_runtime::ServerEmitter> {
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    let root = crate::platform::process_identity(ui.pid).map_err(|_| "OpenCode UI disappeared")?;
+    let executable = crate::platform::open_regular(&root.executable).map_err(|e| e.to_string())?;
+    let identity = crate::platform::file_identity(&executable).map_err(|e| e.to_string())?;
+    let children = crate::platform::descendant_processes(ui.pid)
+        .map_err(|_| "Cannot verify the OpenCode server process")?;
+    let mut servers = Vec::new();
+    for child in children.into_iter().filter(|p| p.parent_pid == ui.pid) {
+        let current = crate::platform::process_identity(child.pid)
+            .map_err(|_| "OpenCode server changed during discovery")?;
+        if current.parent_pid != ui.pid || current.creation_time != child.creation_time {
+            return Err("OpenCode server ancestry changed during discovery".into());
+        }
+        let Ok(file) = crate::platform::open_regular(&child.executable) else {
+            continue;
+        };
+        if crate::platform::file_identity(&file).ok() != Some(identity) {
+            continue;
+        }
+        servers.push(
+            hook_runtime::capture_server_emitter(
+                ProcessIdentity {
+                    pid: child.pid,
+                    start_ticks: child.creation_time,
+                },
+                &child.executable,
+                proc_root,
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    select_local_server(servers)
+}
+
+#[cfg(unix)]
+fn local_opencode_server(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+) -> Result<hook_runtime::ServerEmitter> {
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    let ui_dir = proc_root.join(ui.pid.to_string());
+    let executable =
+        fs::canonicalize(ui_dir.join("exe")).map_err(|_| "OpenCode UI executable disappeared")?;
+    let children = fs::read_to_string(ui_dir.join(format!("task/{}/children", ui.pid)))
+        .map_err(|_| "Cannot discover the local OpenCode server")?;
+    let mut servers = Vec::new();
+    let children: Vec<_> = children.split_whitespace().collect();
+    if children.len() > 128 {
+        return Err("OpenCode server process tree exceeds limit".into());
+    }
+    for pid in children {
+        let Ok(pid) = pid.parse::<u32>() else {
+            return Err("Invalid OpenCode child PID".into());
+        };
+        let directory = proc_root.join(pid.to_string());
+        if fs::canonicalize(directory.join("exe")).ok().as_ref() != Some(&executable) {
+            continue;
+        }
+        let argv =
+            fs::read(directory.join("cmdline")).map_err(|_| "OpenCode server disappeared")?;
+        if argv.len() > 65536 {
+            return Err("OpenCode server arguments exceed limit".into());
+        }
+        let args: Vec<_> = argv.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
+        if !args
+            .windows(2)
+            .any(|a| a == [b"serve".as_slice(), b"--service".as_slice()])
+        {
+            continue;
+        }
+        let stat = fs::read_to_string(directory.join("stat"))
+            .map_err(|_| "OpenCode server disappeared")?;
+        if stat.len() > 8192
+            || stat
+                .rsplit_once(')')
+                .and_then(|(_, tail)| tail.split_whitespace().nth(1))
+                .and_then(|p| p.parse::<u32>().ok())
+                != Some(ui.pid)
+        {
+            return Err("OpenCode server ancestry changed during discovery".into());
+        }
+        let start = crate::adapters::terminals::process_start(proc_root, &pid.to_string())
+            .and_then(|s| s.parse().ok())
+            .ok_or("OpenCode server generation unavailable")?;
+        servers.push(
+            hook_runtime::capture_server_emitter(
+                ProcessIdentity {
+                    pid,
+                    start_ticks: start,
+                },
+                &executable,
+                proc_root,
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    select_local_server(servers)
+}
+fn select_local_server(
+    mut servers: Vec<hook_runtime::ServerEmitter>,
+) -> Result<hook_runtime::ServerEmitter> {
+    if servers.len() != 1 {
+        return Err("Cannot identify one local OpenCode server for this terminal. Shared or remote servers need an explicit server binding through hook profile-preview; no hook was installed.".into());
+    }
+    Ok(servers.pop().unwrap())
 }
 
 pub(crate) fn check_binary_path(path: &Path) -> Result<()> {
@@ -1008,6 +1134,64 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[test]
+    fn guided_opencode_server_rejects_missing_and_ambiguous_bindings() {
+        let server = hook_runtime::ServerEmitter {
+            process: ProcessIdentity {
+                pid: 7,
+                start_ticks: 90,
+            },
+            executable: "/fixture/opencode".into(),
+            device: 1,
+            inode: 2,
+        };
+        assert!(select_local_server(vec![]).is_err());
+        assert!(select_local_server(vec![server.clone(), server.clone()]).is_err());
+        assert_eq!(select_local_server(vec![server.clone()]).unwrap(), server);
+    }
+    #[test]
+    fn guided_opencode_server_pins_native_local_child_and_rejects_other_commands() {
+        let f = Fixture::new();
+        let proc = &f.terminals.proc_root;
+        let executable = f.dir.join("opencode");
+        fs::write(&executable, b"\x7fELFfixture").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(proc.join("42/task/42")).unwrap();
+        fs::write(proc.join("42/task/42/children"), b"43").unwrap();
+        fs::create_dir(proc.join("43")).unwrap();
+        std::os::unix::fs::symlink(&executable, proc.join("42/exe")).unwrap();
+        std::os::unix::fs::symlink(&executable, proc.join("43/exe")).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[1] = "42";
+        fields[19] = "600";
+        fs::write(
+            proc.join("43/stat"),
+            format!("43 (opencode) {}", fields.join(" ")),
+        )
+        .unwrap();
+        fs::write(proc.join("43/cmdline"), b"opencode\0serve\0--service\0").unwrap();
+        let server = local_opencode_server(&f.request.process, proc).unwrap();
+        assert_eq!(
+            server.process,
+            ProcessIdentity {
+                pid: 43,
+                start_ticks: 600
+            }
+        );
+        fs::write(proc.join("43/cmdline"), b"opencode\0run\0").unwrap();
+        assert!(local_opencode_server(&f.request.process, proc).is_err());
+        assert!(
+            local_opencode_server(
+                &ProcessIdentity {
+                    pid: 42,
+                    start_ticks: 501
+                },
+                proc
+            )
+            .is_err()
+        );
+    }
     struct Fixture {
         dir: PathBuf,
         request: Request,
@@ -2249,4 +2433,59 @@ pub fn capabilities() -> [Capability; 7] {
             reference: "https://opencode.ai/v2/docs/build/plugins",
         },
     ]
+}
+
+#[cfg(all(test, windows))]
+mod windows_server_tests {
+    use super::*;
+    #[test]
+    #[ignore = "Private child process for the native server identity test"]
+    fn server_child() {
+        use std::io::Read;
+        let _ = std::io::stdin().read_exact(&mut [0u8; 1]);
+    }
+    #[test]
+    fn guided_server_pins_one_native_child_and_rejects_replaced_ui() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let ui = ProcessIdentity {
+            pid: observed.pid,
+            start_ticks: observed.creation_time,
+        };
+        let proc = Path::new("unused");
+        assert!(local_opencode_server(&ui, proc).is_err());
+        let child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::hook_install::windows_server_tests::server_child",
+                    "--ignored",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pin = local_opencode_server(&ui, proc).unwrap();
+        assert_eq!(pin.process.pid, child.0.id());
+        hook_runtime::verify_server_emitter(&pin, proc).unwrap();
+        assert!(
+            local_opencode_server(
+                &ProcessIdentity {
+                    pid: ui.pid,
+                    start_ticks: ui.start_ticks + 1
+                },
+                proc
+            )
+            .is_err()
+        );
+        drop(child);
+        assert!(hook_runtime::verify_server_emitter(&pin, proc).is_err());
+    }
 }

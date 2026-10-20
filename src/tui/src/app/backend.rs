@@ -801,6 +801,14 @@ impl<S: Source> Backend<S> {
             self.observe_view(request.get("view").ok_or("Missing view")?, false)?;
             return Ok((vec![], false));
         }
+        // Read requests can already be in flight when a dialog is opened.
+        // They never consume or replace its pending reply.
+        if op == "refresh" {
+            return Ok((vec![self.refresh()?], false));
+        }
+        if op == "previews" {
+            return Ok((vec![self.preview(request)?], false));
+        }
         if self.menu.pending() {
             if op == "quit" {
                 self.menu.cancel();
@@ -827,8 +835,6 @@ impl<S: Source> Backend<S> {
             return Ok((vec![self.state()?], false));
         }
         match op {
-            "refresh" => Ok((vec![self.refresh()?], false)),
-            "previews" => Ok((vec![self.preview(request)?], false)),
             "quit" => {
                 if let Some(view) = request.get("view") {
                     self.observe_view(view, true)?;
@@ -1040,6 +1046,40 @@ fn hook_profile_path(harness: &str, observed: Option<&str>, configured: &str) ->
         _ => return None,
     };
     Some(PathBuf::from(directory).join(filename))
+}
+
+fn opencode_hook_path(environment: &BTreeMap<String, String>, identity: &[u8]) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    // XDG_DATA_HOME holds OpenCode sessions/accounts, not native plugins.
+    let root = environment
+        .get("OPENCODE_CONFIG_DIR")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            environment
+                .get("XDG_CONFIG_HOME")
+                .filter(|s| !s.is_empty())
+                .map(|p| PathBuf::from(p).join("opencode"))
+        })
+        .or_else(|| {
+            environment
+                .get("HOME")
+                .map(|p| PathBuf::from(p).join(".config/opencode"))
+        })
+        .ok_or("Cannot locate the OpenCode configuration directory")?;
+    let path = root
+        .join("plugins")
+        .join(format!("daedalus-{:x}.js", Sha256::digest(identity)));
+    layouts::check_path(&path)?;
+    Ok(path)
+}
+fn hook_instance(directory: &Path, config: &ControlConfig) -> Result<String> {
+    let path = directory.join("telegram-service.json");
+    if path.exists() {
+        Ok(super::telegram_config::ServiceConfig::load(&path)?.instance)
+    } else {
+        Ok(config.agent_name.clone())
+    }
 }
 
 impl NativeSource {
@@ -1391,11 +1431,19 @@ impl Source for NativeSource {
         )?;
         // Prefer the exact process profile. Windows falls back to the selected harness's
         // configured/native profile, presented for review before any write.
-        let Some(profile) = hook_profile_path(
-            &checkpoint.harness,
-            frozen["_daedalus_handoff_process"]["profile"].as_str(),
-            &checkpoint.profile,
-        ) else {
+        let profile = if checkpoint.harness == "opencode" {
+            let env = crate::platform::environment();
+            let identity = serde_json::to_vec(&json!([checkpoint.source, checkpoint.sid]))
+                .map_err(|_| "Cannot encode terminal identity")?;
+            Some(opencode_hook_path(&env, &identity)?)
+        } else {
+            hook_profile_path(
+                &checkpoint.harness,
+                frozen["_daedalus_handoff_process"]["profile"].as_str(),
+                &checkpoint.profile,
+            )
+        };
+        let Some(profile) = profile else {
             return Ok(None);
         };
         crate::core::layouts::check_path(&profile)?;
@@ -1495,7 +1543,7 @@ impl Source for NativeSource {
             .map_err(|_| "Cannot encode registration identity")?;
         let registration_id = format!("native-{:x}", Sha256::digest(identity));
         let request = super::hook_install::LiveRequest {
-            instance: config.agent_name.clone(),
+            instance: hook_instance(&self.directory, config)?,
             directory: self.directory.clone(),
             profile: spec.profile,
             binary: super::hook_install::installed_launcher(
@@ -2194,7 +2242,7 @@ impl Source for NativeSource {
         health["telegram"] = telegram;
         health["hooks"] = super::diagnostics::hook_control_view(
             &self.directory,
-            &config.agent_name,
+            &hook_instance(&self.directory, config).unwrap_or_else(|_| config.agent_name.clone()),
             (now * 1000.0) as u64,
         )
         .unwrap_or_else(|_| json!({"tools":[],"switches":[],"goals":null,"status":"unknown"}));
@@ -2468,6 +2516,63 @@ mod tests {
         assert!(hook_profile_path("unknown", Some(observed), configured).is_none());
     }
     #[test]
+    fn opencode_hooks_use_config_not_session_data_and_keep_terminals_separate() {
+        let home = crate::test_support::path("/tmp/hook-home");
+        let custom = crate::test_support::path("/tmp/hook-config");
+        let mut env = BTreeMap::from([
+            ("HOME".into(), home.into()),
+            (
+                "XDG_DATA_HOME".into(),
+                crate::test_support::path("/tmp/accounts").into(),
+            ),
+        ]);
+        let first = opencode_hook_path(&env, b"first-terminal").unwrap();
+        assert_eq!(
+            first.parent().unwrap(),
+            Path::new(home).join(".config/opencode/plugins")
+        );
+        assert_ne!(first, opencode_hook_path(&env, b"second-terminal").unwrap());
+        env.insert("XDG_CONFIG_HOME".into(), custom.into());
+        assert_eq!(
+            opencode_hook_path(&env, b"first-terminal")
+                .unwrap()
+                .parent()
+                .unwrap(),
+            Path::new(custom).join("opencode/plugins")
+        );
+        env.insert("OPENCODE_CONFIG_DIR".into(), home.into());
+        assert_eq!(
+            opencode_hook_path(&env, b"first-terminal")
+                .unwrap()
+                .parent()
+                .unwrap(),
+            Path::new(home).join("plugins")
+        );
+        env.insert("OPENCODE_CONFIG_DIR".into(), "relative/path".into());
+        assert!(opencode_hook_path(&env, b"first-terminal").is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn hook_namespace_matches_saved_telegram_service_and_rejects_invalid_config() {
+        let directory =
+            std::env::temp_dir().join(format!("daedalus-hook-namespace-{}", std::process::id()));
+        let config = ControlConfig::fresh(&directory).unwrap();
+        assert_eq!(
+            hook_instance(&directory, &config).unwrap(),
+            config.agent_name
+        );
+        let service = json!({"version":1,"instance":"telegram","bot_id":1,"token_file":directory.join("telegram.env"),"grants":[],"listen_chats":[],"registrations":[],"hook_bindings":[]});
+        layouts::write_private(
+            &directory.join("telegram-service.json"),
+            &serde_json::to_vec(&service).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hook_instance(&directory, &config).unwrap(), "telegram");
+        layouts::write_private(&directory.join("telegram-service.json"), b"{}").unwrap();
+        assert!(hook_instance(&directory, &config).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
     fn initial_state_has_existing_ui_contract_and_catalog_only_once() {
         let mut backend = backend();
         let first = backend.refresh().unwrap();
@@ -2491,6 +2596,16 @@ mod tests {
         let id = frames[0]["id"].clone();
         let (frames, _) = backend.handle(&json!({"version":2,"op":"view","view":{"mode":"tiles","selected":"","motion":"off"}})).unwrap();
         assert!(frames.is_empty());
+        assert!(backend.menu.pending());
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"refresh"}))
+            .unwrap();
+        assert_eq!(frames[0]["kind"], "state");
+        assert!(backend.menu.pending());
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"previews","nodes":[],"rows":8}))
+            .unwrap();
+        assert_eq!(frames[0]["kind"], "previews");
         assert!(backend.menu.pending());
         let (frames, _) = backend
             .handle(&json!({"version":2,"op":"reply","id":id,"value":null}))
@@ -2954,5 +3069,40 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_hook_tests {
+    use super::*;
+    #[test]
+    fn opencode_plugin_defaults_use_config_not_account_storage() {
+        let home = std::env::temp_dir().join("daedalus-profile-fixture");
+        let mut env = BTreeMap::from([
+            ("HOME".into(), home.to_string_lossy().into_owned()),
+            (
+                "XDG_DATA_HOME".into(),
+                home.join("accounts").to_string_lossy().into_owned(),
+            ),
+        ]);
+        let first = opencode_hook_path(&env, b"terminal-one").unwrap();
+        assert_eq!(
+            first.parent().unwrap(),
+            home.join(".config/opencode/plugins")
+        );
+        assert_ne!(first, opencode_hook_path(&env, b"terminal-two").unwrap());
+        env.insert(
+            "OPENCODE_CONFIG_DIR".into(),
+            home.join("custom").to_string_lossy().into_owned(),
+        );
+        assert_eq!(
+            opencode_hook_path(&env, b"terminal-one")
+                .unwrap()
+                .parent()
+                .unwrap(),
+            home.join("custom/plugins")
+        );
+        env.insert("OPENCODE_CONFIG_DIR".into(), "relative".into());
+        assert!(opencode_hook_path(&env, b"terminal-one").is_err());
     }
 }

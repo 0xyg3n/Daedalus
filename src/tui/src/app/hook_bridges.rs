@@ -5,7 +5,7 @@ use std::path::Path;
 /// OpenCode v2 local server plugin. Native SDK methods supply canonical context;
 /// raw terminal output and volatile idle notifications never authorize readiness.
 pub fn opencode(registration: &Registration, binary: &Path) -> Result<Vec<u8>, String> {
-    let config = serde_json::json!({"binary":binary,"registration":registration.path(),"session":registration.scope.conversation});
+    let config = serde_json::json!({"binary":binary,"registration":registration.path(),"session":registration.scope.conversation,"id":format!("daedalus.session-hooks.{}",registration.id)});
     let mut text = format!(
         "// Daedalus managed OpenCode bridge v2: {}\n",
         registration.id
@@ -15,7 +15,7 @@ pub fn opencode(registration: &Registration, binary: &Path) -> Result<Vec<u8>, S
         &serde_json::to_string(&config).map_err(|_| "Cannot encode bridge configuration")?,
     );
     text.push_str(r#";
-export default Plugin.define({id:'daedalus.session-hooks',async setup(ctx) {
+export default Plugin.define({id:config.id,async setup(ctx) {
   const boot=randomUUID();let sequence=0,closed=false;
   const controller=new AbortController();
   function emit(kind,fields={}) {

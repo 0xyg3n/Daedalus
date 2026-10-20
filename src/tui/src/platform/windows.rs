@@ -173,6 +173,13 @@ unsafe fn trusted_privileged_sid(sid: PSID, native_profile: bool) -> bool {
             || (native_profile && IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0)
     }
 }
+unsafe fn trusted_profile_owner(owner: PSID, user: PSID, native_profile: bool) -> bool {
+    unsafe {
+        !owner.is_null()
+            && (EqualSid(owner, user) != 0
+                || (native_profile && IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0))
+    }
+}
 fn validate_acl(file: &File, native_profile: bool) -> io::Result<()> {
     unsafe {
         let (_token, current) = token_user(GetCurrentProcess())?;
@@ -194,7 +201,7 @@ fn validate_acl(file: &File, native_profile: bool) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let _descriptor = Local(sd);
-        if owner.is_null() || EqualSid(owner, user) == 0 || dacl.is_null() {
+        if !trusted_profile_owner(owner, user, native_profile) || dacl.is_null() {
             return Err(denied(
                 "Private state must have a current-user owner and restricted ACL",
             ));
@@ -328,7 +335,9 @@ pub fn create_new_private(path: &Path) -> io::Result<File> {
     validate_private_file(&file)?;
     Ok(file)
 }
-/// Existing harness profiles may grant access to elevated local administrators.
+/// Existing harness profiles may be owned by, and grant access to, elevated
+/// local administrators. Explicit current-user access is still required and
+/// ordinary users/groups remain forbidden by the same DACL check.
 /// This exception is never used for Daedalus-owned state or credential stores.
 pub fn validate_native_profile_dir(path: &Path) -> io::Result<()> {
     let file = open_handle(path, FILE_READ_ATTRIBUTES, OPEN_EXISTING, false)?;
@@ -974,12 +983,28 @@ mod tests {
         // Wine may normalize administrator ACEs to its Unix owner mapping.
         // Verify the actual policy against the well-known SID independently.
         unsafe {
+            let user_text: Vec<_> = format!("{sid}\0").encode_utf16().collect();
+            let mut user = ptr::null_mut();
+            assert_ne!(ConvertStringSidToSidW(user_text.as_ptr(), &mut user), 0);
+            let _user_guard = Local(user);
             let text: Vec<_> = "S-1-5-32-544\0".encode_utf16().collect();
             let mut admin = ptr::null_mut();
             assert_ne!(ConvertStringSidToSidW(text.as_ptr(), &mut admin), 0);
             let _guard = Local(admin);
             assert!(!trusted_privileged_sid(admin, false));
             assert!(trusted_privileged_sid(admin, true));
+            assert!(trusted_profile_owner(user, user, false));
+            assert!(!trusted_profile_owner(admin, user, false));
+            assert!(trusted_profile_owner(admin, user, true));
+            let everyone_text: Vec<_> = "S-1-1-0\0".encode_utf16().collect();
+            let mut everyone = ptr::null_mut();
+            assert_ne!(
+                ConvertStringSidToSidW(everyone_text.as_ptr(), &mut everyone),
+                0
+            );
+            let _everyone_guard = Local(everyone);
+            assert!(!trusted_profile_owner(everyone, user, true));
+            assert!(!trusted_profile_owner(everyone, user, false));
         }
         validate_native_profile_dir(&dir).unwrap();
         drop(open_native_profile(&path, false, false).unwrap());
