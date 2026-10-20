@@ -21,9 +21,8 @@ A newly selected conversation needs its own reviewed recipient binding.
 Retired process registrations remain in the local audit history. They do not
 block Telegram input to the verified replacement process; multiple live
 registrations for the same terminal still require review.
-A single trailing editor padding space from OpenCode or Hermes is recognized only outside an
-unchanged Daedalus Telegram envelope, so it cannot leave the next input waiting
-after a verified completion. Message content and other prompts stay exact.
+OpenCode and Hermes editor padding is accepted only outside an unchanged
+Daedalus Telegram envelope; message content stays exact.
 
 ## Features
 
@@ -64,16 +63,6 @@ If no default is detected, empty input keeps the form open. Type `skip` or press
 Esc to leave setup without installing hooks; a saved Telegram route does not yet
 have replies connected. The optional transcript field accepts Enter for `none`.
 Each agent is reviewed separately.
-On Windows, Hermes enrollment reads its native `runtime/active_sessions.json`
-lease in the configured home or a named profile. It verifies process ownership,
-creation time and ancestry from the selected terminal; history and titles do not
-select a conversation. Its detected profile supplies `config.yaml`. Multiple
-live conversations are rejected. Reconnecting a restarted Hermes process requires
-review and invalidates old readiness while preserving uncertain input.
-Hermes must load and approve the new hooks through its native startup flow;
-complete one normal turn in Hermes after activation before using Telegram.
-OpenCode/Pi hook subprocesses, the TUI backend and pane stream clients run without
-creating Windows console windows. Errors still reach the normal hook diagnostics.
 The session installer excludes shell-only terminals. An unsupported provider/version/platform or a
 stale process fails closed at review, without modifying its native profile. A
 Telegram recipient still needs a separate chat binding. The Hooks page (or
@@ -148,6 +137,27 @@ grants the current user access and contains only that user, SYSTEM and local
 Administrators. Ordinary shared access is rejected. Daedalus state, tokens,
 registrations and backups retain their stricter current-user ownership checks.
 
+OpenCode/Pi hook subprocesses, the TUI backend and pane stream clients run without
+creating Windows console windows. Errors still reach the normal hook diagnostics.
+
+### Hermes on Windows
+
+On Windows, Hermes enrollment reads its native `runtime/active_sessions.json`
+lease in the configured home or a named profile. It verifies process ownership,
+creation time and ancestry from the selected terminal; history and titles do not
+select a conversation. Its detected profile supplies `config.yaml`. Multiple
+live conversations are rejected. Reconnecting a restarted Hermes process requires
+review and invalidates old readiness while preserving uncertain input.
+Hermes must load and approve the new hooks through its native startup flow;
+complete one normal turn in Hermes after activation before using Telegram.
+
+Gateway-backed sessions bind the foreground terminal and native profile gateway
+separately. Enrollment pins the daemon executable, owner and process birth time;
+delivery rechecks the current native lease and gateway record. When the frontend
+advertises a provisional session ID, reopen the exact canonical
+session with Hermes `--resume` before reconnecting its hooks. Compound native
+turn IDs are matched exactly across prompt and completion events.
+
 ### Grok idle readiness
 
 Grok's native hook `transcript_path` identifies the session's `updates.jsonl`.
@@ -199,5 +209,3 @@ best effort: unsupported reactions, rate limits and connectivity errors do not
 block agent input or replies. Expired feedback is dropped and reactions are not
 replayed on restart. See Telegram's [chat actions](https://core.telegram.org/bots/api#sendchataction)
 and [message reactions](https://core.telegram.org/bots/api#setmessagereaction).
-
-Windows Hermes gateway sessions bind the foreground terminal and the native profile gateway separately. Enrollment pins the daemon executable, owner and process birth time; delivery checks the current native lease and gateway record again. A stale lease is not proof of the selected conversation. Reopen the exact canonical session with Hermes `--resume` before reconnecting its hooks when the native frontend still advertises a provisional ID.

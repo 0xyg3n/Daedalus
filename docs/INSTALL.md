@@ -3,11 +3,16 @@
 Daedalus is one native executable: `daedalus` on Linux x86_64/ARM64 or
 `daedalus.exe` on Windows x64. It provides the TUI, CLI, Telegram service and
 hook runtime. Agent tools keep their own runtimes and accounts. macOS is not
-supported. Windows 11 validation covers native shell control, private permissions, installer
-fixtures and selected hooks. Provider compatibility still depends on the installed
+supported. Windows 11 validation covers native shell control, private permissions,
+installer fixtures and selected hooks. Provider compatibility still depends on the installed
 upstream tools.
 
 ## Linux install
+
+Prebuilt x86-64 executables and matching `.sha256` files are available on
+[Releases](https://github.com/0xyg3n/Daedalus/releases). Verify the checksum with
+`sha256sum -c` and use the installer's `--binary` and `--sha256` options for a
+managed installation. To build from source:
 
 ```bash
 git clone https://github.com/0xyg3n/Daedalus.git
@@ -37,8 +42,11 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-Download **Daedalus-0.2.0-beta.29-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.29), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer and `daedalus.exe` use `assets/daedalus.png` as their Windows icon. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
-
+Download `Daedalus-<version>-setup.exe` from [Releases](https://github.com/0xyg3n/Daedalus/releases)
+and double-click it. The per-user installer needs no PowerShell script, Git or
+compiler. It installs under `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut
+and opens setup. The release also includes a standalone executable and SHA-256
+checksums. Install a standalone executable before using in-app updates.
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
 Native Windows multiplexers such as [tmux-windows](https://github.com/arndawg/tmux-windows)
@@ -50,8 +58,9 @@ path of a compatible executable when selection is needed; discovery otherwise
 tries `tmux.exe`, then `psmux.exe`. PSMux `.psmux/*.port` namespace markers are
 automatic candidates; configured absolute `tmux_sockets` endpoints are passed
 through `-S` for the selected implementation. Every candidate still needs fresh
-identity evidence before mutation. For the optional Herdr adapter, install a Windows-compatible Herdr build. Install the Windows versions of the harnesses you choose. Provider support depends on
-each upstream CLI; Linux shell installers are not run on Windows.
+identity evidence before mutation. Install native Windows versions of Herdr and
+any harnesses you choose; Linux shell installers are not run on Windows. Native
+harness launch requires an `.exe`; `.cmd` and `.bat` wrappers are refused.
 
 For an optional source build, use a reviewed checkout in native PowerShell:
 
@@ -100,59 +109,16 @@ terminal generation and conversation registration. See the [Windows capability
 boundaries](HARNESSES.md#native-windows-boundaries); live provider compatibility
 is not established by this port.
 
-### Optional native backend smoke test
-
-The standard local check does not start terminal servers. To explicitly test an
-installed native backend with one isolated echo fixture:
-
-```powershell
-.\scripts\check-windows.ps1 -BackendSmoke PSMux -BackendBinary C:\Tools\psmux.exe
-.\scripts\check-windows.ps1 -BackendSmoke Herdr -BackendBinary C:\Tools\herdr.exe
-```
-
-Or run only the backend test against a selected built/installed executable:
-
-```powershell
-.\scripts\check-windows-backends.ps1 -Backend PSMux -BackendBinary C:\Tools\psmux.exe -DaedalusBinary C:\Tools\daedalus.exe
-```
-
-The opt-in test creates a GUID-named private empty project and its own PSMux
-endpoint or Herdr session. It compiles a small native echo program with an
-already installed .NET Framework C# compiler; no package installation, shell
-profile, harness, sign-in, Telegram request or provider connection is used.
-Herdr background version/manifest checks and agent restoration are disabled in
-its isolated configuration. No live default multiplexer endpoint is selected.
-
-It uses native configuration and inventory to obtain an exact terminal target,
-checks inert send preview, sends a generated marker, presses Enter, captures the
-echo response and rejects a deliberately stale generation. Cleanup targets only
-the created endpoint/session and uniquely owned fixture processes. Failed
-cleanup retains the private fixture directory and reports its name for review.
-This script has parser validation here; successful native backend execution must
-still be established on Windows. Wine/unit results do not establish a real
-Herdr/PSMux installation or ConPTY behavior.
-
-### Private Windows state
-
-Native Windows databases use `TRUNCATE` rollback journals with explicitly private
-precreated journal files and in-memory temporary storage. Existing WAL/SHM files
-must pass the same owner/ACL checks before opening; their data is not deleted to
-force migration. A database whose journaling mode cannot safely change is refused.
-This avoids relying on filesystem ACL inheritance for SQLite-created sidecars.
-
 ### Windows local validation
 
 ```powershell
 .\scripts\check-windows.ps1
 ```
 
-This runs format, tests, Clippy and release build plus isolated installer fixtures
-for read-only planning, PE/checksum validation and changed-file protection. It
-uses no real bots or paid providers. It is a local workflow and creates no GitHub
-Actions billing. Linux cross-compilation alone does not establish Windows console,
-ConPTY, ACL, Herdr or provider behavior. Native Windows 11 checks cover the library
-suite, including ConPTY shell control, plus isolated installer and Herdr echo
-fixtures. Live provider and Telegram delivery need their own end-to-end checks.
+This runs formatting, tests, Clippy, a release build and isolated installer
+fixtures. The optional `-BackendSmoke Herdr|PSMux -BackendBinary ABS` checks an
+installed backend using a private echo fixture. See [testing](ARCHITECTURE.md#testing)
+for coverage and limitations; live provider delivery requires a separate check.
 
 ## First run
 
@@ -180,51 +146,44 @@ Next, open `daedalus` and start a shell or agent in a workspace ([control panel]
 The setup menu also offers **Install standard hooks** after an agent is running.
 It discovers the live sessions and guides each verified native profile through
 its own review; leaving that step for later does not block terminal control.
-Telegram is configured separately ([commands](COMMANDS.md#telegram)). On a fresh
-setup, the guided path asks for a bot token in a masked input, derives its bot ID,
-and reviews the local connection before saving it privately. Send `/start` to the
-bot in a DM, or `/start@YourBot` in a group, then choose **Find a DM or group
-chat**. Daedalus lists recent candidate chats and senders for local review; it
-does not grant access or choose a terminal until you approve the exact chat and
-route. You can also enter a numeric bot ID, sender ID and chat ID manually.
-Run chat setup again to add a DM or group; existing grants are preserved. Group
-messages are accepted when they mention
-or reply to the bot. An authorized user can enable `/listen` for all group
-messages, but Telegram must also deliver them: disable the bot's group privacy
-mode in BotFather (and re-add it) or give the bot admin rights ([Telegram's
-privacy-mode guide](https://core.telegram.org/bots/features#privacy-mode)).
-Configuration review sends nothing to Telegram. Chat discovery reads recent bot
-updates without advancing the Telegram offset; keep other pollers stopped while
-pairing. An already-running managed service must be stopped before discovery.
+For a bot connection, follow the [Telegram guide](TELEGRAM.md): review the token
+and owner ID, register a DM or group, select a destination, activate its hooks and
+start the connection. Existing configuration can be edited from Settings.
 
 ## Configuration directory
 
 Daedalus uses the first of: `--config-dir`, `DAEDALUS_CONFIG_DIR`,
 `$XDG_CONFIG_HOME/daedalus`, then the platform default (`%APPDATA%\Daedalus`
-on Windows, `~/.config/daedalus` on Linux). Keep it outside Git. The files
-are described in [config/README.md](../config/README.md).
+on Windows, `~/.config/daedalus` on Linux).
 If `DAEDALUS_CONFIG_DIR` is relative, Daedalus resolves it under your user
 profile so changing the launch directory does not switch configurations.
+
+Create configuration with `daedalus setup` or
+`daedalus config init --config-dir ABS --workspace ABS --apply`.
+[control.example.json](../config/control.example.json) documents the public
+`control.json` schema. Replace its placeholder paths, then validate with
+`daedalus config validate --from FILE`.
+
+| File | Purpose |
+| --- | --- |
+| `control.json` | Workspace, harness selections, profile paths and terminal discovery endpoints |
+| `telegram-service.json` | Bot ID, token file, sender grants and feeder/reply bindings |
+| `hindsight.json` | Optional memory endpoint, credential file and bank per registration |
+| `gateway.json` | Optional Claude Code or Codex endpoint override |
+| `armonia.sqlite3` | Optional existing Armonia identity registry |
+
+The same directory holds routes, deliveries, checkpoints, layouts, receipts and
+attachments. Keep this directory outside Git. Subscription labels are not
+credentials; each harness manages its own account.
+
+The native terminal registry is shared by your local user across configuration
+instances: `~/.local/share/daedalus/terminals` on Linux and
+`%LOCALAPPDATA%\Daedalus\terminals` on Windows. Keep it outside Git as well.
 
 To copy an existing instance into a new directory, run
 `daedalus config import-instance --config-dir NEW --from OLD` (preview; `--apply`
 writes, `--credentials` also copies token files). If the old instance ran the
 Telegram service, stop it and hand over with `daedalus telegram cutover preview|apply`.
-
-## Official component sources
-
-| Component | Installer or distribution reference |
-|---|---|
-| tmux | [github.com/tmux/tmux](https://github.com/tmux/tmux/wiki/Installing) |
-| Herdr | [herdr.dev](https://herdr.dev/) |
-| Claude Code | [Anthropic setup](https://code.claude.com/docs/en/setup) |
-| Codex | [OpenAI Codex](https://github.com/openai/codex) |
-| Grok CLI | [xAI build documentation](https://docs.x.ai/build/overview) |
-| Hermes Agent | [Nous Research documentation](https://hermes-agent.nousresearch.com/docs/) |
-| Cursor | [Cursor CLI](https://cursor.com/docs/cli/overview) |
-| Pi | [Pi installation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) |
-| OpenCode | [OpenCode installation](https://opencode.ai/docs/) |
-| Node.js | [Official distributions and checksums](https://nodejs.org/dist/) |
 
 ## Update and removal
 
@@ -275,22 +234,3 @@ and terminal backends are not removed.
 On Linux, stop its Telegram service, then delete `PREFIX/bin/daedalus`
 and `PREFIX/share/daedalus/`. The configuration directory stays until you delete
 it. Agent tools and system packages are not removed.
-
-### Optional terminal backends
-
-Setup shows the detected operating system and architecture. **Daedalus native
-terminals** is the default: the binary supplies its own PTY/ConPTY backend and
-does not need tmux or Herdr. The CLI's `existing` selection has the same no-extra-
-multiplexer behavior. Select optional Herdr, tmux, or both only when you want them
-included in the dependency plan. Installed tools are reused.
-
-After setup, choose **New project → Daedalus native terminals**, or run
-`daedalus shell --workspace my-project`. Detach with **Ctrl+] then D** and reopen
-the terminal from the TUI. Native sessions are user-wide and survive the UI
-closing. See [built-in terminals](../README.md#built-in-terminals) for discovery,
-private state and platform boundaries.
-
-On Linux, missing selected tools use the reviewed installation plan. On Windows,
-setup uses installed native backends and gives installation guidance when a
-selected backend is missing; it does not run Linux shell installers. Use the
-Windows setup executable on native Windows. WSL is a separate Linux environment.

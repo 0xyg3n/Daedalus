@@ -37,25 +37,12 @@ status commands; other tools show an existing profile or installation with sign-
 marked unverified. Account identities and tokens are not displayed. A saved profile
 alone is not proof of a working account; authentication stays in the harness.
 
-Telegram setup asks for a local connection name, your bot's numeric ID, your own
-numeric user ID and the chat ID. The bot ID is the portion before the colon in the
-@BotFather token. For a private chat, the chat ID is your user ID; group IDs include
-a minus sign. Invalid identity entries can be corrected without restarting setup.
-
-After each saved step, close its summary to continue or choose **Finish later**.
-The full token goes into a masked field and is stored privately. Paste works even
-with an attached terminal behind the form; a character count confirms entry without
-revealing the token. On Windows, input fields support **Ctrl+V** and **Shift+Insert**
-through the native clipboard, including terminals that do not emit paste events.
-Clipboard access occurs only when you invoke paste in a form. Empty input keeps the form open for correction. Saving it validates
-its format and bot ID; it does not verify Telegram connectivity. Starting the service
-requires a separate review. Hook setup shows a detected profile path where available:
-press Enter to accept it, type a different absolute path, or use `skip` / Esc to
-finish later. Empty or invalid paths keep the form open for correction. Skipping
-hooks preserves saved Telegram settings but does not enable replies.
-Choose a destination terminal and connect its installed
-reply hook, then start a conversation with your bot. Check connection status before
-sending a test message. A saved route alone does not mean a message was delivered.
+Open **Options → Configuration settings → Telegram configuration** and choose
+**Connect my bot and DM**. Enter the bot token and your numeric owner user ID.
+Daedalus derives the bot ID and defaults the DM chat ID to your owner ID. Existing
+connections open their settings menu. Use **Add a DM or group** or **Find chats
+automatically** for more chats, and **Manage chat names** to label them privately.
+See the [Telegram guide](TELEGRAM.md) for the complete connection flow.
 
 ## Find a shortcut
 

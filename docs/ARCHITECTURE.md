@@ -50,6 +50,10 @@ layouts and receipts. Armonia and Hindsight are optional, each with its own
 configuration; terminal routing needs neither. Agent tools keep their own
 authentication and runtime. The Pi and OpenCode hook bridges run inside those tools.
 
+On Windows, SQLite uses `TRUNCATE` journals with private sidecar files and in-memory
+temporary storage. Existing WAL/SHM files must pass owner and ACL checks; data is
+not deleted to bypass a journaling or permissions failure.
+
 ## Code map
 
 | Area | Files | Notes |
