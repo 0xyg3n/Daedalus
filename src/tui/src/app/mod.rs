@@ -73,3 +73,5 @@ pub mod workspace_usage;
 pub mod workspace_api;
 
 pub mod native_terminal;
+
+pub mod harness_detection;

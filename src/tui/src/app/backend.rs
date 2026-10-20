@@ -179,6 +179,12 @@ pub trait Source {
     ) -> Result<super::wizard::Wizard> {
         Err("Setup is unavailable for this source".into())
     }
+    fn detect_harnesses(
+        &mut self,
+        _config: &ControlConfig,
+    ) -> Vec<super::harness_detection::Detected> {
+        Vec::new()
+    }
     fn finish_local_setup(&mut self, _config: &ControlConfig) -> Result<ControlConfig> {
         Err("Local setup is unavailable for this source".into())
     }
@@ -1626,6 +1632,12 @@ impl Source for NativeSource {
             ),
         }
     }
+    fn detect_harnesses(
+        &mut self,
+        config: &ControlConfig,
+    ) -> Vec<super::harness_detection::Detected> {
+        super::harness_detection::detect(config)
+    }
     fn finish_local_setup(&mut self, config: &ControlConfig) -> Result<ControlConfig> {
         if let Some(bytes) = layouts::read_private(&self.directory.join("control.json"))? {
             // Finishing an existing setup must not overwrite settings changed elsewhere.
@@ -2434,7 +2446,7 @@ mod tests {
         assert_eq!(first["version"], 2);
         assert_eq!(first["kind"], "state");
         assert_eq!(first["sections"].as_array().unwrap().len(), 11);
-        assert_eq!(first["terminal_actions"].as_array().unwrap().len(), 16);
+        assert_eq!(first["terminal_actions"].as_array().unwrap().len(), 17);
         assert_eq!(first["terminals"], 1);
         assert!(first["catalog"].as_array().unwrap().len() > 42);
         assert_eq!(first["workspace"]["apply"]["mode"], "tree");
@@ -2600,7 +2612,7 @@ mod tests {
     #[test]
     fn unavailable_actions_are_marked_without_removing_menu_entries() {
         let frame = backend().refresh().unwrap();
-        assert_eq!(frame["terminal_actions"].as_array().unwrap().len(), 16);
+        assert_eq!(frame["terminal_actions"].as_array().unwrap().len(), 17);
         assert!(
             frame["terminal_actions"]
                 .as_array()

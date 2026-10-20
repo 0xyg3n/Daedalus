@@ -988,6 +988,8 @@ impl Saver {
 }
 #[derive(Default)]
 pub struct Ui {
+    pub binding_search: Option<String>,
+    pub binding_scroll: usize,
     pub snapshot: Snapshot,
     pub theme: Theme,
     pub page: usize,

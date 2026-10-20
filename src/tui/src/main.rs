@@ -4,6 +4,7 @@ mod graphics;
 mod model;
 mod neon;
 mod options;
+mod shortcuts;
 #[cfg(test)]
 mod test_support;
 mod theme;
@@ -576,7 +577,9 @@ fn main() -> io::Result<()> {
                                         .embed
                                         .as_ref()
                                         .is_some_and(|embed| embed.mode == Mode::Control)));
-                        if update_shortcut && ui.dialog.is_none() && ui.options.is_none() {
+                        if shortcuts::key(&mut ui, key) {
+                            Step::Continue
+                        } else if update_shortcut && ui.dialog.is_none() && ui.options.is_none() {
                             if let Some(embed) = ui.embed.as_mut() {
                                 embed.prefix = false;
                             }
@@ -831,6 +834,10 @@ fn leave_focus(ui: &mut Ui) {
 }
 
 fn paste(ui: &mut Ui, text: &str) -> Step {
+    if ui.binding_search.is_some() {
+        return Step::Continue;
+    }
+
     if ui.dialog.is_none()
         && ui.options.is_none()
         && ui.page == WORKSPACES
@@ -967,6 +974,9 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
     if let Some(step) = focus_resize_key(ui, key) {
         return step;
     }
+    if matches!(key.code, KeyCode::Char('n' | 'N')) {
+        return quick_action(ui, "terminal.new");
+    }
     if matches!(key.code, KeyCode::Char('k' | 'K')) {
         return open_switcher(ui);
     }
@@ -1036,6 +1046,10 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
 }
 
 fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
+    if shortcuts::key(ui, key) {
+        return Step::Continue;
+    }
+
     if key.code == KeyCode::F(11) && ui.page == WORKSPACES {
         if let Some(embed) = ui.embed.as_mut() {
             embed.prefix = false;
@@ -1352,6 +1366,11 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
     match key.code {
+        KeyCode::Char('n') if plain => {
+            return Some(Step::Send(
+                json!({"op":"action","page":WORKSPACES,"action":"project.new"}),
+            ));
+        }
         KeyCode::Char(c @ ('[' | ']')) if plain => {
             let i = View::ALL.iter().position(|v| *v == ui.view).unwrap_or(0) as isize;
             let step = if c == ']' { 1 } else { -1 };
@@ -1731,6 +1750,10 @@ fn quick_action(ui: &mut Ui, action: &str) -> Step {
 }
 
 fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
+    if ui.binding_search.is_some() {
+        return Step::Continue;
+    }
+
     ui.pointer = Some((mouse.column, mouse.row));
     if ui.options.is_some() {
         options_mouse(ui, mouse);
@@ -2233,6 +2256,7 @@ fn may_rest(ui: &Ui) -> bool {
         && !ui.action_pending
         && ui.dialog.is_none()
         && ui.options.is_none()
+        && ui.binding_search.is_none()
         && ui.embed.is_none()
         && !ui.searching
         && ui.dragging.is_none()
@@ -3750,6 +3774,22 @@ mod cli_tests {
         options_key(ui, KeyEvent::new(code, KeyModifiers::NONE));
     }
     #[test]
+    fn bindings_overlay_blocks_paste_and_rest_and_new_workspace_works_without_selection() {
+        let mut ui = workspace();
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(ui.binding_search.is_some());
+        assert!(!may_rest(&ui));
+        assert!(matches!(paste(&mut ui, "do not send"), Step::Continue));
+        key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let Step::Send(request) = key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        ) else {
+            panic!("new workspace must be accessible")
+        };
+        assert_eq!(request["action"], "project.new");
+    }
+    #[test]
     fn configuration_option_opens_settings_without_changing_preferences() {
         let mut ui = workspace();
         let before = view_state(&ui);
@@ -3928,7 +3968,7 @@ mod cli_tests {
         let expected_nodes = frame["tree"].as_array().unwrap().len();
         let snapshot: Snapshot = serde_json::from_value(frame).unwrap();
         assert_eq!(snapshot.sections.len(), 11);
-        assert_eq!(snapshot.terminal_actions.len(), 16);
+        assert_eq!(snapshot.terminal_actions.len(), 17);
         assert_eq!(snapshot.tree.len(), expected_nodes);
         assert!(expected_nodes > 0);
         assert!(!snapshot.catalog.is_empty());

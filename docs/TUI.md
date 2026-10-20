@@ -9,14 +9,14 @@ terminal it cannot identify exactly.
 | Group | Pages |
 |---|---|
 | Work | Overview, Workspaces, Sessions |
-| Connect | Telegram, AI tools, Hooks |
-| System | Activity, Instances, Armonia (optional), Help |
+| Connect | Telegram, Hooks |
+| System | Settings, Activity, Instances, Armonia (optional), Help |
 
 Tab or 0-9 switches pages, Ctrl+P searches every command, `?` shows the key bar and
 `q` quits. The Details panel explains the selected item. Help includes the
 [command reference](COMMANDS.md).
 
-- **AI tools**: sign-in, profile directories and update checks for the seven tools.
+- **Settings**: detected harnesses, profile directories, Telegram configuration and setup.
 - **Hooks**: hook profiles and Hindsight memory ([hooks](HOOKS.md)).
 - **Telegram**: guided connection settings, private bot token, service start and
   destination selection. Each step has its own review. Sender permissions are
@@ -31,7 +31,11 @@ Tab or 0-9 switches pages, Ctrl+P searches every command, `?` shows the key bar 
 Choose **Daedalus native terminals** to use the built-in terminal backend without
 installing tmux or Herdr. External backends remain optional. Setup shows the detected
 operating system and architecture before presenting any dependency installation.
-Select only the AI tools you use; account sign-in stays in each tool.
+Setup detects installed harnesses and preselects them for review. You can deselect
+any tool before saving. Codex and Claude Code report sign-in through their native
+status commands; other tools show an existing profile or installation with sign-in
+marked unverified. Account identities and tokens are not displayed. A saved profile
+alone is not proof of a working account; authentication stays in the harness.
 
 Telegram setup asks for a local connection name, your bot's numeric ID, your own
 numeric user ID and the chat ID. The bot ID is the portion before the colon in the
@@ -45,11 +49,18 @@ requires a separate review. Choose a destination terminal and connect its instal
 reply hook, then start a conversation with your bot. Check connection status before
 sending a test message. A saved route alone does not mean a message was delivered.
 
+## Find a shortcut
+
+Press **F1** to search keyboard shortcuts by key, action or category (for example,
+`Telegram`, `cube`, `resize` or `shell`). Arrow keys scroll the results; F1 or Esc
+closes the window. It also works while attached: typing in this search does not
+reach the terminal. **Ctrl+P** searches executable commands; **Ctrl+K** finds terminals.
+
 ## Workspaces
 
 Daedalus lists its native workspaces and terminals alongside tmux (servers,
 sessions, windows, panes) and Herdr (servers, workspaces, tabs, panes), including
-Herdr clients running inside tmux. **New project → Daedalus native terminal** starts
+Herdr clients running inside tmux. **New shell or workspace → Daedalus native terminal** starts
 a shell or installed agent without an external multiplexer. Native control has
 one writer; additional views can Watch. Standalone external shell processes are
 listed separately as read-only observations.
@@ -66,6 +77,10 @@ project in its own workspace with its shells, agents and logs.
 
 | Key | Action |
 |---|---|
+| `n` | New shell, agent terminal or workspace |
+| `N` | New shell pane in the selected project |
+| `Ctrl+]` then `N` | New pane while attached |
+| `F1` | Search keyboard shortcuts |
 | `[` `]` | Previous / next view |
 | `z` | Toggle Focus |
 | `/` | Search |

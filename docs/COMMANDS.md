@@ -7,6 +7,16 @@ absolute path. A `--target` is a JSON file holding one exact terminal from
 Changes print a preview by default and run only with `--apply` and the preview's
 digest where one is required.
 
+## TUI shortcuts
+
+**F1** opens a searchable shortcut reference, including the current terminal actions.
+Search by key, action or category; arrows scroll and Esc closes it. **Ctrl+P** finds
+commands, **Ctrl+K** finds terminals, and **,** opens options and configuration.
+In Workspaces, **n** creates a shell or workspace and **N** creates a shell pane in
+the selected project. While attached, use **Ctrl+] then N**. Setup and **Detected
+harnesses** discover installed tools, reuse configured profiles and let you review
+or deselect automatic selections before saving. See [the TUI guide](TUI.md).
+
 ## CLI
 
 | Command | Operations |

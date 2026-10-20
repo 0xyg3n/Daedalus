@@ -350,7 +350,7 @@ mod tests {
         // Navigation retains the established action contract.
         assert_eq!(
             fingerprint(&registry.actions),
-            "c41970484a4836af769bdbcd47a5050ff91b3e1815e62dc08f0f236b1148e4c4"
+            "a8fcef39e3f2496db4ce441472166ad0a4680f6205187e2b80e2f3efa68b545b"
         );
         assert_eq!(
             fingerprint(&registry.sections),
@@ -392,6 +392,7 @@ mod tests {
                 "terminal.send",
                 "telegram.route",
                 "terminal.rename",
+                "terminal.new",
                 "terminal.organize",
                 "terminal.interrupt",
                 "terminal.close"
@@ -403,7 +404,7 @@ mod tests {
                 .filter(|action| !action.quick.is_empty())
                 .map(|action| action.quick.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "w", "c", "f", "d", "p", "t"]
+            ["a", "w", "c", "f", "d", "p", "t", "N"]
         );
     }
     #[test]

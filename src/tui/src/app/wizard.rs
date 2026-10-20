@@ -85,7 +85,12 @@ impl Wizard {
             .selection
             .harnesses
             .iter()
-            .map(|id| format!("{id}: use the harness's native account sign-in after installation"))
+            .filter(|id| !dependencies.review().installed.contains(id))
+            .map(|id| {
+                format!(
+                    "{id}: open the harness after installation; it handles any required sign-in"
+                )
+            })
             .collect();
         let review = Review {
             instance_import: None,
@@ -620,7 +625,7 @@ mod tests {
         assert!(dest.join("control.json").exists());
         assert_eq!(executor.calls, 1);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("native account sign-in"));
+        assert!(output.contains("handles any required sign-in"));
         assert!(output.contains("@openai/codex"));
     }
     #[test]

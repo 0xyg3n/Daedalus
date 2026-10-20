@@ -75,7 +75,7 @@
       "page": 0,
       "group": "Start here",
       "title": "Guided setup",
-      "note": "Choose tools, sign in and connect optional chat services step by step.",
+      "note": "Detect installed harnesses, reuse existing profiles and connect optional Telegram.",
       "icon": "setup",
       "effects": [
         "guided"
@@ -96,8 +96,8 @@
       "key": "n",
       "page": 1,
       "group": "Manage",
-      "title": "Create a project",
-      "note": "Open a new Herdr workspace or tmux session in an existing directory.",
+      "title": "New shell or workspace",
+      "note": "Start a built-in terminal, shell or agent; optionally use tmux or Herdr.",
       "icon": "add",
       "effects": [
         "confirm"
@@ -693,8 +693,8 @@
       "key": "a",
       "page": 4,
       "group": "Harnesses and accounts",
-      "title": "Choose my AI tools",
-      "note": "Select the tools or subscriptions you already use.",
+      "title": "Detected harnesses",
+      "note": "Review installed tools, native account status and automatically selected harnesses.",
       "icon": "choose",
       "effects": [
         "settings"
@@ -703,29 +703,6 @@
         "subscriptions",
         "providers",
         "harnesses"
-      ],
-      "context": "",
-      "context_note": "",
-      "listed": true,
-      "quick": ""
-    },
-    {
-      "id": "tools.signin",
-      "key": "signin",
-      "page": 4,
-      "group": "Harnesses and accounts",
-      "title": "Sign in to an AI tool",
-      "note": "Each tool's own sign-in: browser OAuth, a device code or an API key.",
-      "icon": "signin",
-      "effects": [
-        "external"
-      ],
-      "aliases": [
-        "login",
-        "sign in",
-        "authenticate",
-        "oauth",
-        "account"
       ],
       "context": "",
       "context_note": "",
@@ -1070,6 +1047,29 @@
       "context_note": "",
       "listed": true,
       "quick": ""
+    },
+    {
+      "id": "terminal.new",
+      "key": "terminal-new",
+      "page": 1,
+      "group": "Terminal actions",
+      "title": "New pane in this project",
+      "note": "Start an independent shell or agent beside this terminal.",
+      "icon": "add",
+      "effects": [
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "split",
+        "new pane",
+        "new shell",
+        "terminal"
+      ],
+      "context": "New pane",
+      "context_note": "Reuse this project directory; choose a shell or installed agent.",
+      "listed": false,
+      "quick": "N"
     }
   ],
   "effects": {
@@ -1144,6 +1144,7 @@
     "terminal.send",
     "telegram.route",
     "terminal.rename",
+    "terminal.new",
     "terminal.organize",
     "terminal.interrupt",
     "terminal.close"

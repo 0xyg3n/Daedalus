@@ -148,6 +148,13 @@ fn split(area: Rect, direction: Direction, sizes: Vec<Constraint>) -> std::rc::R
 /// Key hints in order of importance. The last two (Hide keys and Quit, or an
 /// attached terminal's way out) always stay; others drop from the end.
 fn keys(theme: &Theme, pairs: &[(&str, &str)], max: usize) -> Line<'static> {
+    let mut seen = std::collections::HashSet::new();
+    let unique = pairs
+        .iter()
+        .copied()
+        .filter(|(key, label)| !key.is_empty() && !label.is_empty() && seen.insert(*key))
+        .collect::<Vec<_>>();
+    let pairs = unique.as_slice();
     let size = |(key, label): &(&str, &str)| width(key) + width(label) + 4;
     let tail = pairs.len().saturating_sub(2);
     let reserved: usize = pairs[tail..].iter().map(size).sum();
@@ -570,9 +577,13 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     } else if ui.options.is_some() {
         dim(f, area, &theme);
         options_panel(f, area, ui);
-    } else if let Some(position) = cursor {
+    } else if let Some(position) = cursor.filter(|_| ui.binding_search.is_none()) {
         // The attached terminal's own cursor; hidden whenever a dialog is open.
         f.set_cursor_position(position);
+    }
+    if ui.binding_search.is_some() {
+        dim(f, area, &theme);
+        crate::shortcuts::draw(f, area, ui);
     }
     if theme.ascii {
         theme::asciify(f.buffer_mut());
@@ -5198,6 +5209,10 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         pairs.insert(0, ("^] K", "Switch"));
     }
     if !ui.searching && !control {
+        if ui.page == WORKSPACES {
+            pairs.insert(0, ("n", "New workspace"));
+        }
+        pairs.insert(0, ("F1", "Bindings"));
         pairs.insert(0, ("^K", "Switch"));
         // Before Quit, so it survives a narrow screen as long as Quit does.
         let at = pairs.len().saturating_sub(1);

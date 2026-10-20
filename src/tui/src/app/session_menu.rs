@@ -264,6 +264,7 @@ pub fn available(id: &str) -> bool {
                 | "terminal.watch"
                 | "terminal.native"
                 | "terminal.organize"
+                | "terminal.new"
                 | "project.new"
                 | "workflow.new"
                 | "terminal.fork"
@@ -478,6 +479,7 @@ impl SessionMenu {
             return self.harness.start(action, seq);
         }
         if super::wizard_menu::available(action) {
+            self.wizard.detected = source.detect_harnesses(config);
             return self.wizard.start(action, config, seq);
         }
         self.view = Some(view);
@@ -632,7 +634,7 @@ impl SessionMenu {
             return self.choose(
                 seq,
                 Stage::ProjectBackend,
-                "New project",
+                "New shell or workspace",
                 vec![
                     json!([
                         "native",
@@ -865,19 +867,18 @@ impl SessionMenu {
                     "These views share one terminal process.",
                 )
             }
+            "terminal.new" => self.workspace_tool(seq, WorkspaceRequest::Organize { pane, operation:"split".into(), label:String::new(), tool:"shell".into() }),
             "terminal.organize" => {
                 let mut options = vec![
                     json!(["rename-project", "Rename project", "Change its workspace or session name."]),
                     json!(["rename-group", "Rename tab", "Change its tab or window label."]),
                     json!(["new-group", "New tab", "Open another tab or window in this project."]),
-                    json!(["split", "Split terminal", "Add a terminal beside this one."]),
                     json!(["close-group", "Close tab", "Affects every terminal in the tab."]),
                     json!(["close-project", "Close project", "Affects all terminals and shared views of this project."]),
                 ];
                 if field(&pane, "backend") == "native" {
                     options = vec![
                         json!(["rename-project", "Move terminal to a project", "Change this terminal's project name; other terminals stay where they are."]),
-                        json!(["split", "New terminal in this project", "Start another independent shell or agent in the same project."]),
                     ];
                 } else if field(&pane, "backend") == "tmux" {
                     options.push(json!(["unlink-group", "Remove this session's link", "For a tmux window linked into several sessions; it keeps running in the others."]));
@@ -2225,8 +2226,8 @@ mod tests {
             assert_eq!(outcome.frames[0]["plan"]["node"], "synthetic-node");
         }
         let outcome = start(&mut menu, &mut source, &mut seq, "synthetic-node");
-        assert_eq!(outcome.frames[0]["options"].as_array().unwrap().len(), 16);
-        assert_eq!(outcome.frames[0]["icons"].as_array().unwrap().len(), 16);
+        assert_eq!(outcome.frames[0]["options"].as_array().unwrap().len(), 17);
+        assert_eq!(outcome.frames[0]["icons"].as_array().unwrap().len(), 17);
         assert!(
             outcome.frames[0]["options"]
                 .as_array()
@@ -2619,9 +2620,8 @@ mod tests {
             )
             .unwrap();
         let choices = organize.frames[0]["options"].as_array().unwrap();
-        assert_eq!(choices.len(), 2);
+        assert_eq!(choices.len(), 1);
         assert_eq!(choices[0][0], "rename-project");
-        assert_eq!(choices[1][0], "split");
         menu.cancel();
         let duplicate = menu
             .start(

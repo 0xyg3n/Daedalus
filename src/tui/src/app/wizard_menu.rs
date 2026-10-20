@@ -69,8 +69,8 @@ struct Pending {
 }
 #[derive(Default)]
 pub struct Menu {
+    pub detected: Vec<super::harness_detection::Detected>,
     pending: Option<Pending>,
-    harness: super::harness_menu::Menu,
     telegram: super::telegram_menu::Menu,
     hooks: super::hook_menu::Menu,
 }
@@ -84,15 +84,21 @@ fn path(text: &str) -> Result<PathBuf> {
     Ok(p)
 }
 impl Menu {
+    fn current(&self, config: &ControlConfig) -> Spec {
+        let mut spec = Spec::current(config);
+        for tool in &self.detected {
+            if tool.installed && !spec.selection.harnesses.contains(&tool.id) {
+                spec.selection.harnesses.push(tool.id.clone());
+            }
+        }
+        spec
+    }
+
     pub fn pending(&self) -> bool {
-        self.pending.is_some()
-            || self.harness.pending()
-            || self.telegram.pending()
-            || self.hooks.pending()
+        self.pending.is_some() || self.telegram.pending() || self.hooks.pending()
     }
     pub fn cancel(&mut self) {
         self.telegram.cancel();
-        self.harness.cancel();
         self.hooks.cancel();
         self.pending = None;
     }
@@ -153,11 +159,19 @@ impl Menu {
                 json!([
                     h,
                     h,
-                    if spec.selection.harnesses.iter().any(|s| s == h) {
-                        "Selected · choose to remove"
-                    } else {
-                        "Choose to select"
-                    }
+                    format!(
+                        "{} · {}",
+                        self.detected
+                            .iter()
+                            .find(|d| d.id == h)
+                            .map(|d| d.status.as_str())
+                            .unwrap_or("Not checked"),
+                        if spec.selection.harnesses.iter().any(|s| s == h) {
+                            "Selected · choose to remove"
+                        } else {
+                            "Choose to select"
+                        }
+                    )
                 ])
             })
             .collect::<Vec<_>>();
@@ -168,9 +182,9 @@ impl Menu {
         ]));
         self.choose(
             seq,
-            "Choose your AI tools",
+            "Detected harnesses",
             json!(options),
-            "Select the tools or subscriptions you already use. Sign-in stays with each harness.",
+            "Installed harnesses are preselected. Review or deselect them before saving. Saved profiles are reused; sign-in remains inside each harness.",
             Stage::Tools(spec),
         )
     }
@@ -254,22 +268,17 @@ impl Menu {
                     ],
                     [
                         "tools.choose",
-                        "1. Choose your AI tools",
+                        "1. Review detected harnesses",
                         "Select the tools or subscriptions you already use."
                     ],
                     [
-                        "tools.signin",
-                        "2. Sign in to an AI tool",
-                        "Open the selected tool’s native sign-in in its account directory."
-                    ],
-                    [
                         "telegram",
-                        "3. Connect Telegram (optional)",
+                        "2. Connect Telegram (optional)",
                         "Follow the guided settings, bot token, service and destination steps."
                     ],
                     [
                         "hooks",
-                        "4. Install standard hooks (optional)",
+                        "3. Install standard hooks (optional)",
                         "Review each detected live agent's native hook profile separately."
                     ],
                     [
@@ -278,10 +287,10 @@ impl Menu {
                         "Save local configuration; make this directory private (0700). No installs or sign-in."
                     ]
                 ]),
-                "Each step is optional. Existing agents keep running.",
+                &format!("Detected on this computer:\n{}\n\nEach step is optional. Existing agents keep running.",self.detected.iter().map(|d|format!("{} · {}",d.id,d.status)).collect::<Vec<_>>().join("\n")),
                 Stage::Root,
             ),
-            "tools.choose" => self.tools(seq, Spec::current(config)),
+            "tools.choose" => self.tools(seq, self.current(config)),
             _ => Err("Unknown setup action".into()),
         }
     }
@@ -297,9 +306,6 @@ impl Menu {
         }
         if self.hooks.pending() {
             return self.hooks.reply(request, source, config, seq);
-        }
-        if self.harness.pending() {
-            return self.harness.reply(request, source, config, seq);
         }
         let pending = self.pending.as_ref().ok_or("No setup dialog is pending")?;
         if request["op"] != "reply" || request["id"].as_u64() != Some(pending.id) {
@@ -361,7 +367,9 @@ impl Menu {
                     Stage::Local,
                 ),
                 "done" => {
-                    let configuration = source.finish_local_setup(config)?;
+                    let mut selected = config.clone();
+                    selected.subscriptions = self.current(config).selection.harnesses;
+                    let configuration = source.finish_local_setup(&selected)?;
                     Ok(Outcome {
                         configuration: Some(configuration),
                         refresh: true,
@@ -381,12 +389,11 @@ impl Menu {
                         node: String::new(),
                     },seq)
                 },
-                "tools.signin" => self.harness.start(text, seq),
                 "tools.choose" => self.start(text, config, seq),
                 _ => Err("This step is unsupported by the setup menu".into()),
             },
             Stage::Local => match text {
-                "current" => self.tools(seq, Spec::current(config)),
+                "current" => self.tools(seq, self.current(config)),
                 "cutover" => self.input(seq,"Staged destination configuration directory",Stage::CutoverDirectory),
                 "fresh" => self.input(
                     seq,
@@ -414,7 +421,7 @@ impl Menu {
                 spec.mode = Mode::Fresh {
                     workspace: path(text)?,
                 };
-                spec.selection.harnesses.clear();
+                spec.selection.harnesses = self.detected.iter().filter(|d| d.installed).map(|d| d.id.clone()).collect();
                 self.tools(seq, spec)
             }
             Stage::ImportSource(whole) => self.input(
@@ -730,6 +737,73 @@ mod tests {
             &config(),
             seq,
         )
+    }
+    #[test]
+    fn detected_installed_tools_are_preselected_and_can_be_deselected() {
+        let (mut menu, mut source, mut seq) = (Menu::default(), Mock::new(), 0);
+        menu.detected = vec![
+            super::super::harness_detection::Detected {
+                id: "codex".into(),
+                installed: true,
+                status: "Signed in · native status".into(),
+            },
+            super::super::harness_detection::Detected {
+                id: "claude".into(),
+                installed: false,
+                status: "Not installed".into(),
+            },
+        ];
+        let root = menu.start("setup", &config(), &mut seq).unwrap();
+        assert!(
+            root.frames[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Signed in")
+        );
+        assert!(
+            !root.frames[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r[0] == "tools.signin")
+        );
+        menu.cancel();
+        let choice = menu.start("tools.choose", &config(), &mut seq).unwrap();
+        let codex = choice.frames[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r[0] == "codex")
+            .unwrap();
+        assert!(codex[2].as_str().unwrap().contains("Selected"));
+        reply(&mut menu, &mut source, &mut seq, json!("codex")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("done")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("existing")).unwrap();
+        assert!(source.specs[0].selection.harnesses.is_empty());
+        assert_eq!(source.applies, 0);
+        menu.cancel();
+        menu.start("setup", &config(), &mut seq).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("local")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("fresh")).unwrap();
+        reply(
+            &mut menu,
+            &mut source,
+            &mut seq,
+            json!(crate::test_support::path("/tmp/new-config")),
+        )
+        .unwrap();
+        reply(
+            &mut menu,
+            &mut source,
+            &mut seq,
+            json!(crate::test_support::path("/tmp/new-workspace")),
+        )
+        .unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("done")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("existing")).unwrap();
+        assert_eq!(source.specs[1].selection.harnesses, vec!["codex"]);
+        assert!(matches!(source.specs[1].mode, Mode::Fresh { .. }));
+        assert_eq!(source.applies, 0);
     }
     #[test]
     fn setup_offers_reviewed_hooks_only_when_agents_are_live() {
