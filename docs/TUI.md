@@ -49,7 +49,11 @@ revealing the token. On Windows, input fields support **Ctrl+V** and **Shift+Ins
 through the native clipboard, including terminals that do not emit paste events.
 Clipboard access occurs only when you invoke paste in a form. Empty input keeps the form open for correction. Saving it validates
 its format and bot ID; it does not verify Telegram connectivity. Starting the service
-requires a separate review. Choose a destination terminal and connect its installed
+requires a separate review. Hook setup shows a detected profile path where available:
+press Enter to accept it, type a different absolute path, or use `skip` / Esc to
+finish later. Empty or invalid paths keep the form open for correction. Skipping
+hooks preserves saved Telegram settings but does not enable replies.
+Choose a destination terminal and connect its installed
 reply hook, then start a conversation with your bot. Check connection status before
 sending a test message. A saved route alone does not mean a message was delivered.
 

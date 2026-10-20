@@ -29,7 +29,14 @@ Installing a hook profile never grants a Telegram recipient or starts a service.
 The Hooks page offers **Install standard hooks** (lifecycle, Telegram final
 replies and progress) or **Choose features** for a selected live agent. **Set up
 hooks for detected agents** walks through every recognized live harness session
-one at a time; each profile and transcript is supplied and reviewed separately.
+one at a time. For Codex and Claude Code, the profile field suggests the detected
+process profile, or the selected harness's configured/default profile when process
+environment details are unavailable (including Windows). Press Enter to accept the
+shown path, or supply a different absolute path. Changes still require review.
+If no default is detected, empty input keeps the form open. Type `skip` or press
+Esc to leave setup without installing hooks; a saved Telegram route does not yet
+have replies connected. The optional transcript field accepts Enter for `none`.
+Each agent is reviewed separately.
 It excludes shell-only terminals. An unsupported provider/version/platform or a
 stale process fails closed at review, without modifying its native profile. A
 Telegram recipient still needs a separate chat binding. The Hooks page (or

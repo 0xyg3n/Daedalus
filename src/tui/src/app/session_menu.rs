@@ -464,7 +464,7 @@ impl SessionMenu {
             return self.telegram.start(action, source, config, seq);
         }
         if action == "hooks.adapter" {
-            return self.hooks.start(view, seq);
+            return self.hooks.start(view, source, config, seq);
         }
         if action == "hooks.reload" {
             return self.hooks.reload(source, seq);
@@ -1179,7 +1179,7 @@ impl SessionMenu {
                     panes.retain(|p| p["agent"] == harness);
                 }
                 view.selected = None;
-                self.hooks.start(view, seq)
+                self.hooks.start(view, source, config, seq)
             }
             Stage::HookSwitch(expected, option) => {
                 if text == "cancel" {

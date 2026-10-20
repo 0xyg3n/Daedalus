@@ -1030,6 +1030,18 @@ pub struct NativeSource {
     pub terminals: Terminals,
     pub last_snapshot: Value,
 }
+fn hook_profile_path(harness: &str, observed: Option<&str>, configured: &str) -> Option<PathBuf> {
+    let directory = observed
+        .filter(|p| !p.is_empty())
+        .or_else(|| (!configured.is_empty()).then_some(configured))?;
+    let filename = match harness {
+        "codex" => "hooks.json",
+        "claude" => "settings.json",
+        _ => return None,
+    };
+    Some(PathBuf::from(directory).join(filename))
+}
+
 impl NativeSource {
     fn herdr_hook_request(
         &self,
@@ -1377,19 +1389,15 @@ impl Source for NativeSource {
             pane,
             "",
         )?;
-        // Only use the profile observed on this exact process, never the backend's own account.
-        let profile = frozen["_daedalus_handoff_process"]["profile"]
-            .as_str()
-            .filter(|p| !p.is_empty());
-        let Some(profile) = profile else {
+        // Prefer the exact process profile. Windows falls back to the selected harness's
+        // configured/native profile, presented for review before any write.
+        let Some(profile) = hook_profile_path(
+            &checkpoint.harness,
+            frozen["_daedalus_handoff_process"]["profile"].as_str(),
+            &checkpoint.profile,
+        ) else {
             return Ok(None);
         };
-        let filename = match checkpoint.harness.as_str() {
-            "codex" => "hooks.json",
-            "claude" => "settings.json",
-            _ => return Ok(None),
-        };
-        let profile = PathBuf::from(profile).join(filename);
         crate::core::layouts::check_path(&profile)?;
         Ok(Some(super::hook_menu::Spec {
             pane: frozen,
@@ -2440,6 +2448,25 @@ mod tests {
         assert!(backend.restore_pending);
     }
 
+    #[test]
+    fn hook_profile_detection_prefers_process_then_configured_profile() {
+        let observed = crate::test_support::path("/tmp/observed-profile");
+        let configured = crate::test_support::path("/tmp/configured-profile");
+        assert_eq!(
+            hook_profile_path("codex", Some(observed), configured),
+            Some(PathBuf::from(observed).join("hooks.json"))
+        );
+        assert_eq!(
+            hook_profile_path("claude", None, configured),
+            Some(PathBuf::from(configured).join("settings.json"))
+        );
+        assert_eq!(
+            hook_profile_path("codex", Some(""), configured),
+            Some(PathBuf::from(configured).join("hooks.json"))
+        );
+        assert!(hook_profile_path("codex", None, "").is_none());
+        assert!(hook_profile_path("unknown", Some(observed), configured).is_none());
+    }
     #[test]
     fn initial_state_has_existing_ui_contract_and_catalog_only_once() {
         let mut backend = backend();

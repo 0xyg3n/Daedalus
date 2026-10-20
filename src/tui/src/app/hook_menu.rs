@@ -62,6 +62,7 @@ struct Pending {
     mode: &'static str,
     choices: Vec<String>,
     stage: Stage,
+    frame: Value,
 }
 #[derive(Default)]
 pub struct Menu {
@@ -105,20 +106,27 @@ impl Menu {
             mode,
             choices,
             stage,
+            frame: frame.clone(),
         });
         Ok(Outcome {
             frames: vec![frame],
             ..Default::default()
         })
     }
-    pub fn start(&mut self, view: View, seq: &mut u64) -> Result<Outcome> {
+    pub fn start<S: Source>(
+        &mut self,
+        view: View,
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
         if self.pending() {
             return Err("Finish the current hook dialog first".into());
         }
         self.batch.clear();
         self.batch_active = false;
         if let Some(pane) = view.selected {
-            return self.profile(pane, seq);
+            return self.profile(pane, source, config, seq);
         }
         let panes = view.snapshot["panes"]
             .as_array()
@@ -191,9 +199,14 @@ impl Menu {
                 "options":[["start","Review sessions one by one","No hook is installed automatically"],["cancel","Cancel","Leave every profile unchanged"]]}),
             Stage::BatchStart(panes))
     }
-    fn next_batch(&mut self, seq: &mut u64) -> Result<Outcome> {
+    fn next_batch<S: Source>(
+        &mut self,
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
         match self.batch.pop_front() {
-            Some(pane) => self.profile(pane, seq),
+            Some(pane) => self.profile(pane, source, config, seq),
             None => {
                 self.batch_active = false;
                 Ok(Outcome {
@@ -226,19 +239,57 @@ impl Menu {
     ) -> Result<Outcome> {
         self.cancel();
         self.telegram_recipient = Some(recipient);
-        match source.default_hook_spec(config, &pane)? {
-            Some(spec) => self.review_hooks(source, config, spec, seq),
-            None => self.profile(pane, seq),
-        }
+        self.profile(pane, source, config, seq)
     }
-    fn profile(&mut self, pane: Value, seq: &mut u64) -> Result<Outcome> {
+    fn profile<S: Source>(
+        &mut self,
+        pane: Value,
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
+        let (detected, note) = match source.default_hook_spec(config, &pane) {
+            Ok(Some(spec)) => (Some(spec.profile), String::new()),
+            Ok(None) => (
+                None,
+                "No default hook profile was detected for this terminal.".to_owned(),
+            ),
+            Err(error) => (
+                None,
+                format!("Could not detect this terminal's hook profile: {error}"),
+            ),
+        };
+        let description = match &detected {
+            Some(path) => format!(
+                "Detected profile: {}\nPress Enter to use it, or enter a different absolute path. Type skip or press Esc to finish without installing hooks. Changes are reviewed before installation.",
+                path.display()
+            ),
+            None => format!(
+                "{note}\nEnter an absolute native hook profile path, or type skip / press Esc to finish without installing hooks."
+            ),
+        };
         self.frame(
             seq,
             "input",
             "Native hook profile file (absolute path)",
-            json!({"secret":false,"description": if self.batch_active {"Enter the exact native profile path, or type skip to continue to the next agent."} else {"Enter the exact native profile path."}}),
+            json!({"secret":false,"description":description,"default":detected}),
             Stage::Profile(pane),
         )
+    }
+    fn retry_input(&mut self, seq: &mut u64, message: &str) -> Result<Outcome> {
+        let pending = self.pending.as_mut().ok_or("No hook dialog is pending")?;
+        let mut frame = pending.frame.clone();
+        frame["description"] = json!(format!(
+            "{message}\n\n{}",
+            frame["description"].as_str().unwrap_or("")
+        ));
+        *seq = seq.checked_add(1).ok_or("Dialog sequence exhausted")?;
+        pending.id = *seq;
+        frame["id"] = json!(*seq);
+        Ok(Outcome {
+            frames: vec![frame],
+            ..Default::default()
+        })
     }
     fn preset(&mut self, spec: Spec, seq: &mut u64) -> Result<Outcome> {
         self.frame(seq, "choose", "Choose hook setup", json!({
@@ -629,7 +680,45 @@ impl Menu {
         if request["op"] != "reply" || request["id"].as_u64() != Some(pending.id) {
             return Err("Unexpected hook reply".into());
         }
-        let value = request.get("value").ok_or("Missing hook reply")?;
+        let mut value = request.get("value").ok_or("Missing hook reply")?.clone();
+        if pending.mode == "input" && value.as_str().is_some_and(|v| v.trim().is_empty()) {
+            value = pending
+                .frame
+                .get("default")
+                .filter(|v| v.is_string())
+                .cloned()
+                .unwrap_or_else(|| json!(""));
+            if value == "" {
+                return self.retry_input(
+                    seq,
+                    "No default is available. Enter a value, or press Esc to skip hook setup.",
+                );
+            }
+        }
+        if pending.mode == "input"
+            && let Some(text) = value.as_str()
+        {
+            if text.len() > 4096 || text.chars().any(char::is_control) {
+                return self.retry_input(
+                    seq,
+                    "Use at most 4096 characters without control characters.",
+                );
+            }
+            let path_input = matches!(
+                pending.stage,
+                Stage::Profile(_) | Stage::Transcript(_) | Stage::MemoryCredential(_)
+            );
+            let skip =
+                text == "skip" && matches!(pending.stage, Stage::Profile(_) | Stage::Transcript(_));
+            let none = text == "none" && !matches!(pending.stage, Stage::Profile(_));
+            if path_input
+                && !skip
+                && !none
+                && crate::core::layouts::check_path(&PathBuf::from(text)).is_err()
+            {
+                return self.retry_input(seq, "Use an absolute path without parent traversal or symbolic links. Your previous setup steps are preserved.");
+            }
+        }
         if !value.is_null() {
             let text = value.as_str().ok_or("Invalid hook reply")?;
             let valid = match pending.mode {
@@ -646,21 +735,32 @@ impl Menu {
         }
         let pending = self.pending.take().unwrap();
         if value.is_null() {
-            self.batch.clear();
-            self.batch_active = false;
-            return Ok(Outcome::default());
+            self.cancel();
+            return Ok(Outcome { message:"Hook setup skipped; existing settings are unchanged. Telegram replies still require connected hooks.".into(), ..Default::default() });
         }
         let text = value.as_str().unwrap();
+        if text == "skip" && matches!(pending.stage, Stage::Profile(_) | Stage::Transcript(_)) {
+            if self.batch_active {
+                return self.next_batch(source, config, seq);
+            }
+            self.cancel();
+            return Ok(Outcome {
+                message:
+                    "Hook setup skipped. Return to Hooks or Telegram to finish connecting replies."
+                        .into(),
+                ..Default::default()
+            });
+        }
         match pending.stage {
             Stage::BatchStart(panes) => {
                 if text == "cancel" { return Ok(Outcome::default()); }
                 self.batch = panes.into();
                 self.batch_active = true;
-                self.next_batch(seq)
+                self.next_batch(source, config, seq)
             }
             Stage::BatchError(pane) => match text {
-                "retry" => self.profile(pane,seq),
-                "skip" => self.next_batch(seq),
+                "retry" => self.profile(pane,source,config,seq),
+                "skip" => self.next_batch(source, config, seq),
                 _ => { self.batch.clear(); self.batch_active=false; Ok(Outcome::default()) }
             },
             Stage::Reload(plan) => {
@@ -709,10 +809,9 @@ impl Menu {
             Stage::Pane(panes) => {
                 let index = text.parse::<usize>().map_err(|_| "Invalid pane selection")?;
                 let pane = panes.get(index).ok_or("Pane selection changed")?.clone();
-                self.profile(pane, seq)
+                self.profile(pane, source, config, seq)
             }
             Stage::Profile(pane) => {
-                if text == "skip" && self.batch_active { return self.next_batch(seq); }
                 let profile = PathBuf::from(text);
                 if let Err(error)=crate::core::layouts::check_path(&profile) {
                     if self.batch_active { return self.batch_error(pane,error,seq); }
@@ -727,12 +826,11 @@ impl Menu {
                     seq,
                     "input",
                     "Native transcript file (absolute path or none)",
-                    json!({"secret": false,"description":if self.batch_active {"Enter an absolute transcript path, none if unused, or skip to continue to the next agent."} else {"Enter an absolute transcript path, or none if unused."}}),
+                    json!({"secret": false,"default":"none","description":if self.batch_active {"Press Enter for none, enter an absolute transcript path, or type skip to continue to the next agent."} else {"Press Enter for none, enter an absolute transcript path, or type skip to finish hook setup."}}),
                     Stage::Transcript(spec),
                 )
             }
             Stage::Transcript(mut spec) => {
-                if text == "skip" && self.batch_active { return self.next_batch(seq); }
                 if text != "none" {
                     let path = PathBuf::from(text);
                     if let Err(error)=crate::core::layouts::check_path(&path) {
@@ -813,7 +911,7 @@ impl Menu {
             Stage::Result(receipt) => match text {
                 "memory" => self.start_memory(source, receipt, seq),
                 "telegram" => self.start_recipients(source, receipt, seq),
-                "next" => self.next_batch(seq),
+                "next" => self.next_batch(source, config, seq),
                 _ => {
                     self.batch.clear();
                     self.batch_active = false;
@@ -926,6 +1024,8 @@ mod tests {
         fail: bool,
         fail_preview: bool,
         last_transcript: Option<Option<PathBuf>>,
+        detected: Option<PathBuf>,
+        last_profile: Option<PathBuf>,
     }
     impl Mock {
         fn new() -> Self {
@@ -963,6 +1063,8 @@ mod tests {
                 fail: false,
                 fail_preview: false,
                 last_transcript: None,
+                detected: None,
+                last_profile: None,
             }
         }
     }
@@ -972,6 +1074,15 @@ mod tests {
         }
     }
     impl Source for Mock {
+        fn default_hook_spec(&mut self, _: &ControlConfig, pane: &Value) -> Result<Option<Spec>> {
+            Ok(self.detected.clone().map(|profile| Spec {
+                pane: pane.clone(),
+                profile,
+                transcript: None,
+                options: Options::guided(),
+                goal_id: None,
+            }))
+        }
         fn prepare_herdr_hooks(
             &mut self,
             _: &ControlConfig,
@@ -1081,6 +1192,7 @@ mod tests {
         }
         fn prepare_hooks(&mut self, _: &ControlConfig, spec: Spec) -> Result<Preview> {
             self.previews += 1;
+            self.last_profile = Some(spec.profile.clone());
             self.last_transcript = Some(spec.transcript.clone());
             if self.fail_preview {
                 return Err("Native profile is unsupported".into());
@@ -1143,11 +1255,74 @@ mod tests {
         }
     }
     #[test]
+    fn detected_profile_accepts_enter_and_manual_override_without_applying() {
+        for manual in [false, true] {
+            let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+            let detected = mock.dir.join("hooks.json");
+            let alternate = mock.dir.join("alternate.json");
+            mock.detected = Some(detected.clone());
+            let config = ControlConfig::fresh(&mock.dir).unwrap();
+            let pane = view().selected.unwrap();
+            let start = menu
+                .start_defaults(pane, (42, 42), &mut mock, &config, &mut seq)
+                .unwrap();
+            assert_eq!(start.frames[0]["default"], json!(detected));
+            reply(
+                &mut menu,
+                &mut mock,
+                &mut seq,
+                if manual { json!(alternate) } else { json!("") },
+            )
+            .unwrap();
+            reply(&mut menu, &mut mock, &mut seq, json!("")).unwrap();
+            reply(&mut menu, &mut mock, &mut seq, json!("defaults")).unwrap();
+            assert_eq!(
+                mock.last_profile,
+                Some(if manual { alternate } else { detected })
+            );
+            assert_eq!(mock.last_transcript, Some(None));
+            assert_eq!(mock.applies, 0);
+        }
+    }
+    #[test]
+    fn missing_or_invalid_profile_keeps_dialog_open_and_skip_clears_pending() {
+        for cancel in [json!("skip"), Value::Null] {
+            let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+            let config = ControlConfig::fresh(&mock.dir).unwrap();
+            menu.start_defaults(
+                view().selected.unwrap(),
+                (42, 42),
+                &mut mock,
+                &config,
+                &mut seq,
+            )
+            .unwrap();
+            for input in ["", "relative.json", "../hooks.json"] {
+                let old = seq;
+                let outcome = reply(&mut menu, &mut mock, &mut seq, json!(input)).unwrap();
+                assert_eq!(outcome.frames[0]["mode"], "input");
+                assert!(menu.pending() && seq > old);
+                assert_eq!(mock.applies, 0);
+            }
+            reply(&mut menu, &mut mock, &mut seq, cancel).unwrap();
+            assert!(!menu.pending());
+            assert!(menu.telegram_recipient.is_none());
+            menu.start(view(), &mut mock, &config, &mut seq).unwrap();
+            assert!(menu.pending());
+        }
+    }
+    #[test]
     fn opencode_profile_does_not_force_an_invalid_transcript() {
         let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
         let mut selected = view();
         selected.selected.as_mut().unwrap()["agent"] = json!("opencode");
-        menu.start(selected, &mut seq).unwrap();
+        menu.start(
+            selected,
+            &mut mock,
+            &ControlConfig::fresh(&std::env::temp_dir()).unwrap(),
+            &mut seq,
+        )
+        .unwrap();
         let profile = mock.dir.join("bridge.mjs");
         let result = reply(&mut menu, &mut mock, &mut seq, json!(profile));
         assert_eq!(result.unwrap().frames[0]["title"], "Choose hook setup");
@@ -1245,7 +1420,13 @@ mod tests {
         )
     }
     fn reviewed(menu: &mut Menu, mock: &mut Mock, seq: &mut u64) {
-        menu.start(view(), seq).unwrap();
+        menu.start(
+            view(),
+            mock,
+            &ControlConfig::fresh(&std::env::temp_dir()).unwrap(),
+            seq,
+        )
+        .unwrap();
         reply(menu, mock, seq, json!(mock.dir.join("hooks.json"))).unwrap();
         let preset = reply(menu, mock, seq, json!(mock.dir.join("transcript.jsonl"))).unwrap();
         assert_eq!(preset.frames[0]["title"], "Choose hook setup");
