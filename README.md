@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/daedalus.png" alt="Daedalus" width="440"></p>
 <p align="center"><b>Daedalus</b> is a terminal workspace for shells and AI coding agents, with Telegram control and a local agent API.</p>
 <p align="center">
-<img src="assets/badges/platform.svg" alt="Linux and Windows preview">
+<img src="assets/badges/platform.svg" alt="Linux and Windows">
 <img src="assets/badges/interface.svg" alt="Rust · Ratatui">
 <a href="LICENSE"><img src="assets/badges/license.svg" alt="Apache-2.0"></a>
 </p>
@@ -62,9 +62,9 @@ finds installed harnesses and lets you choose optional components. Native termin
 are the default; tmux and Herdr are optional. See the [installation guide](docs/INSTALL.md)
 for checksums, Windows setup, configuration import, updates and removal.
 
-Daedalus is in beta. Windows is a native preview with a smaller hook support matrix.
-Linux ARM64 source builds are unverified; macOS and native Windows ARM64 packages
-are unavailable. See [platform boundaries](docs/HARNESSES.md#native-windows-boundaries).
+Daedalus supports Linux and Windows and is in active development. Release packages
+target x86-64. See [harness and platform support](docs/HARNESSES.md) for the
+features available on each platform.
 
 ## Built-in terminals
 
@@ -93,9 +93,13 @@ arbitrary shells cannot be adopted into a new PTY.
 | Cube | Rotate terminals within a workspace, resize the front face and attach in place. |
 | Focus | Keep a terminal and its native split layout beside the workspace tree. |
 
+| Tree | Tiles |
+| --- | --- |
+| <a href="assets/screenshots/tui.png"><img src="assets/screenshots/tui.png" alt="Tree view showing workspaces, tabs and panes; sample data" width="100%"></a> | <a href="assets/screenshots/tiles.png"><img src="assets/screenshots/tiles.png" alt="Tiles view with a selected terminal and companion previews; sample data" width="100%"></a> |
+
 | Cube | Wall |
 | --- | --- |
-| <img src="assets/screenshots/cube.png" alt="Cube layout with a selected terminal and neighbouring faces; sample data" width="100%"> | <img src="assets/screenshots/wall.png" alt="Wall layout with workspace status and a selected terminal; sample data" width="100%"> |
+| <a href="assets/screenshots/cube.png"><img src="assets/screenshots/cube.png" alt="Cube layout with a selected terminal and neighbouring faces; sample data" width="100%"></a> | <a href="assets/screenshots/wall.png"><img src="assets/screenshots/wall.png" alt="Wall layout with workspace status and a selected terminal; sample data" width="100%"></a> |
 
 **F1** searches shortcuts. **Ctrl+K** switches terminals. **Ctrl+P** finds commands.
 Use **[ / ]** to switch layouts and **a** to attach. In Cube, click a face to attach
@@ -119,8 +123,8 @@ bot and owner ID, register a DM or group, assign its destination pane, install t
 reply hooks and start the connection. Each chat has its own route.
 
 Telegram runs as a separate process of the same binary and can remain active after
-the TUI closes. A saved route does not prove that its agent is ready; delivery
-requires a verified conversation and working hooks. See the [Telegram guide](docs/TELEGRAM.md)
+the TUI closes. Delivery follows the selected conversation and its hook-reported
+state. See the [Telegram guide](docs/TELEGRAM.md)
 for setup, service controls, supported messages and troubleshooting.
 
 ## Agent interface

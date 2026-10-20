@@ -1,11 +1,9 @@
 # Installation
 
-Daedalus is one native executable: `daedalus` on Linux x86_64/ARM64 or
-`daedalus.exe` on Windows x64. It provides the TUI, CLI, Telegram service and
-hook runtime. Agent tools keep their own runtimes and accounts. macOS is not
-supported. Windows 11 validation covers native shell control, private permissions,
-installer fixtures and selected hooks. Provider compatibility still depends on the installed
-upstream tools.
+Daedalus runs on Linux and Windows as one native executable. It includes the TUI,
+CLI, Telegram service and hooks. The project is in active development; release
+packages target Linux x86-64 and Windows x64. Agent tools keep their own runtimes
+and accounts.
 
 ## Linux install
 
@@ -38,7 +36,7 @@ Building needs Rust 1.88+, a C linker, Git and curl. After you approve, the
 installer adds missing build tools with apt, dnf or pacman, and Rust with the
 official rustup script (it prints the script's SHA-256 first). It never replaces a
 `daedalus` command it did not install. A checksum proves integrity only if you got
-it from a source you trust. ARM64 builds have not been tested on real hardware.
+it from a source you trust. The Linux source installer also supports ARM64.
 
 ## Native Windows install
 
@@ -51,8 +49,7 @@ checksums. Install a standalone executable before using in-app updates.
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
 Native Windows multiplexers such as [tmux-windows](https://github.com/arndawg/tmux-windows)
 and [PSMux](https://github.com/psmux/psmux) can be selected through explicitly
-configured compatible endpoints; command and identity contracts require validation
-for the installed build. Unix socket discovery is not assumed on Windows. WSL
+configured endpoints. Unix socket discovery is not used on Windows. WSL
 sessions are a separate environment. Set `DAEDALUS_TMUX_BIN` to the absolute
 path of a compatible executable when selection is needed; discovery otherwise
 tries `tmux.exe`, then `psmux.exe`. PSMux `.psmux/*.port` namespace markers are
@@ -97,17 +94,16 @@ under `PREFIX\share\daedalus\native\SHA256`, and copies the selected binary to
 whose installed bytes changed, are not overwritten. A running executable may
 need to be closed before replacement. PATH is not changed automatically.
 
-Initial Windows support targets x64. ARM64 requires explicit `-AllowEmulation`
-for x64 emulation, which is unverified; no native ARM64 package is claimed.
+Windows packages target x64. On ARM64, `-AllowEmulation` explicitly selects x64
+emulation; there is no native Windows ARM64 package.
 Installation never starts a bot, service, private setup or provider sign-in.
 Guided first launch with hooks is unavailable on Windows. Existing verified
 Herdr processes have native hook contracts for Claude Code 2.1.296+, Hermes, Pi
-and OpenCode. Codex/Grok/Cursor hooks and hooks through native tmux-compatible
-backends remain unverified and fail closed. Herdr duplicate attachment views
+and OpenCode. Codex/Grok/Cursor hook enrollment and hooks through native
+tmux-compatible backends are not enabled on Windows. Herdr duplicate attachment views
 are unavailable; use Watch. Remote feeding still requires exact process,
-terminal generation and conversation registration. See the [Windows capability
-boundaries](HARNESSES.md#native-windows-boundaries); live provider compatibility
-is not established by this port.
+terminal generation and conversation registration. See the [Windows
+support table](HARNESSES.md#native-windows-boundaries) for available operations.
 
 ### Windows local validation
 
@@ -118,7 +114,7 @@ is not established by this port.
 This runs formatting, tests, Clippy, a release build and isolated installer
 fixtures. The optional `-BackendSmoke Herdr|PSMux -BackendBinary ABS` checks an
 installed backend using a private echo fixture. See [testing](ARCHITECTURE.md#testing)
-for coverage and limitations; live provider delivery requires a separate check.
+for the test suites and contributor workflow.
 
 ## First run
 

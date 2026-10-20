@@ -33,9 +33,8 @@ installing tmux or Herdr. External backends remain optional. Setup shows the det
 operating system and architecture before presenting any dependency installation.
 Setup detects installed harnesses and preselects them for review. You can deselect
 any tool before saving. Codex and Claude Code report sign-in through their native
-status commands; other tools show an existing profile or installation with sign-in
-marked unverified. Account identities and tokens are not displayed. A saved profile
-alone is not proof of a working account; authentication stays in the harness.
+status commands; other tools show detected profiles or installations. Account
+identities and tokens are not displayed. Authentication stays in the harness.
 
 Open **Options → Configuration settings → Telegram configuration** and choose
 **Connect my bot and DM**. Enter the bot token and your numeric owner user ID.

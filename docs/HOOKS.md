@@ -127,8 +127,8 @@ path. Review and reinstall those profiles, trust changed commands in Codex
 
 Existing verified Herdr processes support native registration contracts for
 Claude Code 2.1.296+, Hermes, Pi and OpenCode. Windows guided hooked first launch,
-Codex/Grok/Cursor hooks and hooks through native tmux-compatible backends are
-unverified and fail closed. Native terminal controls and ordinary launch are
+Codex/Grok/Cursor hook enrollment and hooks through native tmux-compatible
+backends are not enabled on Windows. Native terminal controls and ordinary launch are
 separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boundaries).
 
 Native harness profile folders created from an elevated terminal may be owned by

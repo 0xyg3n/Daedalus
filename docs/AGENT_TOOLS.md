@@ -68,8 +68,8 @@ transports as documented by those operations.
 Use the ordinary TUI/CLI for setup prompts, provider sign-in, terminal attachment,
 hook event execution, guided provider activation and the continuous Telegram
 service. `terminal attach`, `hook launch`, `hook run` and `telegram serve` are
-rejected before dispatch. Capability metadata describes accessible entrypoints,
-not universal feature parity or proof that an installed provider works.
+rejected before dispatch. Capability metadata lists accessible entrypoints;
+provider requirements are covered in the [harness guide](HARNESSES.md).
 
 ## Human and agent coordination
 

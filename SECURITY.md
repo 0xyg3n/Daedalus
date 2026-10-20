@@ -41,7 +41,6 @@ configuration directory, outside any repository.
 
 ## Limits
 
-Tests cover authorization, stale-identity rejection, replay handling and
-private-file behavior. They do not prove every upstream version is safe. Cleaning
-the current tree does not remove secrets from Git history; that needs a separate
-history audit.
+Security tests cover authorization, stale-identity rejection, replay handling and
+private-file behavior. If credentials enter version control, rotate them and
+remove them from both the current tree and Git history.

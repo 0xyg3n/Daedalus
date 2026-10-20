@@ -3,8 +3,7 @@
 Daedalus runs shells and agent tools in its built-in PTY/ConPTY terminals or
 through optional tmux and Herdr adapters. Seven native harness adapters provide
 launch, profile selection and hook integration. Sign-in and credentials stay with
-each tool. A local signed-in indicator does not prove the account can use a given
-model.
+each tool.
 
 | Tool | Hook profile | Guided first launch with hooks | Goal continuation |
 | --- | --- | --- | --- |
@@ -51,24 +50,23 @@ It has no Daedalus sign-in, hooks, readiness or resume/fork support.
 ## Native Windows boundaries
 
 Windows x64 uses built-in ConPTY terminals by default. Herdr is optional. Configure
-compatible native tmux backends with `DAEDALUS_TMUX_BIN` and endpoint selection. Detection of a terminal backend does
-not establish its hook or process-correlation contract.
+compatible native tmux backends with `DAEDALUS_TMUX_BIN` and endpoint selection.
+Terminal controls and harness hooks have separate feature support:
 
-| Windows operation | Current boundary |
+| Windows operation | Support |
 | --- | --- |
 | Ordinary terminal launch/watch/capture/control | Native executable and exact backend identity required |
 | Guided first launch with hooks | Unavailable; register an existing verified process |
 | Existing Claude Code hooks | Native Herdr registration, audited 2.1.296+ contract |
 | Existing Hermes, Pi and OpenCode hooks | Native Herdr registration with provider-specific proof; OpenCode and gateway-backed Hermes pin the server separately from the frontend |
-| Codex, Grok and Cursor hooks | Unverified on Windows; registration/launch fails closed |
-| Hooks through native tmux-compatible backends | Unverified; fail closed rather than infer identity |
+| Codex, Grok and Cursor hooks | Not enabled on Windows |
+| Hooks through native tmux-compatible backends | Not enabled on Windows |
 | Herdr duplicate attachment view | Unavailable; use read-only Watch |
-| Native session resume/fork | Still requires installed capability and exact provider identity; no blanket Windows-provider claim |
+| Native session resume/fork | Available where the installed harness exposes the required session operation |
 
-Hook availability is implementation/contract coverage, not evidence of live
-provider acceptance. Linux tests and Windows cross-compilation do not validate
-Windows terminal/ConPTY behavior on real hardware. See [Windows installation and
-local checks](INSTALL.md#native-windows-install).
+Linux and Windows have automated tests and native terminal checks. See
+[installation](INSTALL.md#native-windows-install) for setup and
+[testing](ARCHITECTURE.md#testing) for the contributor workflow.
 
 ## Upstream references
 

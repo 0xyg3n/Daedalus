@@ -95,8 +95,8 @@ On native Windows, run `./scripts/check-windows.ps1` in PowerShell. It adds
 isolated PE/checksum installer fixtures and performs the same Cargo checks.
 The native Windows suite includes a real isolated ConPTY shell test for input,
 capture, resize, identity refusal and cleanup. Installer fixtures verify individual
-ownership and BOM-free receipts. Cross-compilation alone does not validate runtime
-behavior; live provider delivery needs separate checks. No hosted workflow is required.
+ownership and BOM-free receipts. Run these checks on Windows for native runtime
+coverage. No hosted workflow is required.
 
 `scripts/check.sh` runs `cargo fmt --check`, `cargo test --locked --all-targets`,
 `cargo clippy -D warnings` and a release build for `src/tui`.
@@ -109,9 +109,8 @@ installed; `src/tui/tests/native_cli.rs` runs the packaged CLI against private
 state. `src/tui/tests/native_terminal.rs` exercises actual isolated native shell
 processes, stream control, resize, stale identity refusal and detach survival.
 
-Tests do not prove OAuth acceptance, live Telegram delivery, Hindsight indexing or
-compatibility with untested upstream versions. Run a credential scan on the
-current tree before publishing.
+Record the upstream harness version when reporting integration regressions. Run
+a credential scan on the current tree before publishing.
 
 ## Supported operations
 
