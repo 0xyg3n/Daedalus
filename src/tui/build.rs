@@ -47,8 +47,5 @@ fn main() {
     if !status.success() {
         panic!("{tool} failed to embed the Daedalus icon");
     }
-    println!(
-        "cargo:rustc-link-arg-bin=daedalus-tui={}",
-        object.display()
-    );
+    println!("cargo:rustc-link-arg-bin=daedalus-tui={}", object.display());
 }

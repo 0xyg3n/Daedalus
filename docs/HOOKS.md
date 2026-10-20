@@ -70,6 +70,17 @@ registration. A bank is never guessed from a project name or pane title.
 - Missing configuration disables memory. A failed request is reported as failed;
   no memory is invented.
 
+## Codex profiles
+
+Codex loads hooks from the selected profile for every conversation using that
+profile. A Daedalus registration belongs to one exact conversation and terminal:
+events from other conversations receive an empty response and create no delivery
+record. When Codex resumes a conversation into a new rollout file, Daedalus uses
+the registered session and process identity; the older transcript path does not
+invalidate the hook. Existing profile commands can remain pinned to an older
+binary after an application update; review a profile update and then trust the
+changed commands in Codex `/hooks` before expecting them to run.
+
 ## Native Windows
 
 Existing verified Herdr processes support native registration contracts for

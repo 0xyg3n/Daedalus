@@ -1044,7 +1044,11 @@ pub fn execute(
     if event.kind == EventKind::PreToolUse {
         verifier.authorize_tool(&event, &payload)?;
     }
-    if let Some(hint) = &event.transcript_path
+    // Codex can move the same conversation to a new rollout file on resume.
+    // Its session ID and pinned process/terminal establish the hook identity;
+    // a rollout path is only a hint and was never required by the parser.
+    if registration.scope.harness != Harness::Codex
+        && let Some(hint) = &event.transcript_path
         && registration.transcript.as_deref() != Some(Path::new(hint))
     {
         return Err(Error::Invalid(
@@ -1223,7 +1227,7 @@ fn run_verified(
     verifier: &mut impl Verifier,
     clock: &mut impl Clock,
 ) -> Result<Outcome> {
-    let _active = active_guard(&registration.directory)?;
+    registration.validate()?;
     let started = std::time::Instant::now();
     let bytes = hooks::read_payload(reader).map_err(|_| Error::Input)?;
     let payload: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Input)?;
@@ -1239,6 +1243,31 @@ fn run_verified(
             "Hook event does not match its installed command",
         ));
     }
+    // Codex loads profile hooks for every conversation using that profile.
+    // An event for another session has no authority over this registration;
+    // acknowledge it without touching persistent state or reporting failure.
+    if registration.scope.harness == Harness::Codex
+        && matches!(
+            hooks::parse(
+                Harness::Codex,
+                &bytes,
+                &registration.scope.binding().map_err(|_| Error::Identity)?,
+            ),
+            Err(hooks::Error::IdentityMismatch)
+        )
+    {
+        writer
+            .write_all(b"{}\n")
+            .and_then(|_| writer.flush())
+            .map_err(|_| Error::Output)?;
+        return Ok(Outcome {
+            reply: Reply::Empty,
+            event_id: "unbound-codex-session".into(),
+            planned_effects: Vec::new(),
+            admitted: false,
+        });
+    }
+    let _active = active_guard(&registration.directory)?;
     let mut outcome = match execute(bytes.as_slice(), registration, event_id, verifier, clock) {
         Ok(outcome) => outcome,
         Err(Error::UnsupportedPolicy)
@@ -2262,6 +2291,45 @@ mod tests {
         .unwrap();
         assert!(!duplicate.admitted);
         assert_eq!(first.event_id, duplicate.event_id);
+    }
+    #[test]
+    fn codex_profile_hook_ignores_other_sessions_and_accepts_resumed_transcript() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Codex;
+        fixture.0.goal_id = None;
+        fixture.0.events = vec![EventKind::PostToolUse];
+        fixture.0.transcript = Some(crate::test_support::path("/tmp/old-rollout.jsonl").into());
+        let resumed = crate::test_support::path("/tmp/new-rollout.jsonl");
+        let mut output = Vec::new();
+        let other = serde_json::to_vec(&json!({"session_id":"other-session","hook_event_name":"PostToolUse","tool_use_id":"tool-other","transcript_path":resumed})).unwrap();
+        let ignored = run_verified(
+            other.as_slice(),
+            &mut output,
+            &fixture.0,
+            None,
+            Some(EventKind::PostToolUse),
+            &mut Verified,
+            &mut FakeClock(0),
+        )
+        .unwrap();
+        assert_eq!(output, b"{}\n");
+        assert!(!ignored.admitted);
+        assert!(!fixture.0.directory.join("delivery.sqlite3").exists());
+
+        output.clear();
+        let matching = serde_json::to_vec(&json!({"session_id":"session","hook_event_name":"PostToolUse","tool_use_id":"tool-matching","transcript_path":resumed})).unwrap();
+        let accepted = run_verified(
+            matching.as_slice(),
+            &mut output,
+            &fixture.0,
+            None,
+            Some(EventKind::PostToolUse),
+            &mut Verified,
+            &mut FakeClock(1),
+        )
+        .unwrap();
+        assert_eq!(output, b"{}\n");
+        assert!(accepted.admitted);
     }
     #[test]
     fn grok_idle_notifications_correlate_reservations_and_ignore_other_turns() {
