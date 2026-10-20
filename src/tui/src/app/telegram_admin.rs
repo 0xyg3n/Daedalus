@@ -1,5 +1,6 @@
 //! Reviewed local Telegram administration. Secrets never enter menu responses.
 use super::telegram_config::{self, ServiceConfig};
+use crate::adapters::telegram::Api;
 use crate::core::layouts;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -102,6 +103,7 @@ pub fn inspect(directory: &Path) -> Result<Value> {
 
 pub enum Request {
     Inspect,
+    Discover,
     Routes,
     RouteBindings {
         chat: i64,
@@ -187,6 +189,16 @@ impl Plan {
 }
 pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
     match request {
+        Request::Discover => {
+            if super::telegram_supervisor::inspect(directory)?.state != "stopped" {
+                return Err("Stop this bot's managed service before discovering chats".into());
+            }
+            let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+            let token = config.read_token()?;
+            let mut api = crate::adapters::telegram::BotApi::pairing(&token)
+                .map_err(|_| "Cannot initialize Telegram verification")?;
+            Ok(Reply::Data(discover_chats(&config, &mut api)?))
+        }
         Request::RouteBindings { chat, actor } => {
             let live = live_terminals(directory)?;
             Ok(Reply::Data(route_bindings(directory, chat, actor, &live)?))
@@ -333,6 +345,73 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
             Ok(Reply::Data(result))
         }
     }
+}
+
+/// Read-only pairing inventory. A local operator must still review and apply a
+/// grant; an incoming update never grants itself access or advances the cursor.
+fn discover_chats(config: &ServiceConfig, api: &mut impl Api) -> Result<Value> {
+    let bot = api
+        .get_me()
+        .map_err(|_| "Cannot verify Telegram bot identity")?;
+    if bot["id"].as_i64() != Some(config.bot_id) || bot["is_bot"] != true {
+        return Err("Telegram token belongs to another bot".into());
+    }
+    let username = bot["username"].as_str().unwrap_or("");
+    let updates = api
+        .updates(0, 0)
+        .map_err(|_| "Cannot discover Telegram chats; send a new /start to the bot and retry")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "Invalid local clock")?
+        .as_secs() as i64;
+    Ok(discovery_candidates(config.bot_id, username, updates, now))
+}
+
+fn discovery_candidates(bot_id: i64, username: &str, updates: Vec<Value>, now: i64) -> Value {
+    let mut found = std::collections::BTreeMap::<(i64, i64), Value>::new();
+    for update in updates {
+        let message = &update["message"];
+        let Some(chat) = message["chat"]["id"].as_i64() else {
+            continue;
+        };
+        let Some(actor) = message["from"]["id"].as_i64() else {
+            continue;
+        };
+        let kind = message["chat"]["type"].as_str().unwrap_or("");
+        if !message["date"]
+            .as_i64()
+            .is_some_and(|date| date >= now - 600 && date <= now + 30)
+        {
+            continue;
+        }
+        if actor <= 0 || message["from"]["is_bot"] != false || message.get("sender_chat").is_some()
+        {
+            continue;
+        }
+        if !((kind == "private" && chat == actor)
+            || (matches!(kind, "group" | "supergroup") && chat < 0))
+        {
+            continue;
+        }
+        let command = message["text"]
+            .as_str()
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let addressed = command == "/start" && kind == "private"
+            || !username.is_empty()
+                && (command.eq_ignore_ascii_case(&format!("/start@{username}"))
+                    || command.eq_ignore_ascii_case(&format!("/connect@{username}")));
+        if !addressed {
+            continue;
+        }
+        found.insert(
+            (chat, actor),
+            json!({"chat":chat,"actor":actor,"kind":kind}),
+        );
+    }
+    json!({"bot_id":bot_id,"bot_username":username,"chats":found.into_values().collect::<Vec<_>>(),"note":"Read-only candidates. Select one and review its sender grant locally; no route or delivery is created automatically."})
 }
 
 fn live_terminals(directory: &Path) -> Result<Vec<crate::core::routes::Terminal>> {
@@ -718,6 +797,29 @@ impl BindingPlan {
 mod tests {
     use super::*;
     use std::{collections::BTreeSet, fs};
+    #[test]
+    fn pairing_candidates_require_addressed_human_dm_or_group_message() {
+        let message = |id, chat, actor, kind, text| json!({"update_id":id,"message":{"chat":{"id":chat,"type":kind},"from":{"id":actor,"is_bot":false},"text":text,"date":1000}});
+        let result = discovery_candidates(
+            123,
+            "FixtureBot",
+            vec![
+                message(1, 42, 42, "private", "/start"),
+                message(2, -100, 42, "supergroup", "/start@FixtureBot"),
+                message(3, -101, 42, "group", "ordinary text"),
+                message(4, -102, 42, "group", "/start@OtherBot"),
+                message(5, 43, 42, "private", "/start"),
+                json!({"update_id":6,"message":{"chat":{"id":-103,"type":"group"},"from":{"id":44,"is_bot":true},"text":"/start@FixtureBot","date":1000}}),
+                json!({"update_id":7,"message":{"chat":{"id":-104,"type":"group"},"from":{"id":44,"is_bot":false},"text":"/start@FixtureBot","date":200}}),
+            ],
+            1000,
+        );
+        let rows = result["chats"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|v| v["chat"] == 42 && v["actor"] == 42));
+        assert!(rows.iter().any(|v| v["chat"] == -100 && v["actor"] == 42));
+        assert!(!result.to_string().contains("ordinary text"));
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {

@@ -522,7 +522,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     if args.first().is_some_and(|a| {
         matches!(
             a.as_str(),
-            "status" | "start" | "stop" | "bindings" | "bind"
+            "status" | "discover" | "start" | "stop" | "bindings" | "bind"
         )
     }) {
         return super::telegram_cli::run(args, out);
@@ -534,7 +534,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         return super::cutover::run(&args[1..], out);
     }
     if args.is_empty() || args == ["--help"] || args == ["help"] {
-        writeln!(out,"daedalus telegram status|start|stop --config-dir ABS [--apply --approve DIGEST]\ndaedalus telegram bindings|bind --config-dir ABS --registration ABS [options]\ndaedalus telegram serve --config-dir ABS\ndaedalus telegram config check|init|import --file ABS [options]\nUse telegram start --help for reviewed administration. serve is an explicit foreground service; setup never starts it.").map_err(|_|"Cannot write service help")?;
+        writeln!(out,"daedalus telegram status|discover|start|stop --config-dir ABS [--apply --approve DIGEST]\ndaedalus telegram bindings|bind --config-dir ABS --registration ABS [options]\ndaedalus telegram serve --config-dir ABS\ndaedalus telegram config check|init|import --file ABS [options]\nDiscover is read-only and requires the managed service stopped. serve is an explicit foreground service; setup never starts it.").map_err(|_|"Cannot write service help")?;
         return Ok(());
     }
     if args.len() != 3 || args[0] != "serve" || args[1] != "--config-dir" {

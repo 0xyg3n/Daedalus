@@ -560,8 +560,8 @@
       "key": "t",
       "page": 3,
       "group": "Telegram",
-      "title": "Bot & owner details",
-      "note": "Your Telegram user ID, the bot's numeric ID and its username.",
+      "title": "Bot & chat setup",
+      "note": "Choose a DM or group chat, authorize a user ID and review the connection.",
       "icon": "edit",
       "effects": [
         "settings"
@@ -592,6 +592,21 @@
         "telegram token",
         "api token"
       ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "telegram.discover",
+      "key": "d",
+      "page": 3,
+      "group": "Telegram",
+      "title": "Find DM or group chats",
+      "note": "Read recent /start messages, then review who may use each chat.",
+      "icon": "search",
+      "effects": ["read", "external", "settings", "confirm"],
+      "aliases": ["pair telegram", "discover telegram", "find chat"],
       "context": "",
       "context_note": "",
       "listed": true,
@@ -781,6 +796,21 @@
         "router",
         "provider gateway"
       ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "hooks.all",
+      "key": "hooks-all",
+      "page": 5,
+      "group": "Profiles",
+      "title": "Set up hooks for detected agents",
+      "note": "Review standard hooks for every detected live harness session, one at a time.",
+      "icon": "install",
+      "effects": ["hooks", "confirm"],
+      "aliases": ["all hooks", "default hooks", "agent hooks"],
       "context": "",
       "context_note": "",
       "listed": true,

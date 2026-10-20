@@ -174,7 +174,25 @@ Daedalus also finds OpenCode in `~/.opencode/bin`. Upstream installers are
 third-party code that Daedalus does not control.
 
 Next, open `daedalus` and start a shell or agent in a workspace ([control panel](TUI.md)).
-Telegram is configured separately ([commands](COMMANDS.md#telegram)).
+The setup menu also offers **Install standard hooks** after an agent is running.
+It discovers the live sessions and guides each verified native profile through
+its own review; leaving that step for later does not block terminal control.
+Telegram is configured separately ([commands](COMMANDS.md#telegram)). On a fresh
+setup, the guided path asks for a bot token in a masked input, derives its bot ID,
+and reviews the local connection before saving it privately. Send `/start` to the
+bot in a DM, or `/start@YourBot` in a group, then choose **Find a DM or group
+chat**. Daedalus lists recent candidate chats and senders for local review; it
+does not grant access or choose a terminal until you approve the exact chat and
+route. You can also enter a numeric bot ID, sender ID and chat ID manually.
+Run chat setup again to add a DM or group; existing grants are preserved. Group
+messages are accepted when they mention
+or reply to the bot. An authorized user can enable `/listen` for all group
+messages, but Telegram must also deliver them: disable the bot's group privacy
+mode in BotFather (and re-add it) or give the bot admin rights ([Telegram's
+privacy-mode guide](https://core.telegram.org/bots/features#privacy-mode)).
+Configuration review sends nothing to Telegram. Chat discovery reads recent bot
+updates without advancing the Telegram offset; keep other pollers stopped while
+pairing. An already-running managed service must be stopped before discovery.
 
 ## Configuration directory
 

@@ -96,6 +96,16 @@ and saves a rollback receipt. See [hooks](HOOKS.md) and [goals](GOALS.md).
 
 ## Telegram
 
+The TUI's **Telegram → Set up connection** offers automatic pairing. Enter the
+bot token in a masked field, review the derived bot ID, then send `/start` to the
+bot in a DM or `/start@YourBot` in a group. **Find a DM or group chat** lists
+recent senders for local approval. Granting a sender, starting the service,
+choosing a terminal and connecting reply hooks are separate reviewed steps.
+`daedalus telegram discover --config-dir ABS` prints the same read-only
+candidate list; it does not grant access or consume the update cursor. Keep the
+managed service stopped while discovering. Numeric IDs can still be entered
+manually in the TUI.
+
 `daedalus telegram config init` writes `telegram-service.json`: bot ID, token
 file, sender grants (Read, Send, Manage), feeder registrations and reply
 recipients. `daedalus telegram serve --config-dir ABS` runs the service in the

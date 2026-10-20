@@ -3,7 +3,7 @@ use super::{
     backend::Source,
     config::{ControlConfig, HARNESSES},
     dependencies::Selection,
-    session_menu::Outcome,
+    session_menu::{Outcome, View},
     wizard::Wizard,
 };
 use serde_json::{Value, json};
@@ -72,6 +72,7 @@ pub struct Menu {
     pending: Option<Pending>,
     harness: super::harness_menu::Menu,
     telegram: super::telegram_menu::Menu,
+    hooks: super::hook_menu::Menu,
 }
 pub fn available(id: &str) -> bool {
     matches!(id, "setup" | "tools.choose")
@@ -84,11 +85,15 @@ fn path(text: &str) -> Result<PathBuf> {
 }
 impl Menu {
     pub fn pending(&self) -> bool {
-        self.pending.is_some() || self.harness.pending() || self.telegram.pending()
+        self.pending.is_some()
+            || self.harness.pending()
+            || self.telegram.pending()
+            || self.hooks.pending()
     }
     pub fn cancel(&mut self) {
         self.telegram.cancel();
         self.harness.cancel();
+        self.hooks.cancel();
         self.pending = None;
     }
     fn frame(
@@ -263,6 +268,11 @@ impl Menu {
                         "Follow the guided settings, bot token, service and destination steps."
                     ],
                     [
+                        "hooks",
+                        "4. Install standard hooks (optional)",
+                        "Review each detected live agent's native hook profile separately."
+                    ],
+                    [
                         "done",
                         "Finish and explore terminals",
                         "Save local configuration; make this directory private (0700). No installs or sign-in."
@@ -284,6 +294,9 @@ impl Menu {
     ) -> Result<Outcome> {
         if self.telegram.pending() {
             return self.telegram.answer(source, config, request, seq);
+        }
+        if self.hooks.pending() {
+            return self.hooks.reply(request, source, config, seq);
         }
         if self.harness.pending() {
             return self.harness.reply(request, source, config, seq);
@@ -357,6 +370,17 @@ impl Menu {
                     })
                 },
                 "telegram" => self.telegram.start("telegram.details", source, config, seq),
+                "hooks" => {
+                    let observed = source.refresh(config)?;
+                    self.hooks.start_all(View {
+                        snapshot: observed.snapshot,
+                        health: observed.health,
+                        layouts: observed.layouts,
+                        selected: None,
+                        checkpoint: None,
+                        node: String::new(),
+                    },seq)
+                },
                 "tools.signin" => self.harness.start(text, seq),
                 "tools.choose" => self.start(text, config, seq),
                 _ => Err("This step is unsupported by the setup menu".into()),
@@ -706,6 +730,21 @@ mod tests {
             &config(),
             seq,
         )
+    }
+    #[test]
+    fn setup_offers_reviewed_hooks_only_when_agents_are_live() {
+        let (mut menu, mut source, mut seq) = (Menu::default(), Mock::new(), 0);
+        let start = menu.start("setup", &config(), &mut seq).unwrap();
+        assert!(
+            start.frames[0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row[0] == "hooks")
+        );
+        let error = reply(&mut menu, &mut source, &mut seq, json!("hooks")).unwrap_err();
+        assert!(error.contains("No supported live harness sessions"));
+        assert_eq!(source.applies, 0);
     }
     #[test]
     fn choose_tools_reviews_exact_plan_and_confirm_is_single_use() {

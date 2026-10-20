@@ -287,7 +287,7 @@ fn finish_setup_persists_local_configuration() {
     let mut ui = Ui::start(false);
     ui.wait_text("Set up Daedalus");
     // Select the advertised Finish and explore terminals action in the real UI.
-    for _ in 0..4 {
+    for _ in 0..5 {
         ui.master.write_all(b"\x1b[B").unwrap();
     }
     ui.master.write_all(b"\r").unwrap();

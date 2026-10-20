@@ -99,6 +99,19 @@ impl BotApi {
             .map_err(|_| Error::Invalid("Cannot initialize feedback transport"))?;
         Ok(api)
     }
+    /// Short, read-only onboarding probe; never holds the TUI for a long poll.
+    pub fn pairing(token: &str) -> Result<Self> {
+        let mut api = Self::new(token, "https://api.telegram.org")?;
+        api.client = Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(8))
+            .redirect(redirect::Policy::none())
+            .retry(retry::never())
+            .no_proxy()
+            .build()
+            .map_err(|_| Error::Invalid("Cannot initialize pairing transport"))?;
+        Ok(api)
+    }
     fn build(token: &str, origin: &str, local_test: bool) -> Result<Self> {
         let (id, secret) = token
             .split_once(':')

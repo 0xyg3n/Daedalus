@@ -39,7 +39,7 @@ Start a shell or coding agent directly in Daedalus, then keep working across ter
 - **Start and organize work.** Create native workspaces and terminals without installing a multiplexer. Existing tmux and Herdr sessions keep their backend-specific tabs and split controls.
 - **Keep sessions.** Save named checkpoints or context-only excerpts from a terminal, resume or fork a conversation where the tool supports it, duplicate a view, hand context to another tool, and save layouts and workflows.
 - **Drive agents from Telegram.** An authorized chat is bound to one exact agent. Text, photos and files go in; replies and progress come back.
-- **Hooks and goals.** Reviewed per-tool hook profiles report lifecycle, replies and progress. Goals continue a directive where the tool has a native way to do so.
+- **Hooks and goals.** Review standard hooks for one agent or walk through all detected live agent sessions, one profile at a time. Hooks report lifecycle, replies and progress. Goals continue a directive where the tool has a native way to do so.
 - **Optional extras.** Armonia keeps stable agent numbers and aliases; Hindsight adds scoped memory. Neither is needed for routing.
 
 **Ctrl+K** opens a searchable terminal

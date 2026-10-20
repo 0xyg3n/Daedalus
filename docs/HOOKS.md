@@ -26,8 +26,15 @@ Installing a hook profile never grants a Telegram recipient or starts a service.
 
 ## Install and remove
 
-The Hooks page (or `daedalus hook profile-preview` / `profile-apply`) installs a
-profile for any of the seven tools. It merges into the tool's existing hook file,
+The Hooks page offers **Install standard hooks** (lifecycle, Telegram final
+replies and progress) or **Choose features** for a selected live agent. **Set up
+hooks for detected agents** walks through every recognized live harness session
+one at a time; each profile and transcript is supplied and reviewed separately.
+It excludes shell-only terminals. An unsupported provider/version/platform or a
+stale process fails closed at review, without modifying its native profile. A
+Telegram recipient still needs a separate chat binding. The Hooks page (or
+`daedalus hook profile-preview` / `profile-apply`) installs a profile for any of
+the seven tools. It merges into the tool's existing hook file,
 shows the change first and saves a private backup and receipt. Each tool keeps its
 own trust and consent prompts. Run `daedalus hook --help` for every option.
 

@@ -277,6 +277,7 @@ pub fn available(id: &str) -> bool {
                 | "help.reference"
                 | "hooks.profile"
                 | "hooks.adapter"
+                | "hooks.all"
                 | "activity.events"
                 | "activity.discovery"
                 | "activity.health"
@@ -457,6 +458,9 @@ impl SessionMenu {
         }
         if action == "hooks.adapter" {
             return self.hooks.start(view, seq);
+        }
+        if action == "hooks.all" {
+            return self.hooks.start_all(view, seq);
         }
         if action == "workflow.new" || action.starts_with("workflow:") {
             return self.workflows.start(action, view, seq);
@@ -2534,7 +2538,7 @@ mod tests {
     #[test]
     fn every_registered_static_action_has_a_native_dispatch_path() {
         let registry = registry::builtin();
-        assert_eq!(registry.actions.len(), 42);
+        assert_eq!(registry.actions.len(), 44);
         for action in &registry.actions {
             assert!(
                 action.id == "instances.saved" || available(&action.id),

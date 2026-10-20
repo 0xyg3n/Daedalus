@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
-pub const HELP: &str = "daedalus telegram status --config-dir ABS\ndaedalus telegram start|stop --config-dir ABS [--apply --approve DIGEST]\ndaedalus telegram bindings --config-dir ABS --registration ABS\ndaedalus telegram bind --config-dir ABS --registration ABS --chat ID --actor ID [--apply --approve DIGEST]\nChanges preview by default. Apply requires the unchanged review digest and revalidates configuration, service or binding identity. Start/stop request a transition; use status to observe it. Tokens are never command-line arguments.\n";
+pub const HELP: &str = "daedalus telegram status|discover --config-dir ABS\ndaedalus telegram start|stop --config-dir ABS [--apply --approve DIGEST]\ndaedalus telegram bindings --config-dir ABS --registration ABS\ndaedalus telegram bind --config-dir ABS --registration ABS --chat ID --actor ID [--apply --approve DIGEST]\nDiscover reads recent /start candidates while this bot's managed service is stopped; it never grants access. Changes preview by default. Apply requires the unchanged review digest and revalidates configuration, service or binding identity. Start/stop request a transition; use status to observe it. Tokens are never command-line arguments.\n";
 #[derive(Debug)]
 pub struct Command {
     directory: PathBuf,
@@ -22,7 +22,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
         return Ok(None);
     }
     let verb = args[0].as_str();
-    if !["status", "start", "stop", "bindings", "bind"].contains(&verb) {
+    if !["status", "discover", "start", "stop", "bindings", "bind"].contains(&verb) {
         return Err("Unknown Telegram administration command".into());
     }
     let mut flags = BTreeMap::new();
@@ -109,6 +109,7 @@ pub fn run_with(
 ) -> Result<()> {
     let request = match command.verb.as_str() {
         "status" => Request::Inspect,
+        "discover" => Request::Discover,
         "start" | "stop" => Request::Service {
             start: command.verb == "start",
         },

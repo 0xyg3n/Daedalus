@@ -8,6 +8,7 @@ use super::{
     tree,
 };
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 type Result<T> = std::result::Result<T, String>;
 #[derive(Clone)]
@@ -32,8 +33,10 @@ enum Stage {
     RemovalApply(Box<super::hook_uninstall::Plan>),
     RemovalResult(PathBuf),
     Pane(Vec<Value>),
+    BatchStart(Vec<Value>),
     Profile(Value),
     Transcript(Spec),
+    Preset(Spec),
     Options(Spec),
     Goal(Spec),
     Review(Box<Preview>),
@@ -60,6 +63,7 @@ struct Pending {
 #[derive(Default)]
 pub struct Menu {
     pending: Option<Pending>,
+    batch: VecDeque<Value>,
 }
 impl Menu {
     pub fn pending(&self) -> bool {
@@ -67,6 +71,7 @@ impl Menu {
     }
     pub fn cancel(&mut self) {
         self.pending = None;
+        self.batch.clear();
     }
     fn frame(
         &mut self,
@@ -103,6 +108,7 @@ impl Menu {
         if self.pending() {
             return Err("Finish the current hook dialog first".into());
         }
+        self.batch.clear();
         if let Some(pane) = view.selected {
             return self.profile(pane, seq);
         }
@@ -131,6 +137,60 @@ impl Menu {
             json!({"options":options}),
             Stage::Pane(panes),
         )
+    }
+    pub fn start_all(&mut self, view: View, seq: &mut u64) -> Result<Outcome> {
+        if self.pending() {
+            return Err("Finish the current hook dialog first".into());
+        }
+        self.batch.clear();
+        let mut seen = std::collections::HashSet::new();
+        let panes = view.snapshot["panes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|pane| {
+                matches!(
+                    pane["agent"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "claude" | "codex" | "grok" | "cursor" | "hermes" | "pi" | "opencode"
+                )
+            })
+            .filter(|pane| {
+                seen.insert((
+                    pane["backend"].as_str().unwrap_or("").to_owned(),
+                    pane["server"].as_str().unwrap_or("").to_owned(),
+                    pane["pane_id"].as_str().unwrap_or("").to_owned(),
+                    pane["terminal_id"].as_str().unwrap_or("").to_owned(),
+                ))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if panes.is_empty() {
+            return Err("No supported live harness sessions were detected. Start an agent and refresh discovery.".into());
+        }
+        let labels = panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| format!("{}. {}", index + 1, tree::title(pane, "")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.frame(seq,"choose","Install hooks for detected sessions",
+            json!({"description":format!("Each session requires its own verified profile, transcript and installation review. Unsupported platform/provider combinations are rejected without modifying files.\n\n{labels}"),
+                "options":[["start","Review sessions one by one","No hook is installed automatically"],["cancel","Cancel","Leave every profile unchanged"]]}),
+            Stage::BatchStart(panes))
+    }
+    fn next_batch(&mut self, seq: &mut u64) -> Result<Outcome> {
+        match self.batch.pop_front() {
+            Some(pane) => self.profile(pane, seq),
+            None => Ok(Outcome {
+                message: "All selected hook sessions were reviewed".into(),
+                refresh: true,
+                ..Default::default()
+            }),
+        }
     }
     fn profile(&mut self, pane: Value, seq: &mut u64) -> Result<Outcome> {
         self.frame(
@@ -198,16 +258,32 @@ impl Menu {
         )
     }
     fn installed(&mut self, receipt: Receipt, seq: &mut u64, message: &str) -> Result<Outcome> {
+        let mut options = vec![
+            json!(["done", "Done", "Keep the installed profile"]),
+            json!([
+                "telegram",
+                "Connect Telegram",
+                "Select an explicit authorized recipient"
+            ]),
+            json!([
+                "memory",
+                "Configure Hindsight",
+                "Set the endpoint and registration bank"
+            ]),
+        ];
+        if !self.batch.is_empty() {
+            options.push(json!([
+                "next",
+                "Next detected agent",
+                "Review the next native profile"
+            ]));
+        }
         let mut outcome = self.frame(
             seq,
             "choose",
             "Hook profile installed",
             json!({
-                "options": [
-                    ["done", "Done", "Keep the installed profile"],
-                    ["telegram", "Connect Telegram", "Select an explicit authorized recipient"],
-                    ["memory", "Configure Hindsight", "Set the endpoint and registration bank"]
-                ],
+                "options": options,
                 "description": message
             }),
             Stage::Result(receipt),
@@ -514,6 +590,11 @@ impl Menu {
         }
         let text = value.as_str().unwrap();
         match pending.stage {
+            Stage::BatchStart(panes) => {
+                if text == "cancel" { return Ok(Outcome::default()); }
+                self.batch = panes.into();
+                self.next_batch(seq)
+            }
             Stage::HerdrReview(plan) => self.frame(seq, "choose", "Confirm Herdr integration installation",
                 json!({"options":[["cancel","Cancel","Keep the profile unchanged"],["yes","Install or update","Back up reviewed files, run Herdr and verify its status"]]}), Stage::HerdrApply(plan)),
             Stage::HerdrApply(plan) => {
@@ -576,7 +657,20 @@ impl Menu {
             Stage::Transcript(mut spec) => {
                 spec.transcript = text.into();
                 crate::core::layouts::check_path(&spec.transcript)?;
-                self.options(spec, seq)
+                self.frame(seq, "choose", "Choose hook setup", json!({
+                    "description": "The standard set tracks lifecycle and enables Telegram final replies and progress. Delivery still needs an authorized chat binding.",
+                    "options": [
+                        ["defaults", "Install standard hooks", "Review the recommended settings"],
+                        ["custom", "Choose features", "Adjust Telegram, notifications, memory and goal binding"]
+                    ]
+                }), Stage::Preset(spec))
+            }
+            Stage::Preset(spec) => {
+                if text == "custom" {
+                    self.options(spec, seq)
+                } else {
+                    self.review_hooks(source, config, spec, seq)
+                }
             }
             Stage::Options(mut spec) => {
                 match text {
@@ -614,20 +708,21 @@ impl Menu {
             ),
             Stage::Apply(plan) => {
                 if text == "cancel" {
+                    self.batch.clear();
                     return Ok(Outcome::default());
                 }
                 let receipt = source.apply_hooks(*plan)?;
+                let mut options = vec![json!(["done", "Done", "Keep the installed profile"]),
+                    json!(["telegram", "Connect Telegram", "Choose an explicitly authorized recipient and review its route"]),
+                    json!(["memory", "Configure Hindsight", "Set an explicit endpoint and memory bank for this registration"]),
+                    json!(["rollback", "Restore previous profile", "Restore only if installed bytes still match; preserve later edits"])];
+                if !self.batch.is_empty() { options.push(json!(["next","Next detected agent","Review the next native profile"])); }
                 self.frame(
                     seq,
                     "choose",
                     "Hook profile installed",
                     json!({
-                        "options": [
-                            ["done", "Done", "Keep the installed profile"],
-                            ["telegram", "Connect Telegram", "Choose an explicitly authorized recipient and review its route"],
-                            ["memory", "Configure Hindsight", "Set an explicit endpoint and memory bank for this registration"],
-                            ["rollback", "Restore previous profile", "Restore only if installed bytes still match; preserve later edits"]
-                        ],
+                        "options": options,
                         "description": format!("Profile: {}. Native tool trust/restart requirements still apply.", receipt.profile.display())
                     }),
                     Stage::Result(receipt),
@@ -636,7 +731,9 @@ impl Menu {
             Stage::Result(receipt) => match text {
                 "memory" => self.start_memory(source, receipt, seq),
                 "telegram" => self.start_recipients(source, receipt, seq),
+                "next" => self.next_batch(seq),
                 _ => {
+                    self.batch.clear();
                     let message = if text == "rollback" {
                         source.rollback_hooks(receipt)?;
                         "Previous hook profile restored"
@@ -716,7 +813,7 @@ impl Menu {
                 }
                 let approval = plan.approval();
                 source.telegram(super::telegram_admin::Request::Apply { plan, approval })?;
-                self.installed(receipt, seq, "Hook recipient saved. Restart the Telegram service to load the updated settings.")
+                self.installed(receipt, seq, "Hook recipient saved. A running Telegram service reloads the binding; check its status and the selected chat route before sending a message.")
             }
         }
     }
@@ -954,6 +1051,64 @@ mod tests {
             node: String::new(),
         }
     }
+    #[test]
+    fn fleet_setup_lists_only_agent_sessions_and_does_not_install_before_review() {
+        let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+        let mut fleet = view();
+        fleet.selected = None;
+        fleet.snapshot = json!({"panes":[
+            {"backend":"herdr","pane_id":"shell","terminal_id":"shell","agent":"bash"},
+            {"backend":"herdr","pane_id":"pane","terminal_id":"terminal","agent":"claude"}
+        ]});
+        let start = menu.start_all(fleet, &mut seq).unwrap();
+        assert_eq!(
+            start.frames[0]["title"],
+            "Install hooks for detected sessions"
+        );
+        assert!(
+            !start.frames[0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("shell")
+        );
+        assert_eq!(mock.applies, 0);
+        let profile = reply(&mut menu, &mut mock, &mut seq, json!("start")).unwrap();
+        assert_eq!(
+            profile.frames[0]["title"],
+            "Native hook profile file (absolute path)"
+        );
+        menu.cancel();
+        assert!(!menu.pending());
+        assert!(menu.batch.is_empty());
+    }
+    #[test]
+    fn fleet_setup_requires_separate_review_for_each_session() {
+        let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+        let mut fleet = view();
+        fleet.selected = None;
+        let pane =
+            json!({"backend":"herdr","pane_id":"pane","terminal_id":"terminal","agent":"claude"});
+        let mut other = pane.clone();
+        other["pane_id"] = json!("other");
+        fleet.snapshot = json!({"panes":[pane,other]});
+        menu.start_all(fleet, &mut seq).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("start")).unwrap();
+        let profile = mock.dir.join("hooks.json");
+        let transcript = mock.dir.join("transcript.jsonl");
+        reply(&mut menu, &mut mock, &mut seq, json!(profile)).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!(transcript)).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("defaults")).unwrap();
+        assert_eq!(mock.applies, 0);
+        reply(&mut menu, &mut mock, &mut seq, json!("close")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("yes")).unwrap();
+        assert_eq!(mock.applies, 1);
+        let next = reply(&mut menu, &mut mock, &mut seq, json!("next")).unwrap();
+        assert_eq!(
+            next.frames[0]["title"],
+            "Native hook profile file (absolute path)"
+        );
+        assert_eq!(mock.applies, 1);
+    }
     fn reply(menu: &mut Menu, mock: &mut Mock, seq: &mut u64, value: Value) -> Result<Outcome> {
         menu.reply(
             &json!({"op":"reply","id":*seq,"value":value}),
@@ -965,9 +1120,10 @@ mod tests {
     fn reviewed(menu: &mut Menu, mock: &mut Mock, seq: &mut u64) {
         menu.start(view(), seq).unwrap();
         reply(menu, mock, seq, json!(mock.dir.join("hooks.json"))).unwrap();
-        reply(menu, mock, seq, json!(mock.dir.join("transcript.jsonl"))).unwrap();
+        let preset = reply(menu, mock, seq, json!(mock.dir.join("transcript.jsonl"))).unwrap();
+        assert_eq!(preset.frames[0]["title"], "Choose hook setup");
         // Delivery and progress are preconfigured; no recipient is inferred.
-        let review = reply(menu, mock, seq, json!("review")).unwrap();
+        let review = reply(menu, mock, seq, json!("defaults")).unwrap();
         assert_eq!(review.frames[0]["mode"], "output");
         assert!(!mock.dir.join("hooks.json").exists());
         reply(menu, mock, seq, json!("close")).unwrap();
