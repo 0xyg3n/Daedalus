@@ -4,6 +4,18 @@
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+/// Pipe-based helpers must not allocate a Windows console or take desktop focus.
+/// Interactive terminals and the installer keep their own launch policy.
+pub fn hide_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    let _ = command;
+}
 #[cfg(unix)]
 pub fn sync_directory(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()

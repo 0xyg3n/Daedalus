@@ -377,10 +377,10 @@ pub fn install(registration: &Registration) -> Result<PathBuf> {
         .map_err(|_| Error::PrivateState)?;
     Ok(path)
 }
-/// Explicit installer review may replace a stopped OpenCode UI incarnation.
+/// Explicit installer review may replace a stopped OpenCode or Hermes process.
 /// Preserve scope/policy and uncertain reservations; fence old readiness before
 /// publishing the new process binding, so a crash cannot reuse a stale Idle.
-pub(crate) fn rebind_opencode(
+pub(crate) fn rebind_reviewed_process(
     expected: &Registration,
     next: &Registration,
     terminals: &Terminals,
@@ -390,7 +390,7 @@ pub(crate) fn rebind_opencode(
     let mut policy = expected.clone();
     policy.harness_process = next.harness_process.clone();
     policy.server_emitter = next.server_emitter.clone();
-    if next.scope.harness != Harness::Opencode
+    if !matches!(next.scope.harness, Harness::Opencode | Harness::Hermes)
         || serde_json::to_value(&policy).map_err(|_| Error::Input)?
             != serde_json::to_value(next).map_err(|_| Error::Input)?
         || serde_json::to_value(inspect(&next.path())?).map_err(|_| Error::Input)?
@@ -398,7 +398,7 @@ pub(crate) fn rebind_opencode(
         || verify_live_session(expected, terminals).is_ok()
     {
         return Err(Error::Invalid(
-            "Hook binding changed; review the restarted OpenCode session again",
+            "Hook binding changed; review the restarted native session again",
         ));
     }
     verify_live_session(next, terminals)?;
@@ -4187,6 +4187,12 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
                 }
             }
             verify_process(process, &terminals.proc_root)?;
+            if registration.scope.harness == Harness::Hermes
+                && !super::hermes_sessions::matches_registration(registration)
+                    .map_err(|_| Error::Identity)?
+            {
+                return Err(Error::Identity);
+            }
         }
     }
     Ok(actual)

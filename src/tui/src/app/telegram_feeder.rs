@@ -25,12 +25,15 @@ pub fn encode_prompt(frame: &Frame) -> Result<(String, String)> {
     let text = format!("/usr/bin/false -- '{}'", data.replace('\'', "'\"'\"'"));
     Ok((text, correlation))
 }
-/// OpenCode terminal input can append one editor padding space. Recognize that
+/// OpenCode/Hermes input can append one editor padding space. Recognize that
 /// boundary only around a byte-exact, regenerated Daedalus transport envelope;
 /// user text, arbitrary prompts and other providers retain exact hashing.
 pub(super) fn prompt_sha256(harness: super::hooks::Harness, prompt: &str) -> String {
     let canonical = || -> Option<&str> {
-        if harness != super::hooks::Harness::Opencode {
+        if !matches!(
+            harness,
+            super::hooks::Harness::Opencode | super::hooks::Harness::Hermes
+        ) {
             return None;
         }
         let unpadded = prompt.strip_suffix(' ')?;
@@ -201,6 +204,7 @@ mod prompt_tests {
         let (text, correlation) = encode_prompt(&frame).unwrap();
         let exact = prompt_sha256(Harness::Opencode, &text);
         assert_eq!(prompt_sha256(Harness::Opencode, &format!("{text} ")), exact);
+        assert_eq!(prompt_sha256(Harness::Hermes, &format!("{text} ")), exact);
         for changed in [
             format!("{text}  "),
             format!("{text}\t"),
@@ -521,6 +525,37 @@ mod tests {
         native(&f, "Stop", "old-other-turn", None);
         assert_eq!(f.feeder.submit(&f.frame).unwrap(), Submission::Busy);
         native(&f, "Stop", "telegram-turn", None);
+        f.frame.update_id += 1;
+        assert!(matches!(
+            f.feeder.submit(&f.frame).unwrap(),
+            Submission::Accepted(_)
+        ));
+    }
+    #[test]
+    fn hermes_feeder_repeats_after_padded_native_prompt_completion() {
+        let mut f = Fixture::new_for(Harness::Hermes);
+        let native = |f: &Fixture, event: &str, turn: &str, prompt: &str| {
+            let payload = json!({"session_id":"session","hook_event_name":event,
+                "extra":{"turn_id":turn,"user_message":prompt,"assistant_response":"done"}});
+            hook_runtime::execute(
+                serde_json::to_vec(&payload).unwrap().as_slice(),
+                &f.registration,
+                None,
+                &mut Verified,
+                &mut Time,
+            )
+            .unwrap();
+        };
+        native(&f, "pre_llm_call", "initial", "initial input");
+        native(&f, "post_llm_call", "initial", "initial input");
+        assert!(matches!(
+            f.feeder.submit(&f.frame).unwrap(),
+            Submission::Accepted(_)
+        ));
+        let sent = fs::read_to_string(f.directory.join("sent")).unwrap();
+        let padded = format!("{} ", sent.trim_end());
+        native(&f, "pre_llm_call", "telegram-turn", &padded);
+        native(&f, "post_llm_call", "telegram-turn", &padded);
         f.frame.update_id += 1;
         assert!(matches!(
             f.feeder.submit(&f.frame).unwrap(),

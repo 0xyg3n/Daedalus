@@ -598,6 +598,20 @@ impl SessionStore {
             .as_ref()
             .map(|s| s.id.clone())
             .unwrap_or(reported);
+        #[cfg(windows)]
+        let discovered_hermes = if harness == "hermes" && reported.is_empty() {
+            let process = windows_native_process(adapter, &actual, &harness)?;
+            let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
+            let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
+            super::hermes_sessions::live(&root, &process)?
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let reported = discovered_hermes
+            .as_ref()
+            .map(|session| session.0.clone())
+            .unwrap_or(reported);
         let reported = if let Some(process) = &evidence {
             checkpoints::resolve_sid(&process.argv, &harness, &reported)?.unwrap_or_default()
         } else {
@@ -637,6 +651,11 @@ impl SessionStore {
         } else {
             String::new()
         };
+        #[cfg(windows)]
+        let profile = discovered_hermes
+            .as_ref()
+            .map(|session| session.1.to_string_lossy().into_owned())
+            .unwrap_or(profile);
         let row = Checkpoint {
             name: format!("Live {harness} in {}", field(&actual, "pane_id")),
             harness: harness.clone(),
@@ -664,6 +683,15 @@ impl SessionStore {
         check_process(adapter, &evidence, &harness)?;
         if let Some(session) = &discovered_pi {
             session.verify()?;
+        }
+        #[cfg(windows)]
+        if let Some(session) = &discovered_hermes {
+            let process = windows_native_process(adapter, &again, &harness)?;
+            let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
+            let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
+            if super::hermes_sessions::live(&root, &process)?.as_ref() != Some(session) {
+                return Err("Hermes conversation changed during discovery; refresh".into());
+            }
         }
         // A live source without an ID can still be offered for context handoff.
         if !row.sid.is_empty() {

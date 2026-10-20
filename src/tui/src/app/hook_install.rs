@@ -386,6 +386,19 @@ fn hash(bytes: &[u8]) -> String {
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
+fn hermes_quote(value: &str) -> Result<String> {
+    #[cfg(windows)]
+    {
+        // Hermes uses shlex(posix=False) and removes matching outer quotes on
+        // Windows. POSIX apostrophe escaping does not describe that grammar.
+        if value.contains('"') || value.chars().any(char::is_control) {
+            return Err("Invalid Windows Hermes hook argument".into());
+        }
+        Ok(format!("\"{value}\""))
+    }
+    #[cfg(unix)]
+    Ok(quote(value))
+}
 /// Claude's documented command+args form invokes the native executable directly.
 /// Keep registration paths as argv even when they contain shell metacharacters.
 fn direct_hook_command(handler: &mut Value, binary: &str, registration: &str, event: &str) {
@@ -857,17 +870,17 @@ fn merge_hermes(
             _ => return Err("Unsupported Hermes shell event".into()),
         };
         let canonical = serde_json::to_value(event).map_err(|_| "Cannot encode event")?;
-        // Hermes shlex.split + shell=False: quote argv without a shell comment.
+        // Use the native Hermes argv grammar; hooks never run through a shell.
         let command = format!(
             "{} hook run --registration {} --event-kind {}",
-            quote(binary.to_str().ok_or("Binary path is not UTF-8")?),
-            quote(
+            hermes_quote(binary.to_str().ok_or("Binary path is not UTF-8")?)?,
+            hermes_quote(
                 registration
                     .path()
                     .to_str()
                     .ok_or("Registration path is not UTF-8")?
-            ),
-            quote(canonical.as_str().ok_or("Invalid event")?)
+            )?,
+            hermes_quote(canonical.as_str().ok_or("Invalid event")?)?
         );
         let handler = yaml_serde::to_value(
             json!({"command":command,"timeout":15,"daedalus_managed":registration.id}),
@@ -1168,7 +1181,7 @@ fn install_reviewed_registration(plan: &Preview, terminals: &Terminals) -> Resul
         && serde_json::to_value(previous).map_err(|_| "Invalid saved binding")?
             != serde_json::to_value(&plan.registration).map_err(|_| "Invalid new binding")?
     {
-        return hook_runtime::rebind_opencode(previous, &plan.registration, terminals)
+        return hook_runtime::rebind_reviewed_process(previous, &plan.registration, terminals)
             .map_err(|e| e.to_string());
     }
     hook_runtime::install(&plan.registration).map_err(|e| e.to_string())
@@ -1306,9 +1319,10 @@ mod tests {
         let mut changed_policy = next.clone();
         changed_policy.scope.conversation = "another-session".into();
         assert!(
-            hook_runtime::rebind_opencode(&registration, &changed_policy, &f.terminals).is_err()
+            hook_runtime::rebind_reviewed_process(&registration, &changed_policy, &f.terminals)
+                .is_err()
         );
-        hook_runtime::rebind_opencode(&registration, &next, &f.terminals).unwrap();
+        hook_runtime::rebind_reviewed_process(&registration, &next, &f.terminals).unwrap();
         assert_eq!(
             hook_runtime::ready_snapshot(&path, proc).unwrap().state,
             hook_runtime::Readiness::Unknown
@@ -1322,7 +1336,7 @@ mod tests {
             .unwrap(),
             "uncertain-old-input"
         );
-        assert!(hook_runtime::rebind_opencode(&registration, &next, &f.terminals).is_err());
+        assert!(hook_runtime::rebind_reviewed_process(&registration, &next, &f.terminals).is_err());
         // A recycled server PID cannot be recovered from a saved binding.
         let stat = fs::read_to_string(proc.join("43/stat")).unwrap();
         fs::write(proc.join("43/stat"), stat.replace("600", "601")).unwrap();
@@ -2365,6 +2379,57 @@ esac
         let receipt = apply(&p, &f.terminals).unwrap();
         rollback(&receipt).unwrap();
         assert_eq!(fs::read(&f.request.profile).unwrap(), original);
+    }
+    #[test]
+    fn hermes_process_rebind_fences_readiness_and_preserves_uncertain_input() {
+        let mut f = Fixture::new();
+        f.request.harness = Harness::Hermes;
+        f.request.profile = f.dir.join("config.yaml");
+        f.request.transcript = None;
+        let first = preview(&f.request, &f.terminals).unwrap();
+        let receipt = apply(&first, &f.terminals).unwrap();
+        hook_runtime::ready_snapshot(&receipt.registration, &f.terminals.proc_root).unwrap();
+        let connection =
+            rusqlite::Connection::open(f.dir.join("hook-observations.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO hook_reservations(scope,correlation) VALUES(?,?)",
+                rusqlite::params![
+                    serde_json::to_string(&first.registration.scope).unwrap(),
+                    "unconfirmed-input"
+                ],
+            )
+            .unwrap();
+        let stat = f.terminals.proc_root.join("42/stat");
+        fs::write(
+            &stat,
+            fs::read_to_string(&stat).unwrap().replace("500", "600"),
+        )
+        .unwrap();
+        f.request.process.start_ticks = 600;
+        let next = preview(&f.request, &f.terminals).unwrap();
+        apply(&next, &f.terminals).unwrap();
+        assert_eq!(
+            hook_runtime::inspect(&receipt.registration)
+                .unwrap()
+                .harness_process
+                .unwrap()
+                .start_ticks,
+            600
+        );
+        assert_eq!(
+            hook_runtime::ready_snapshot(&receipt.registration, &f.terminals.proc_root)
+                .unwrap()
+                .state,
+            hook_runtime::Readiness::Unknown
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM hook_reservations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
     #[test]
     fn cursor_native_profile_preserves_unmanaged_handlers_and_native_loop_cap() {

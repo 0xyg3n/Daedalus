@@ -16,6 +16,8 @@ pub mod grok_state;
 pub mod harness_control;
 pub mod harness_menu;
 pub mod herdr_hooks;
+#[cfg(any(windows, test))]
+pub mod hermes_sessions;
 pub mod hook_bridges;
 pub mod hook_cli;
 pub mod hook_dispatch;

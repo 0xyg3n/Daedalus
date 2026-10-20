@@ -1046,6 +1046,34 @@ pub fn user_local_data_directory() -> io::Result<PathBuf> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "Native child fixture for hidden-console tests"]
+    fn hidden_console_child_fixture() {
+        use std::io::Read;
+        assert!(unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null());
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input).unwrap();
+        if !input.is_empty() {
+            let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+            assert!(value["hook_event_name"].is_string());
+        }
+    }
+    #[test]
+    fn piped_background_command_has_no_console_and_keeps_output() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "platform::windows::tests::hidden_console_child_fixture",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::null());
+        crate::platform::hide_console(&mut command);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+    #[test]
     fn background_process_does_not_keep_inheritable_files_open() {
         use std::os::windows::fs::OpenOptionsExt;
         let root = fixture();

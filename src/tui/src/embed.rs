@@ -252,7 +252,9 @@ fn launch(argv: &[String]) -> io::Result<Client> {
     let Some((program, args)) = argv.split_first() else {
         return Err(io::Error::other("Empty stream command"));
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    daedalus_tui::platform::hide_console(&mut command);
+    let mut child = command
         .args(args)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")

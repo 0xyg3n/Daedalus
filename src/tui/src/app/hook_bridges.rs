@@ -23,7 +23,7 @@ export default Plugin.define({id:config.id,async setup(ctx) {
       hook_event_name:kind,event_id:`${boot}-${++sequence}`,...fields});
     if(Buffer.byteLength(payload)>1048576)throw new Error('Daedalus hook payload exceeds limit');
     const result=spawnSync(config.binary,['hook','run','--registration',config.registration,'--event-kind',kind],
-      {input:payload,encoding:'utf8',timeout:15000,maxBuffer:1048576,stdio:['pipe','pipe','pipe']});
+      {input:payload,encoding:'utf8',timeout:15000,maxBuffer:1048576,windowsHide:true,stdio:['pipe','pipe','pipe']});
     if(result.error||result.status!==0)throw new Error('Daedalus hook rejected event');
     return result.stdout.trim()?JSON.parse(result.stdout):{};
   }
@@ -90,7 +90,7 @@ export default function (pi) {
       transcript_path:config.transcript===null?null:(ctx.sessionManager.getSessionFile() ?? null),...fields});
     if (Buffer.byteLength(payload) > 1048576) throw new Error('Daedalus hook payload exceeds limit');
     const result = spawnSync(config.binary,['hook','run','--registration',config.registration,'--event-kind',kind],
-      {input:payload,encoding:'utf8',timeout:15000,maxBuffer:1048576,stdio:['pipe','pipe','pipe']});
+      {input:payload,encoding:'utf8',timeout:15000,maxBuffer:1048576,windowsHide:true,stdio:['pipe','pipe','pipe']});
     if (result.error || result.status !== 0) throw new Error('Daedalus hook rejected event');
     return result.stdout.trim() ? JSON.parse(result.stdout) : {};
   }
@@ -118,4 +118,96 @@ export default function (pi) {
 }
 "#);
     Ok(text.into_bytes())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::app::hooks::Harness;
+
+    #[test]
+    fn native_bridges_hide_console_and_preserve_hook_failures() {
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-hidden-hooks-{}-{:x}",
+            std::process::id(),
+            u128::from_le_bytes(nonce)
+        ));
+        crate::platform::ensure_private_dir(&root).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut registration: Registration = serde_json::from_value(serde_json::json!({
+            "version":1,"id":"fixture","directory":root,
+            "scope":{"instance":"fixture","harness":"opencode","conversation":"session",
+                "terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"}},
+            "goal_id":null,"harness_process":null,"transcript":null,"events":["SessionStart","UserPromptSubmit","Stop"],
+            "options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},
+            "activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000
+        })).unwrap();
+        for harness in [Harness::Opencode, Harness::Pi] {
+            registration.scope.harness = harness;
+            let source = if harness == Harness::Opencode {
+                opencode(&registration, &executable)
+            } else {
+                pi(&registration, &executable)
+            }
+            .unwrap();
+            let bridge = root.join("bridge.mjs");
+            // Keep the real generated spawn options. Replace only the external
+            // provider and receiver with an actual native console-probing child.
+            let receiver = r#"import {spawnSync as nativeSpawnSync} from 'node:child_process';
+let calls=0;export function count(){return calls;}
+const spawnSync=(binary,args,options)=>{
+  calls++;
+  if(globalThis.rejectHook)return {status:17,stdout:'',stderr:'fixture failure'};
+  const result=nativeSpawnSync(binary,['--ignored','--exact','platform::windows::tests::hidden_console_child_fixture','--nocapture'],options);
+  return {...result,stdout:result.status===0?'{}':result.stdout};
+};"#;
+            let source = String::from_utf8(source)
+                .unwrap()
+                .replace(
+                    "import { Plugin } from '@opencode/plugin';",
+                    "const Plugin={define:value=>value};",
+                )
+                .replace("import { spawnSync } from 'node:child_process';", receiver);
+            fs::write(&bridge, source).unwrap();
+            let runner = root.join("run.mjs");
+            let activate = if harness == Harness::Opencode {
+                "await bridge.setup(ctx);await handlers.prompt({sessionID:'session',messageID:'msg_fixture',prompt:{text:'fixture'}});"
+            } else {
+                "bridge({on:(name,handler)=>{handlers[name]=handler;}});handlers.session_start({},ctx);handlers.before_agent_start({messageType:'user',prompt:'fixture'},ctx);"
+            };
+            let failure = if harness == Harness::Opencode {
+                "await handlers.prompt({sessionID:'session',messageID:'msg_failure',prompt:{text:'fixture'}});"
+            } else {
+                "handlers.before_agent_start({messageType:'user',prompt:'fixture'},ctx);"
+            };
+            fs::write(&runner, format!(r#"import bridge,{{count}} from './bridge.mjs';
+const handlers={{}};
+const ctx={{session:{{get:async()=>({{id:'session'}}),hook:async(name,handler)=>{{handlers[name]=handler;return{{dispose:async()=>{{}}}};}}}},
+tool:{{hook:async()=>({{dispose:async()=>{{}}}})}},event:{{async *subscribe(){{}}}},
+sessionManager:{{getSessionId:()=> 'session'}}}};
+{activate}
+if(count()<2)throw new Error('Native child fixtures did not execute');
+globalThis.rejectHook=true;let rejected=false;
+try{{{failure}}}catch(error){{rejected=error.message==='Daedalus hook rejected event';}}
+if(!rejected)throw new Error('Hook failure was hidden');
+"#)).unwrap();
+            let mut command = std::process::Command::new("node");
+            command.arg(&runner);
+            let output = crate::adapters::process::run(
+                &mut command,
+                std::time::Duration::from_secs(30),
+                16384,
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    use std::fs;
 }

@@ -1043,6 +1043,7 @@ fn hook_profile_path(harness: &str, observed: Option<&str>, configured: &str) ->
     let filename = match harness {
         "codex" => "hooks.json",
         "claude" => "settings.json",
+        "hermes" => "config.yaml",
         _ => return None,
     };
     Some(PathBuf::from(directory).join(filename))
@@ -2513,6 +2514,10 @@ mod tests {
             Some(PathBuf::from(configured).join("hooks.json"))
         );
         assert!(hook_profile_path("codex", None, "").is_none());
+        assert_eq!(
+            hook_profile_path("hermes", None, configured),
+            Some(PathBuf::from(configured).join("config.yaml"))
+        );
         assert!(hook_profile_path("unknown", Some(observed), configured).is_none());
     }
     #[test]

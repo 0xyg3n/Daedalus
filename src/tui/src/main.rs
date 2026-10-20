@@ -335,8 +335,9 @@ fn main() -> io::Result<()> {
     )
     .map_err(io::Error::other)?;
     setup |= launch.first_run;
-    let mut child = launch
-        .command(std::env::current_exe()?.as_os_str())
+    let mut backend = launch.command(std::env::current_exe()?.as_os_str());
+    daedalus_tui::platform::hide_console(&mut backend);
+    let mut child = backend
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

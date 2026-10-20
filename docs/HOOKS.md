@@ -21,7 +21,7 @@ A newly selected conversation needs its own reviewed recipient binding.
 Retired process registrations remain in the local audit history. They do not
 block Telegram input to the verified replacement process; multiple live
 registrations for the same terminal still require review.
-OpenCode's single trailing editor padding space is recognized only outside an
+A single trailing editor padding space from OpenCode or Hermes is recognized only outside an
 unchanged Daedalus Telegram envelope, so it cannot leave the next input waiting
 after a verified completion. Message content and other prompts stay exact.
 
@@ -64,7 +64,17 @@ If no default is detected, empty input keeps the form open. Type `skip` or press
 Esc to leave setup without installing hooks; a saved Telegram route does not yet
 have replies connected. The optional transcript field accepts Enter for `none`.
 Each agent is reviewed separately.
-It excludes shell-only terminals. An unsupported provider/version/platform or a
+On Windows, Hermes enrollment reads its native `runtime/active_sessions.json`
+lease in the configured home or a named profile. It verifies process ownership,
+creation time and ancestry from the selected terminal; history and titles do not
+select a conversation. Its detected profile supplies `config.yaml`. Multiple
+live conversations are rejected. Reconnecting a restarted Hermes process requires
+review and invalidates old readiness while preserving uncertain input.
+Hermes must load and approve the new hooks through its native startup flow;
+complete one normal turn in Hermes after activation before using Telegram.
+OpenCode/Pi hook subprocesses, the TUI backend and pane stream clients run without
+creating Windows console windows. Errors still reach the normal hook diagnostics.
+The session installer excludes shell-only terminals. An unsupported provider/version/platform or a
 stale process fails closed at review, without modifying its native profile. A
 Telegram recipient still needs a separate chat binding. The Hooks page (or
 `daedalus hook profile-preview` / `profile-apply`) installs a profile for any of
