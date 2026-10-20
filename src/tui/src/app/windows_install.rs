@@ -275,6 +275,7 @@ mod tests {
                     "--exact",
                     "app::windows_install::tests::uninstall_service_child",
                     "--test-threads=1",
+                    "--nocapture",
                 ])
                 .env("DAEDALUS_UNINSTALL_FIXTURE", &self.directory)
                 .env(
@@ -312,6 +313,8 @@ mod tests {
     #[ignore = "Child process fixture; invoked only by the uninstall tests"]
     fn uninstall_service_child() {
         let directory = PathBuf::from(std::env::var_os("DAEDALUS_UNINSTALL_FIXTURE").unwrap());
+        let _log = super::super::telegram_supervisor::attach_service_log(&directory).unwrap();
+        println!("fixture-service-started");
         let config = super::super::telegram_config::ServiceConfig::load(
             &directory.join("telegram-service.json"),
         )
@@ -354,6 +357,11 @@ mod tests {
             let status = child.wait().unwrap();
             result.unwrap();
             assert!(status.success());
+            assert!(
+                fs::read_to_string(f.directory.join("telegram-service.log"))
+                    .unwrap()
+                    .contains("fixture-service-started")
+            );
             f.assert_preserved();
         }
     }

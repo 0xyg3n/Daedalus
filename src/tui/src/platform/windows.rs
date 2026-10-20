@@ -829,6 +829,9 @@ pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
 /// Rust's default Windows spawn inherits additional handles even with null stdio.
 pub struct BackgroundProcess(File);
 impl BackgroundProcess {
+    pub fn id(&self) -> u32 {
+        unsafe { GetProcessId(self.0.as_raw_handle()) }
+    }
     pub fn wait_timeout(&self, timeout: std::time::Duration) -> io::Result<bool> {
         let millis = u32::try_from(timeout.as_millis())
             .map_err(|_| io::Error::other("Process wait exceeds bound"))?;
@@ -899,7 +902,33 @@ pub fn pin_owned_process(pid: u32, creation_time: u64) -> io::Result<BackgroundP
     }
 }
 pub fn spawn_background(executable: &Path, args: &[&str]) -> io::Result<BackgroundProcess> {
+    spawn_background_with_environment(executable, args, None)
+}
+pub fn spawn_background_with_environment(
+    executable: &Path,
+    args: &[&str],
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+) -> io::Result<BackgroundProcess> {
     let program = wide(executable)?;
+    let mut block = Vec::new();
+    if let Some(environment) = environment {
+        let mut entries = environment.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(key, _)| key.to_uppercase());
+        for (key, value) in entries {
+            if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+                return Err(io::Error::other("Invalid background environment"));
+            }
+            block.extend(format!("{key}={value}").encode_utf16());
+            block.push(0);
+        }
+        block.push(0);
+        if block.len() == 1 {
+            block.push(0);
+        }
+        if block.len() > 32_767 {
+            return Err(io::Error::other("Background environment exceeds bound"));
+        }
+    }
     let mut command = Vec::new();
     for arg in std::iter::once(executable.as_os_str()).chain(args.iter().map(std::ffi::OsStr::new))
     {
@@ -951,7 +980,11 @@ pub fn spawn_background(executable: &Path, args: &[&str]) -> io::Result<Backgrou
             ptr::null(),
             0,
             DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
-            ptr::null(),
+            if environment.is_some() {
+                block.as_ptr().cast()
+            } else {
+                ptr::null()
+            },
             ptr::null(),
             &startup,
             &mut process,
@@ -1059,6 +1092,56 @@ mod tests {
             "Detached child inherited an unrelated exclusive file handle"
         );
         drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[ignore = "Child fixture for the explicit background environment test"]
+    fn background_environment_child() {
+        let output = std::env::var_os("DAEDALUS_FIXTURE_OUTPUT").unwrap();
+        let value = std::env::var("DAEDALUS_FIXTURE").unwrap();
+        assert!(std::env::var_os("PATH").is_none());
+        fs::write(output, value).unwrap();
+    }
+    #[test]
+    fn background_environment_is_explicit_and_preserves_unicode() {
+        let root = fixture();
+        let output = root.join("environment.txt");
+        let system = std::env::var("SystemRoot").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let environment = std::collections::BTreeMap::from([
+            ("SystemRoot".into(), system),
+            (
+                "DAEDALUS_FIXTURE".into(),
+                "Unicode: \u{03bb}\u{03b1}".into(),
+            ),
+            (
+                "DAEDALUS_FIXTURE_OUTPUT".into(),
+                output.to_str().unwrap().into(),
+            ),
+        ]);
+        let mut child = spawn_background_with_environment(
+            &executable,
+            &[
+                "--ignored",
+                "--exact",
+                "platform::windows::tests::background_environment_child",
+                "--test-threads=1",
+            ],
+            Some(&environment),
+        )
+        .unwrap();
+        if !child
+            .wait_timeout(std::time::Duration::from_secs(15))
+            .unwrap()
+        {
+            child.kill().unwrap();
+            panic!("Environment fixture timed out");
+        }
+        assert_eq!(child.try_wait().unwrap(), Some(0));
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            "Unicode: \u{03bb}\u{03b1}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     fn fixture() -> PathBuf {

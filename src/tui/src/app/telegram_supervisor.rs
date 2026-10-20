@@ -508,7 +508,6 @@ pub fn stop_requested(directory: &Path) -> Result<bool> {
 }
 #[cfg(windows)]
 pub fn start(directory: &Path) -> Result<Value> {
-    use std::os::windows::process::CommandExt;
     let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
     config.read_token()?;
     config.check_registrations()?;
@@ -516,23 +515,7 @@ pub fn start(directory: &Path) -> Result<Value> {
     if inspect(directory)?.state != "stopped" {
         return Err("Service already owns or may be starting for this instance".into());
     }
-    let path = directory.join("telegram-service.log");
-    let mut log = crate::platform::open_private(&path, true, true)
-        .map_err(|_| "Cannot open private service log")?;
-    use std::io::Seek;
-    log.seek(std::io::SeekFrom::End(0))
-        .map_err(|_| "Cannot position service log")?;
-    let mut command = std::process::Command::new(
-        std::env::current_exe().map_err(|_| "Cannot locate native executable")?,
-    );
-    command
-        .args(["telegram", "serve", "--config-dir"])
-        .arg(directory)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
-        .stderr(log)
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .env_clear();
+    let mut environment = std::collections::BTreeMap::new();
     for key in [
         "PATH",
         "SystemRoot",
@@ -550,13 +533,22 @@ pub fn start(directory: &Path) -> Result<Value> {
         "XDG_DATA_HOME",
         "XDG_STATE_HOME",
     ] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
+        if let Ok(value) = std::env::var(key) {
+            environment.insert(key.into(), value);
         }
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Cannot start native Telegram service")?;
+    // The daemon opens its own log. Inheriting any parent pipe here can keep a
+    // PowerShell pipeline waiting forever after the start command has exited.
+    let executable = std::env::current_exe().map_err(|_| "Cannot locate native executable")?;
+    let directory = directory
+        .to_str()
+        .ok_or("Configuration path must be UTF-8")?;
+    let mut child = crate::platform::spawn_background_with_environment(
+        &executable,
+        &["telegram", "serve", "--config-dir", directory],
+        Some(&environment),
+    )
+    .map_err(|_| "Cannot start native Telegram service")?;
     let pid = child.id();
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -564,6 +556,23 @@ pub fn start(directory: &Path) -> Result<Value> {
     Ok(
         json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested; service ownership and transport identity are checked separately."}),
     )
+}
+
+#[cfg(windows)]
+pub fn attach_service_log(directory: &Path) -> Result<std::fs::File> {
+    use std::{io::Seek, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+    let mut log =
+        crate::platform::open_private(&directory.join("telegram-service.log"), true, true)
+            .map_err(|_| "Cannot open private service log")?;
+    log.seek(std::io::SeekFrom::End(0))
+        .map_err(|_| "Cannot position service log")?;
+    if unsafe { SetStdHandle(STD_OUTPUT_HANDLE, log.as_raw_handle()) } == 0
+        || unsafe { SetStdHandle(STD_ERROR_HANDLE, log.as_raw_handle()) } == 0
+    {
+        return Err("Cannot attach private service log".into());
+    }
+    Ok(log)
 }
 
 #[cfg(all(test, windows))]

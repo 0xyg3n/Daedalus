@@ -110,6 +110,21 @@ enum Step {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
+    let _service_log = if let [telegram, serve, flag, directory] = args.as_slice()
+        && telegram == "telegram"
+        && serve == "serve"
+        && flag == "--config-dir"
+    {
+        Some(
+            daedalus_tui::app::telegram_supervisor::attach_service_log(std::path::Path::new(
+                directory,
+            ))
+            .map_err(io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(windows)]
     if args.first().is_some_and(|arg| arg == "uninstall") {
         if args != ["uninstall", "--prepare", "--yes"] {
             return Err(io::Error::other(
