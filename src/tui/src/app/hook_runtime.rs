@@ -1855,6 +1855,78 @@ mod tests {
         invoke(&f.0, "Stop", "one", &mut FakeClock(1)).unwrap();
         assert_eq!(readiness(&p, 1, 1000).unwrap(), Readiness::Busy);
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_bootstrap_requires_open_completed_rollout_and_rechecks_before_reserving() {
+        use std::os::unix::fs::symlink;
+        let mut f = Fixture::new();
+        f.0.scope.harness = Harness::Codex;
+        f.0.goal_id = None;
+        f.0.events = vec![EventKind::UserPromptSubmit, EventKind::Stop];
+        f.0.harness_process = Some(ProcessIdentity {
+            pid: 42,
+            start_ticks: 500,
+        });
+        let proc = f.0.directory.join("proc");
+        fs::create_dir_all(proc.join("42/fd")).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[19] = "500";
+        fields[2] = "42";
+        fields[5] = "42";
+        fields[4] = "99";
+        fs::write(
+            proc.join("42/stat"),
+            format!("42 (fixture) {}", fields.join(" ")),
+        )
+        .unwrap();
+        let rollout = f.0.directory.join("rollout.jsonl");
+        let rows = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"session\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn\"}}\n";
+        layouts::write_private(&rollout, rows).unwrap();
+        let p = install(&f.0).unwrap();
+        assert_eq!(ready_snapshot(&p, &proc).unwrap().state, Readiness::Unknown);
+        symlink(&rollout, proc.join("42/fd/10")).unwrap();
+        let snapshot = ready_snapshot(&p, &proc).unwrap();
+        assert_eq!(snapshot.state, Readiness::Idle);
+        fs::write(
+            &rollout,
+            [
+                rows.as_slice(),
+                b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            ]
+            .concat(),
+        )
+        .unwrap();
+        assert!(!reserve_ready(&p, &proc, snapshot.sequence).unwrap());
+        assert_eq!(ready_snapshot(&p, &proc).unwrap().state, Readiness::Unknown);
+        fs::write(&rollout, rows).unwrap();
+        assert!(
+            !reserve_ready(&p, &proc, snapshot.sequence).unwrap(),
+            "Recreated content must not reuse old proof"
+        );
+        let changed = f.0.directory.join("wrong.jsonl");
+        layouts::write_private(
+            &changed,
+            &String::from_utf8_lossy(rows)
+                .replace("session\"}", "other\"}")
+                .into_bytes(),
+        )
+        .unwrap();
+        fs::remove_file(proc.join("42/fd/10")).unwrap();
+        symlink(&changed, proc.join("42/fd/10")).unwrap();
+        assert!(
+            super::super::codex_state::idle_proof(&f.0, &proc)
+                .unwrap()
+                .is_none()
+        );
+        fields[19] = "501";
+        fs::write(
+            proc.join("42/stat"),
+            format!("42 (fixture) {}", fields.join(" ")),
+        )
+        .unwrap();
+        assert!(super::super::codex_state::idle_proof(&f.0, &proc).is_err());
+    }
     #[test]
     fn persistent_idle_requires_process_incarnation_and_reservation_is_single_use() {
         let mut f = Fixture::new();
@@ -3773,6 +3845,11 @@ fn native_observation_valid(
     let Some((event, proof)) = evidence else {
         return Ok(false);
     };
+    if event.starts_with("native-codex:") {
+        return Ok(
+            matches!(super::codex_state::idle_proof(r,proc_root), Ok(Some(current)) if current==proof),
+        );
+    }
     if !event.starts_with("native-grok:") {
         return Ok(true);
     }
@@ -3800,18 +3877,24 @@ pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
         )
         .optional()
         .map_err(|_| Error::Persistence)?;
-    // Existing Grok sessions can predate hook installation. Bootstrap only
+    // Existing native sessions can predate hook installation. Bootstrap only
     // from an exact, still-open native event log; this is source evidence,
     // not a synthesized hook or a successful Telegram delivery.
+    let native_proof = || match r.scope.harness {
+        Harness::Codex => {
+            super::codex_state::idle_proof(&r, proc_root).map(|proof| proof.map(|p| ("codex", p)))
+        }
+        _ => super::grok_state::idle_proof(&r, proc_root).map(|proof| proof.map(|p| ("grok", p))),
+    };
     if row.is_none()
-        && let Ok(Some(proof)) = super::grok_state::idle_proof(&r, proc_root)
+        && let Ok(Some((provider, proof))) = native_proof()
     {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .ok_or(Error::Input)?;
-        let event = format!("native-grok:{}:{proof}", r.id);
+        let event = format!("native-{provider}:{}:{proof}", r.id);
         con.execute(
             "INSERT OR IGNORE INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) SELECT ?1,?2,?3,'\"idle\"',?4,1 WHERE NOT EXISTS(SELECT 1 FROM hook_observations WHERE scope=?1) AND NOT EXISTS(SELECT 1 FROM hook_reservations WHERE scope=?1)",
             params![serde_json::to_string(&r.scope).map_err(|_|Error::Input)?, event, proof, now],

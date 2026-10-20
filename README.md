@@ -28,7 +28,7 @@ Recorded using built-in sample data; the music and transition effects are video 
 The tour uses built-in sample workspaces and terminal output.
 
 
-The current release is [0.2.0-beta.17](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
+The current release is [0.2.0-beta.18](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.18), with Linux and Windows x86-64 binaries and SHA-256 checksums. Daedalus ships as one Rust executable, including the TUI, CLI, Telegram service and hooks. See [architecture and supported operations](docs/ARCHITECTURE.md#supported-operations) for runtime details and feature boundaries.
 
 ## What it does
 
@@ -203,8 +203,8 @@ Pass that request to `daedalus agent call`. Terminal control, checkpoints, route
 
 | Platform | Status | Terminal backends | Installation |
 | --- | --- | --- | --- |
-| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) or source build below |
-| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) |
+| Linux x86-64 | Current beta; tested locally | Built-in PTY; optional tmux and Herdr | [Linux executable and checksum](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.18) or source build below |
+| Windows x86-64 | Native preview; real Windows validation pending | Built-in ConPTY; optional Herdr, [PSMux](https://github.com/psmux/psmux) or [tmux-windows](https://github.com/arndawg/tmux-windows) through the tmux adapter | [One-click Windows setup](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.18) |
 
 Both platforms use the same standalone Rust executable and Ratatui interface. On Windows, the Start Menu shortcut opens Daedalus in a console; Windows Terminal is recommended for the best display. No additional multiplexer is required for built-in terminals. Set `DAEDALUS_TMUX_BIN` to the absolute path of `psmux.exe` or `tmux.exe` to select a particular multiplexer. Native provider launches require `.exe` files; `.cmd` and `.bat` wrappers are refused.
 
@@ -215,12 +215,12 @@ The Windows preview is cross-compiled; platform-independent tests have also run 
 The current Linux x86-64 beta includes a binary and checksum:
 
 ```bash
-base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.17
-curl -fLO "$base/daedalus-0.2.0-beta.17-x86_64-linux"
-curl -fLO "$base/daedalus-0.2.0-beta.17-x86_64-linux.sha256"
-sha256sum -c daedalus-0.2.0-beta.17-x86_64-linux.sha256
+base=https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.18
+curl -fLO "$base/daedalus-0.2.0-beta.18-x86_64-linux"
+curl -fLO "$base/daedalus-0.2.0-beta.18-x86_64-linux.sha256"
+sha256sum -c daedalus-0.2.0-beta.18-x86_64-linux.sha256
 mkdir -p ~/.local/bin
-install -m 0755 daedalus-0.2.0-beta.17-x86_64-linux ~/.local/bin/daedalus
+install -m 0755 daedalus-0.2.0-beta.18-x86_64-linux ~/.local/bin/daedalus
 daedalus setup
 ```
 
@@ -232,7 +232,7 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-On Windows, download **Daedalus-0.2.0-beta.17-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.17) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
+On Windows, download **Daedalus-0.2.0-beta.18-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.18) and double-click it. It installs for the current user, creates a Start Menu shortcut and opens Daedalus. No PowerShell, Git, Rust or tmux is needed. The standalone Windows executable is also available for advanced use; install it before using in-app updates. See the [Windows install guide](docs/INSTALL.md#native-windows-install) for source builds and other options.
 
 Setup detects the operating system and architecture. It defaults to built-in native terminals; tmux and Herdr are optional, separately selected backends. Missing selected tools appear in a review before installation. Windows uses native backend installation guidance. Sign in through each tool's own flow. Telegram needs your own bot token, sender grants and a route; installing never starts a bot.
 

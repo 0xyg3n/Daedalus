@@ -124,6 +124,14 @@ Native trust/reload requirements still apply. A saved route alone does not confi
 delivery: the Telegram service must be running, and ordinary group messages require
 listening to be enabled.
 
+On Linux, an existing Codex session with no recorded hook observations can establish
+initial readiness from the native rollout still held open by its registered process.
+The session ID must match and its latest relevant record must be a completed turn.
+New prompts, incomplete writes, ambiguous rollouts or a replaced process block input.
+This evidence is rechecked before reserving the queued message; normal hooks track
+subsequent turns. This bootstrap is not available on Windows yet.
+
+
 Chat names and IDs are kept in the private configuration directory. Bots can
 discover chats they receive updates from; they cannot list every group in a
 person's Telegram account. Add the bot to another group and send

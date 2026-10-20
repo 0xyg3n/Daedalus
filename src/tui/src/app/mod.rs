@@ -3,6 +3,7 @@ pub mod agent_tools;
 pub mod armonia_status;
 pub mod backend;
 pub mod cli;
+pub mod codex_state;
 pub mod config;
 pub mod control_audit;
 pub mod cutover;
