@@ -21,6 +21,9 @@ A newly selected conversation needs its own reviewed recipient binding.
 Retired process registrations remain in the local audit history. They do not
 block Telegram input to the verified replacement process; multiple live
 registrations for the same terminal still require review.
+OpenCode's single trailing editor padding space is recognized only outside an
+unchanged Daedalus Telegram envelope, so it cannot leave the next input waiting
+after a verified completion. Message content and other prompts stay exact.
 
 ## Features
 

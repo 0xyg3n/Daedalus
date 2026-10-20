@@ -1106,7 +1106,7 @@ pub fn execute(
     let stream_prompt_sha256 = (event.kind == EventKind::UserPromptSubmit)
         .then(|| native_prompt(registration.scope.harness, &payload))
         .flatten()
-        .map(|prompt| format!("{:x}", Sha256::digest(prompt.as_bytes())));
+        .map(|prompt| super::telegram_feeder::prompt_sha256(registration.scope.harness, prompt));
     let stream_turn_id = if payload.get("subagentType").is_some_and(|v| !v.is_null()) {
         None
     } else if registration.scope.harness == Harness::Claude {
@@ -3484,8 +3484,9 @@ fn observe_readiness(
     let correlated = old.is_none()
         && kind == EventKind::UserPromptSubmit
         && reservation.as_ref().is_some_and(|marker| {
-            native_prompt(r.scope.harness, payload)
-                .is_some_and(|p| format!("{:x}", Sha256::digest(p.as_bytes())) == *marker)
+            native_prompt(r.scope.harness, payload).is_some_and(|p| {
+                super::telegram_feeder::prompt_sha256(r.scope.harness, p) == *marker
+            })
         });
     if correlated {
         if matches!(
@@ -3576,7 +3577,7 @@ fn observe_readiness(
                 && ((provider_completed
                     && (r.scope.harness != Harness::Opencode
                         || opencode_completion(payload).is_some_and(|(_, text)| {
-                            format!("{:x}", Sha256::digest(text.as_bytes())) == *sha
+                            super::telegram_feeder::prompt_sha256(r.scope.harness, text) == *sha
                         })))
                     || transcript_proves_reply(
                         r,

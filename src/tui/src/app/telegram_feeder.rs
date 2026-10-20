@@ -25,6 +25,29 @@ pub fn encode_prompt(frame: &Frame) -> Result<(String, String)> {
     let text = format!("/usr/bin/false -- '{}'", data.replace('\'', "'\"'\"'"));
     Ok((text, correlation))
 }
+/// OpenCode terminal input can append one editor padding space. Recognize that
+/// boundary only around a byte-exact, regenerated Daedalus transport envelope;
+/// user text, arbitrary prompts and other providers retain exact hashing.
+pub(super) fn prompt_sha256(harness: super::hooks::Harness, prompt: &str) -> String {
+    let canonical = || -> Option<&str> {
+        if harness != super::hooks::Harness::Opencode {
+            return None;
+        }
+        let unpadded = prompt.strip_suffix(' ')?;
+        let encoded = unpadded
+            .strip_prefix("/usr/bin/false -- '")?
+            .strip_suffix('\'')?
+            .replace("'\"'\"'", "'");
+        let envelope: serde_json::Value = serde_json::from_str(&encoded).ok()?;
+        let frame: Frame = serde_json::from_value(envelope.get("frame")?.clone()).ok()?;
+        let (expected, _) = encode_prompt(&frame).ok()?;
+        (expected == unpadded).then_some(unpadded)
+    };
+    format!(
+        "{:x}",
+        Sha256::digest(canonical().unwrap_or(prompt).as_bytes())
+    )
+}
 pub struct NativeFeeder {
     pub instance: String,
     /// Explicit private registration paths selected by local service setup.
@@ -145,6 +168,58 @@ impl Feeder for NativeFeeder {
     }
 }
 
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use crate::{
+        app::hooks::Harness,
+        core::{identity::Backend, routes},
+    };
+
+    #[test]
+    fn padding_normalization_preserves_transport_content_and_exact_other_prompts() {
+        let frame = Frame {
+            scope: routes::Scope {
+                instance: "fixture".into(),
+                bot: "1".into(),
+                chat: "2".into(),
+            },
+            actor: "3".into(),
+            message_id: 4,
+            update_id: 5,
+            terminal: TerminalId {
+                backend: Backend::Herdr,
+                endpoint: "fixture".into(),
+                pane: "pane".into(),
+                generation: "generation".into(),
+            },
+            conversation: Some("conversation".into()),
+            route_revision: 1,
+            text: " user 'text' \n".into(),
+            attachment: None,
+        };
+        let (text, correlation) = encode_prompt(&frame).unwrap();
+        let exact = prompt_sha256(Harness::Opencode, &text);
+        assert_eq!(prompt_sha256(Harness::Opencode, &format!("{text} ")), exact);
+        for changed in [
+            format!("{text}  "),
+            format!("{text}\t"),
+            format!("{text}\n"),
+            format!("prefix {text} "),
+            text.replace(&correlation, "invalid-correlation") + " ",
+            text.replace("This envelope", "Changed envelope") + " ",
+            text.replace("user", "changed-user") + " ",
+        ] {
+            assert_ne!(prompt_sha256(Harness::Opencode, &changed), exact);
+        }
+        assert_ne!(prompt_sha256(Harness::Claude, &format!("{text} ")), exact);
+        assert_ne!(
+            prompt_sha256(Harness::Opencode, "plain input "),
+            prompt_sha256(Harness::Opencode, "plain input")
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -209,6 +284,25 @@ mod tests {
             let executable = directory.join("herdr");
             fs::write(&executable,format!("#!/bin/sh\ncase \"$3 $4\" in\n'pane get') printf '%s\\n' '{{\"result\":{{\"pane\":{{\"pane_id\":\"pane\",\"terminal_id\":\"terminal\",\"pid\":42,\"agent\":\"claude\"}}}}}}' ;;\n'agent prompt') printf '%s\\n' \"$6\" > '{}/sent'; if test -f '{}/fail'; then exit 1; fi; printf '%s\\n' '{{\"result\":{{}}}}' ;;\n*) exit 1 ;;\nesac\n",directory.display(),directory.display())).unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            let server_emitter = if harness == Harness::Opencode {
+                let server = directory.join("server");
+                fs::write(&server, b"\x7fELF fixture only").unwrap();
+                fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+                std::os::unix::fs::symlink(&server, proc.join("42/exe")).unwrap();
+                Some(
+                    hook_runtime::capture_server_emitter(
+                        ProcessIdentity {
+                            pid: 42,
+                            start_ticks: 500,
+                        },
+                        &server,
+                        &proc,
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
             let terminal = TerminalId {
                 backend: Backend::Herdr,
                 endpoint: "example".into(),
@@ -230,7 +324,7 @@ mod tests {
                     pid: 42,
                     start_ticks: 500,
                 }),
-                server_emitter: None,
+                server_emitter,
                 transcript: Some(directory.join("transcript.jsonl")),
                 events: vec![EventKind::Stop, EventKind::UserPromptSubmit],
                 options: Options::default(),
@@ -477,6 +571,37 @@ mod tests {
             Submission::Accepted(_)
         ));
         assert!(retired_path.exists());
+    }
+    #[test]
+    fn opencode_editor_padding_does_not_stall_the_next_telegram_turn() {
+        let mut f = Fixture::new_for(Harness::Opencode);
+        let native = |f: &Fixture, payload: serde_json::Value| {
+            hook_runtime::execute(
+                serde_json::to_vec(&payload).unwrap().as_slice(),
+                &f.registration,
+                None,
+                &mut Verified,
+                &mut Time,
+            )
+            .unwrap();
+        };
+        let prompt = |turn: &str, text: &str| json!({"bridge_version":"daedalus.opencode.v2","session_id":"session","hook_event_name":"UserPromptSubmit","event_id":format!("prompt-{turn}"),"turn_id":turn,"prompt":text});
+        let completed = |turn: &str, text: &str, id: &str| json!({"bridge_version":"daedalus.opencode.v2","session_id":"session","hook_event_name":"Stop","event_id":id,"native_event":{"id":id,"type":"session.execution.succeeded","data":{"sessionID":"session"},"durable":{"aggregateID":"session","seq":5,"version":1}},"context":[{"id":turn,"type":"user","text":text},{"id":id.replacen("evt_","msg_",1),"type":"idle","outcome":"succeeded"}]});
+        native(&f, prompt("msg_initial", "initial input"));
+        native(&f, completed("msg_initial", "initial input", "evt_initial"));
+        assert!(matches!(
+            f.feeder.submit(&f.frame).unwrap(),
+            Submission::Accepted(_)
+        ));
+        let sent = fs::read_to_string(f.directory.join("sent")).unwrap();
+        let padded = format!("{} ", sent.trim_end());
+        native(&f, prompt("msg_telegram", &padded));
+        native(&f, completed("msg_telegram", &padded, "evt_telegram"));
+        f.frame.update_id += 1;
+        assert!(matches!(
+            f.feeder.submit(&f.frame).unwrap(),
+            Submission::Accepted(_)
+        ));
     }
     #[test]
     fn two_live_conversation_bindings_still_require_review() {
