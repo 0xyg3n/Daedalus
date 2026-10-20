@@ -454,6 +454,11 @@ impl SessionMenu {
             return Err("Finish the current dialog first".into());
         }
         if super::telegram_menu::available(action) {
+            if action == "telegram.route"
+                && let Some(pane) = view.selected.as_ref()
+            {
+                return self.telegram.for_pane(pane, source, config, seq);
+            }
             return self.telegram.start(action, source, config, seq);
         }
         if action == "hooks.adapter" {
@@ -809,7 +814,7 @@ impl SessionMenu {
         seq: &mut u64,
     ) -> Result<Outcome> {
         match action {
-            "telegram.route"=>self.telegram.start(action,source,config,seq),
+            "telegram.route"=>self.telegram.for_pane(&pane,source,config,seq),
             "checkpoint.save" => self.input(seq, Stage::SaveName(pane), "Name this checkpoint"),
             "terminal.attach" | "terminal.watch" => {
                 let mode = if action == "terminal.attach" {

@@ -970,6 +970,9 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
     if matches!(key.code, KeyCode::Char('k' | 'K')) {
         return open_switcher(ui);
     }
+    if matches!(key.code, KeyCode::Char('g' | 'G')) {
+        return quick_action(ui, "telegram.route");
+    }
     if matches!(key.code, KeyCode::Char('w' | 'W' | 'b' | 'B')) {
         return wall_preset(
             ui,
@@ -3475,6 +3478,25 @@ mod cli_tests {
                 .map(|c| c.symbol())
                 .collect();
             assert!(text.contains("INLINE"), "{layout:?}");
+            assert!(
+                ui.quick_hits
+                    .iter()
+                    .any(|(_, action)| action == "telegram.route")
+            );
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+            );
+            let Step::Send(route) = key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            ) else {
+                panic!("Telegram shortcut must open the selected pane's chat picker")
+            };
+            assert_eq!(route["action"], "telegram.route");
+            assert_eq!(route["node"], "a");
+            assert_eq!(ui.view, layout);
+            assert!(ui.embed.is_some());
             if layout.grid() {
                 assert!(
                     ui.tile_hits

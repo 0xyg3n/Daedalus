@@ -101,6 +101,7 @@ struct Pending {
 #[derive(Default)]
 pub struct Menu {
     pending: Option<Pending>,
+    target: Option<crate::core::identity::TerminalId>,
 }
 pub fn available(action: &str) -> bool {
     matches!(
@@ -119,6 +120,19 @@ impl Menu {
     }
     pub fn cancel(&mut self) {
         self.pending = None;
+        self.target = None;
+    }
+    pub fn for_pane<S: Source>(
+        &mut self,
+        pane: &Value,
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
+        let target = crate::adapters::terminals::identity(pane)?;
+        let outcome = self.start("telegram.route", source, config, seq)?;
+        self.target = Some(target);
+        Ok(outcome)
     }
     fn frame(
         &mut self,
@@ -167,6 +181,7 @@ impl Menu {
         if self.pending() {
             return Err("Finish the current Telegram dialog first".into());
         }
+        self.target = None;
         if action == "telegram.start" {
             let Reply::Data(status) = source.telegram(Request::Inspect)? else {
                 return Err("Invalid Telegram settings response".into());
@@ -187,14 +202,21 @@ impl Menu {
                 if candidates.is_empty() {
                     return self.frame(seq,"output","No recent chats found",json!({"text":"Send /start to the bot in a DM, or /start@YourBot in a group. Keep the Daedalus Telegram service stopped while discovering, then retry. No grant was created."}),Stage::Output(None));
                 }
-                let options = candidates.iter().enumerate().map(|(i,c)|json!([i.to_string(),format!("{} {}",c["kind"].as_str().unwrap_or("chat"),c["chat"]),format!("Sender {}",c["actor"])] )).collect::<Vec<_>>();
+                let options = candidates.iter().enumerate().map(|(i,c)|json!([i.to_string(),format!("{} · {}",c["title"].as_str().unwrap_or("Chat"),c["chat"]),format!("{} · sender {}",c["kind"].as_str().unwrap_or("chat"),c["actor"])] )).collect::<Vec<_>>();
                 self.frame(seq,"choose","Review discovered chats",json!({"description":"Only local approval grants a sender access. These candidates came from recent bot updates; no route is inferred.","options":options}),Stage::Discovered{candidates,expected})
             }
             "telegram.route" => {
                 let Reply::Data(data)=source.telegram(Request::Routes)? else {return Err("Invalid route inventory".into());};
-                let choices=data["grants"].as_array().ok_or("Invalid route grants")?.iter().enumerate().map(|(i,g)|json!([i.to_string(),format!("Chat {}",g["chat"]),format!("Authorized user {}",g["actor"])] )).collect::<Vec<_>>();
+                let choices=data["grants"].as_array().ok_or("Invalid route grants")?.iter().enumerate().map(|(i,g)| {
+                    let current = data["terminals"].as_array().into_iter().flatten()
+                        .find(|t| t["identity"] == g["route"]["terminal"]);
+                    let destination = current.and_then(|t| t["label"].as_str()).unwrap_or_else(|| {
+                        if g["route"].is_null() { "Not assigned" } else { "Saved terminal offline" }
+                    });
+                    json!([i.to_string(),format!("{} · {}",g["title"].as_str().unwrap_or("Chat"),g["chat"]),format!("{destination} · authorized user {}",g["actor"])])
+                }).collect::<Vec<_>>();
                 if choices.is_empty(){return Err("No authorized chat yet. Open Telegram setup and add a DM or group, then choose a destination.".into());}
-                self.frame(seq,"choose","Choose Telegram chat",json!({"options":choices}),Stage::RouteGrant(data))
+                self.frame(seq,"choose","Choose Telegram chat",json!({"options":choices,"description":"Each chat has its own saved default terminal. Changing one chat does not change other chats."}),Stage::RouteGrant(data))
             }
             "telegram.token" => self.frame(seq,"input","Telegram bot token",json!({"secret":true,"description":"Paste the complete token from @BotFather (numeric ID:secret). It must match your configured bot ID. It is stored privately and never shown in the review."}),Stage::Token),
             "telegram.start"|"telegram.stop" => self.review(seq,source.telegram(Request::Service{start:action=="telegram.start"})?),
@@ -376,6 +398,17 @@ impl Menu {
                 let terminals: Vec<crate::core::routes::Terminal> =
                     serde_json::from_value(data["terminals"].clone())
                         .map_err(|_| "Invalid terminal inventory")?;
+                if let Some(identity) = self.target.take() {
+                    let matches = terminals.iter().filter(|t| t.available && t.identity == identity).collect::<Vec<_>>();
+                    if matches.len() != 1 {
+                        return Err("This terminal is no longer available. Refresh and select it again.".into());
+                    }
+                    return self.review(seq, source.telegram(Request::Route {
+                        chat,
+                        actor,
+                        target: Box::new(matches[0].clone()),
+                    })?);
+                }
                 let choices = terminals
                     .iter()
                     .enumerate()
@@ -633,6 +666,85 @@ mod tests {
         app::backend::Observations,
         core::layouts::{self, Layouts},
     };
+    struct Routing {
+        inventory: Value,
+        selected: Option<(i64, crate::core::identity::TerminalId)>,
+    }
+    impl Source for Routing {
+        fn telegram(&mut self, request: Request) -> Result<Reply> {
+            match request {
+                Request::Routes => Ok(Reply::Data(self.inventory.clone())),
+                Request::Route { chat, target, .. } => {
+                    self.selected = Some((chat, target.identity));
+                    Err("Reached review without applying".into())
+                }
+                _ => panic!("Unexpected routing operation"),
+            }
+        }
+        fn refresh(&mut self, _: &ControlConfig) -> Result<Observations> {
+            unreachable!()
+        }
+        fn preview(&mut self, _: &Value, _: usize) -> Result<String> {
+            unreachable!()
+        }
+        fn save_layouts(&mut self, _: &Layouts) -> Result<()> {
+            unreachable!()
+        }
+    }
+    #[test]
+    fn pane_chat_button_keeps_exact_target_and_rejects_a_replaced_terminal() {
+        let pane = json!({"backend":"herdr","session":"fixture","pane_id":"pane-a","terminal_id":"generation-a"});
+        let identity = crate::adapters::terminals::identity(&pane).unwrap();
+        let terminal = crate::core::routes::Terminal {
+            identity: identity.clone(),
+            label: "Selected agent".into(),
+            workspace: "Project".into(),
+            harness: "codex".into(),
+            conversation: Some("session".into()),
+            available: true,
+        };
+        let mut source = Routing {
+            inventory: json!({"grants":[{"chat":-100,"actor":42,"title":"Team"}],"terminals":[terminal]}),
+            selected: None,
+        };
+        let mut sessions = crate::app::session_menu::SessionMenu::default();
+        let mut seq = 0;
+        sessions
+            .start(
+                "telegram.route",
+                crate::app::session_menu::View {
+                    snapshot: json!({"panes":[pane.clone()]}),
+                    health: json!({}),
+                    layouts: Layouts::default(),
+                    selected: Some(pane.clone()),
+                    checkpoint: None,
+                    node: "selected-node".into(),
+                },
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+        let reply = json!({"op":"reply","id":seq,"value":"0"});
+        assert!(
+            sessions
+                .reply(&reply, &mut source, &config(), &mut seq)
+                .unwrap_err()
+                .contains("Reached review")
+        );
+        assert_eq!(source.selected, Some((-100, identity)));
+        source.selected = None;
+        source.inventory["terminals"][0]["identity"]["generation"] = json!("replacement");
+        let mut menu = Menu::default();
+        menu.for_pane(&pane, &mut source, &config(), &mut seq)
+            .unwrap();
+        let reply = json!({"op":"reply","id":seq,"value":"0"});
+        assert!(
+            menu.answer(&mut source, &config(), &reply, &mut seq)
+                .is_err()
+        );
+        assert!(source.selected.is_none());
+    }
     struct Local {
         directory: PathBuf,
         applied: usize,

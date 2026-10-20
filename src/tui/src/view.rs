@@ -5210,6 +5210,9 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         pairs.insert(at, (",", "Options"));
     }
     let mut items = Vec::<(String, String, String)>::new();
+    if control && !ui.searching {
+        items.push(("^] G".into(), "Telegram".into(), "telegram.route".into()));
+    }
     let priority = |label: &str| {
         matches!(
             label,

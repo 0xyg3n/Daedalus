@@ -197,7 +197,22 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
             let token = config.read_token()?;
             let mut api = crate::adapters::telegram::BotApi::pairing(&token)
                 .map_err(|_| "Cannot initialize Telegram verification")?;
-            Ok(Reply::Data(discover_chats(&config, &mut api)?))
+            let found = discover_chats(&config, &mut api)?;
+            let mut names = chat_names(directory, config.bot_id)?;
+            for candidate in found["chats"].as_array().into_iter().flatten() {
+                if let (Some(chat), Some(title)) =
+                    (candidate["chat"].as_i64(), candidate["title"].as_str())
+                {
+                    names.insert(chat, title.to_owned());
+                }
+            }
+            if names.len() > 1000 {
+                return Err("Chat catalog exceeds limit".into());
+            }
+            layouts::write_private(&directory.join("telegram-chats.json"), &serde_json::to_vec(
+                &json!({"bot_id":config.bot_id,"chats":names.into_iter().map(|(chat,title)|json!({"chat":chat,"title":title})).collect::<Vec<_>>()})
+            ).map_err(|_| "Cannot encode chat catalog")?)?;
+            Ok(Reply::Data(found))
         }
         Request::RouteBindings { chat, actor } => {
             let live = live_terminals(directory)?;
@@ -237,9 +252,58 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
         Request::Routes => {
             let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
             let terminals = live_terminals(directory)?;
-            Ok(Reply::Data(
-                json!({"grants":config.grants.iter().filter(|g|g.permissions.contains(&telegram_config::Access::Manage)).collect::<Vec<_>>(),"terminals":terminals}),
-            ))
+            let names = chat_names(directory, config.bot_id)?;
+            let owners = config
+                .grants
+                .iter()
+                .filter(|g| {
+                    g.chat == g.actor && g.permissions.contains(&telegram_config::Access::Manage)
+                })
+                .map(|g| g.actor)
+                .collect::<std::collections::BTreeSet<_>>();
+            let owner = (owners.len() == 1).then(|| *owners.first().unwrap());
+            let grants = config
+                .grants
+                .iter()
+                .filter(|g| g.permissions.contains(&telegram_config::Access::Manage))
+                .filter(|g| {
+                    !owner.is_some_and(|owner| {
+                        g.actor != owner
+                            && config.grants.iter().any(|other| {
+                                other.chat == g.chat
+                                    && other.actor == owner
+                                    && other.permissions.contains(&telegram_config::Access::Manage)
+                            })
+                    })
+                })
+                .map(|grant| {
+                    let scope = crate::core::routes::Scope {
+                        instance: config.instance.clone(),
+                        bot: config.bot_id.to_string(),
+                        chat: grant.chat.to_string(),
+                    };
+                    let route = super::diagnostics::with_database(
+                        &directory.join("routes.sqlite3"),
+                        |con| {
+                            crate::core::routes::read_route(con, &scope).map_err(|e| e.to_string())
+                        },
+                    )?
+                    .flatten();
+                    let mut value =
+                        serde_json::to_value(grant).map_err(|_| "Invalid chat grant")?;
+                    value["title"] = json!(names.get(&grant.chat).cloned().unwrap_or_else(|| {
+                        if grant.chat > 0 {
+                            "Direct message".into()
+                        } else {
+                            "Group".into()
+                        }
+                    }));
+                    value["route"] =
+                        serde_json::to_value(route).map_err(|_| "Invalid saved route")?;
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Reply::Data(json!({"grants":grants,"terminals":terminals})))
         }
         Request::Route {
             chat,
@@ -347,6 +411,37 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
     }
 }
 
+/// Display metadata only. Chat titles never grant access or resolve a terminal.
+fn chat_names(directory: &Path, bot_id: i64) -> Result<std::collections::BTreeMap<i64, String>> {
+    let Some(bytes) = layouts::read_private(&directory.join("telegram-chats.json"))? else {
+        return Ok(Default::default());
+    };
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private chat catalog")?;
+    if value["bot_id"].as_i64() != Some(bot_id) {
+        return Ok(Default::default());
+    }
+    let chats = value["chats"]
+        .as_array()
+        .ok_or("Invalid private chat catalog")?;
+    if chats.len() > 1000 {
+        return Err("Chat catalog exceeds limit".into());
+    }
+    Ok(chats
+        .iter()
+        .filter_map(|chat| {
+            let id = chat["chat"].as_i64().filter(|id| *id != 0)?;
+            let title: String = chat["title"]
+                .as_str()?
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(120)
+                .collect();
+            Some((id, title))
+        })
+        .collect())
+}
+
 /// Read-only pairing inventory. A local operator must still review and apply a
 /// grant; an incoming update never grants itself access or advances the cursor.
 fn discover_chats(config: &ServiceConfig, api: &mut impl Api) -> Result<Value> {
@@ -408,7 +503,9 @@ fn discovery_candidates(bot_id: i64, username: &str, updates: Vec<Value>, now: i
         }
         found.insert(
             (chat, actor),
-            json!({"chat":chat,"actor":actor,"kind":kind}),
+            json!({"chat":chat,"actor":actor,"kind":kind,
+                "title":message["chat"]["title"].as_str().unwrap_or("Direct message")
+                    .chars().filter(|c| !c.is_control()).take(120).collect::<String>()}),
         );
     }
     json!({"bot_id":bot_id,"bot_username":username,"chats":found.into_values().collect::<Vec<_>>(),"note":"Read-only candidates. Select one and review its sender grant locally; no route or delivery is created automatically."})
@@ -600,7 +697,7 @@ impl RoutePlan {
                 &live.iter().map(|t| t.identity.clone()).collect::<Vec<_>>(),
                 self.previous.as_ref().map_or(0, |r| r.revision),
                 true,
-                false,
+                true,
             )
             .map_err(|e| e.to_string())?;
         Ok(json!({"state":"saved","route":route}))
@@ -923,6 +1020,26 @@ mod tests {
         (fixture, terminal)
     }
     #[test]
+    fn chat_titles_are_private_display_metadata_bound_to_the_bot() {
+        let f = Fixture::new();
+        layouts::write_private(
+            &f.0.join("telegram-chats.json"),
+            &serde_json::to_vec(
+                &json!({"bot_id":123,"chats":[{"chat":-100,"title":"Team\n\u{1b}"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(chat_names(&f.0, 123).unwrap().get(&-100).unwrap(), "Team");
+        assert!(chat_names(&f.0, 456).unwrap().is_empty());
+        assert!(
+            ServiceConfig::load(&f.0.join("telegram-service.json"))
+                .unwrap()
+                .grants
+                .is_empty()
+        );
+    }
+    #[test]
     fn route_preview_is_inert_and_concurrent_selection_cannot_overwrite() {
         let (f, target) = route_fixture();
         let live = vec![target.clone()];
@@ -931,6 +1048,7 @@ mod tests {
         assert!(!f.0.join("routes.sqlite3").exists());
         let result = first.apply(&f.0, &live).unwrap();
         assert_eq!(result["route"]["revision"], 1);
+        assert_eq!(result["route"]["pinned"], true);
         assert!(
             stale
                 .apply(&f.0, &live)

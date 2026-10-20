@@ -96,13 +96,24 @@ and saves a rollback receipt. See [hooks](HOOKS.md) and [goals](GOALS.md).
 
 ## Telegram
 
+Each registered DM or group has its own saved default terminal. Open a terminal's
+actions and choose **Connect Telegram chat**, or click **Telegram** while attached
+(`Ctrl+]`, then `G`). Choose the chat, review its current destination and confirm.
+The selected pane stays selected; other chats keep their defaults. After saving,
+connect its installed reply hook when prompted to enable responses.
+
+Chat names and IDs are kept in the private configuration directory. Bots can
+discover chats they receive updates from; they cannot list every group in a
+person's Telegram account. Add the bot to another group and send
+`/start@YourBot`, then use **Find DM or group chats** to register it.
+
 The TUI's **Telegram → Set up connection** offers automatic pairing. Enter the
 bot token in a masked field, review the derived bot ID, then send `/start` to the
 bot in a DM or `/start@YourBot` in a group. **Find a DM or group chat** lists
 recent senders for local approval. Granting a sender, starting the service,
 choosing a terminal and connecting reply hooks are separate reviewed steps.
-`daedalus telegram discover --config-dir ABS` prints the same read-only
-candidate list; it does not grant access or consume the update cursor. Keep the
+`daedalus telegram discover --config-dir ABS` prints the same candidate list
+and saves chat names privately; it does not grant access or consume the update cursor. Keep the
 managed service stopped while discovering. Numeric IDs can still be entered
 manually in the TUI.
 
