@@ -129,7 +129,18 @@ pub fn preview_live(
             .map_err(|_| "Invalid foreground generation")?,
     };
     let server_emitter = if harness == Harness::Opencode {
-        Some(local_opencode_server(&process, &terminals.proc_root)?)
+        Some(
+            match local_opencode_server(&process, &terminals.proc_root) {
+                Ok(server) => server,
+                Err(error) if error == NO_LOCAL_SERVER => reconnect_opencode_server(
+                    &request.directory,
+                    &crate::adapters::terminals::identity(&frozen)?,
+                    &process,
+                    &terminals.proc_root,
+                )?,
+                Err(error) => return Err(error),
+            },
+        )
     } else {
         None
     };
@@ -263,10 +274,73 @@ fn local_opencode_server(
 fn select_local_server(
     mut servers: Vec<hook_runtime::ServerEmitter>,
 ) -> Result<hook_runtime::ServerEmitter> {
+    if servers.is_empty() {
+        return Err(NO_LOCAL_SERVER.into());
+    }
     if servers.len() != 1 {
         return Err("Cannot identify one local OpenCode server for this terminal. Shared or remote servers need an explicit server binding through hook profile-preview; no hook was installed.".into());
     }
     Ok(servers.pop().unwrap())
+}
+const NO_LOCAL_SERVER: &str = "No directly owned OpenCode server was found. Open a conversation and reconnect its hooks; an existing server needs a verified saved binding.";
+
+/// A background server can outlive the UI that first started it. Reconnect only
+/// a previously reviewed emitter for this exact terminal generation, never an
+/// arbitrary process with the same executable name or the latest saved session.
+fn reconnect_opencode_server(
+    directory: &Path,
+    terminal: &TerminalId,
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+) -> Result<hook_runtime::ServerEmitter> {
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let executable = crate::platform::process_identity(ui.pid)
+        .map_err(|_| "OpenCode UI disappeared")?
+        .executable;
+    #[cfg(unix)]
+    let executable = fs::read_link(proc_root.join(ui.pid.to_string()).join("exe"))
+        .map_err(|_| "OpenCode UI disappeared")?;
+    let entries = fs::read_dir(directory.join("hooks")).map_err(|_| NO_LOCAL_SERVER)?;
+    let mut servers = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err("Hook registration limit exceeded".into());
+        }
+        let path = entry
+            .map_err(|_| "Cannot inspect saved hook binding")?
+            .path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let r = hook_runtime::inspect(&path).map_err(|e| e.to_string())?;
+        if r.directory != directory
+            || r.scope.harness != Harness::Opencode
+            || &r.scope.terminal != terminal
+        {
+            continue;
+        }
+        let Some(server) = r.server_emitter else {
+            continue;
+        };
+        if hook_runtime::verify_server_emitter(&server, proc_root).is_err() {
+            continue;
+        }
+        // Pin the current UI to the very same native executable as the emitter.
+        #[cfg(unix)]
+        let matches = fs::metadata(&executable)
+            .is_ok_and(|m| m.dev() == server.device && m.ino() == server.inode);
+        #[cfg(windows)]
+        let matches = crate::platform::open_regular(&executable)
+            .ok()
+            .and_then(|f| crate::platform::file_identity(&f).ok())
+            == Some((server.device, server.inode));
+        if matches && !servers.contains(&server) {
+            servers.push(server);
+        }
+    }
+    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    select_local_server(servers)
 }
 
 pub(crate) fn check_binary_path(path: &Path) -> Result<()> {
@@ -295,6 +369,8 @@ pub struct Preview {
     before: Option<Vec<u8>>,
     #[serde(skip_serializing)]
     after: Vec<u8>,
+    #[serde(skip_serializing)]
+    previous_registration: Option<Registration>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -551,7 +627,13 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
         .map_err(|_| "Profile directory must be private and owned")?;
     let before = read_profile(&request.profile)?;
     let after = merge(before.as_deref(), &registration, &request.binary)?;
+    let previous_registration = if registration.path().exists() {
+        Some(hook_runtime::inspect(&registration.path()).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
     Ok(Preview {
+        previous_registration,
         profile: request.profile.clone(),
         executable: request.binary.clone(),
         registration,
@@ -1051,7 +1133,7 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
         if saved["profile"] != json!(plan.profile) || saved["after_sha"] != plan.after_sha {
             return Err("Backup does not match installation".into());
         }
-        let registration = hook_runtime::install(&plan.registration).map_err(|e| e.to_string())?;
+        let registration = install_reviewed_registration(plan, terminals)?;
         let receipt = Receipt {
             profile: plan.profile.clone(),
             backup,
@@ -1070,7 +1152,7 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
     } else {
         layouts::write_private(&backup, &bytes)?;
     }
-    let registration = hook_runtime::install(&plan.registration).map_err(|e| e.to_string())?;
+    let registration = install_reviewed_registration(plan, terminals)?;
     write_profile(&plan.profile, &plan.after)?;
     let receipt = Receipt {
         profile: plan.profile.clone(),
@@ -1080,6 +1162,16 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
     };
     persist_receipt(&receipt)?;
     Ok(receipt)
+}
+fn install_reviewed_registration(plan: &Preview, terminals: &Terminals) -> Result<PathBuf> {
+    if let Some(previous) = &plan.previous_registration
+        && serde_json::to_value(previous).map_err(|_| "Invalid saved binding")?
+            != serde_json::to_value(&plan.registration).map_err(|_| "Invalid new binding")?
+    {
+        return hook_runtime::rebind_opencode(previous, &plan.registration, terminals)
+            .map_err(|e| e.to_string());
+    }
+    hook_runtime::install(&plan.registration).map_err(|e| e.to_string())
 }
 fn persist_receipt(receipt: &Receipt) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(receipt)
@@ -1179,6 +1271,62 @@ mod tests {
                 start_ticks: 600
             }
         );
+        let mut registration = preview(&f.request, &f.terminals).unwrap().registration;
+        registration.scope.harness = Harness::Opencode;
+        registration.server_emitter = Some(server.clone());
+        registration.transcript = None;
+        registration.goal_id = None;
+        let path = hook_runtime::install(&registration).unwrap();
+        hook_runtime::ready_snapshot(&path, proc).unwrap();
+        let con = rusqlite::Connection::open(f.dir.join("hook-observations.sqlite3")).unwrap();
+        let scope = serde_json::to_string(&registration.scope).unwrap();
+        con.execute("INSERT INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) VALUES(?,'old-idle','fixture','\"idle\"',0,1)", [&scope]).unwrap();
+        con.execute(
+            "INSERT INTO hook_reservations(scope,correlation) VALUES(?,'uncertain-old-input')",
+            [&scope],
+        )
+        .unwrap();
+        // The old UI exits; a new incarnation reconnects to its surviving server.
+        let stat = fs::read_to_string(proc.join("42/stat")).unwrap();
+        fs::write(proc.join("42/stat"), stat.replace("500", "501")).unwrap();
+        fs::write(proc.join("42/task/42/children"), b"").unwrap();
+        let next_ui = ProcessIdentity {
+            pid: 42,
+            start_ticks: 501,
+        };
+        let rebound_server =
+            reconnect_opencode_server(&f.dir, &registration.scope.terminal, &next_ui, proc)
+                .unwrap();
+        assert_eq!(rebound_server, server);
+        let mut foreign = registration.scope.terminal.clone();
+        foreign.generation = "different".into();
+        assert!(reconnect_opencode_server(&f.dir, &foreign, &next_ui, proc).is_err());
+        let mut next = registration.clone();
+        next.harness_process = Some(next_ui.clone());
+        let mut changed_policy = next.clone();
+        changed_policy.scope.conversation = "another-session".into();
+        assert!(
+            hook_runtime::rebind_opencode(&registration, &changed_policy, &f.terminals).is_err()
+        );
+        hook_runtime::rebind_opencode(&registration, &next, &f.terminals).unwrap();
+        assert_eq!(
+            hook_runtime::ready_snapshot(&path, proc).unwrap().state,
+            hook_runtime::Readiness::Unknown
+        );
+        assert_eq!(
+            con.query_row(
+                "SELECT correlation FROM hook_reservations WHERE scope=?",
+                [&scope],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "uncertain-old-input"
+        );
+        assert!(hook_runtime::rebind_opencode(&registration, &next, &f.terminals).is_err());
+        // A recycled server PID cannot be recovered from a saved binding.
+        let stat = fs::read_to_string(proc.join("43/stat")).unwrap();
+        fs::write(proc.join("43/stat"), stat.replace("600", "601")).unwrap();
+        assert!(reconnect_opencode_server(&f.dir, &next.scope.terminal, &next_ui, proc).is_err());
         fs::write(proc.join("43/cmdline"), b"opencode\0run\0").unwrap();
         assert!(local_opencode_server(&f.request.process, proc).is_err());
         assert!(

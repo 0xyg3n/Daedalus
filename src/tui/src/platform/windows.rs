@@ -490,6 +490,24 @@ pub struct ProcessIdentity {
 pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
     process_identity_with_parent(pid, None)
 }
+/// Refuse removal while any process still uses this executable. Names only
+/// narrow the snapshot; file identity establishes which installation is in use.
+pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
+    let target = file_identity(&open_regular(executable)?)?;
+    let name = executable
+        .file_name()
+        .ok_or_else(|| denied("Missing executable name"))?;
+    for (pid, parent, observed) in process_snapshot()? {
+        if !observed.eq_ignore_ascii_case(&name.to_string_lossy()) {
+            continue;
+        }
+        let process = process_identity_with_parent(pid, Some(parent))?;
+        if file_identity(&open_regular(&process.executable)?)? == target {
+            return Err(io::Error::other("Installed executable is still running"));
+        }
+    }
+    Ok(())
+}
 fn process_snapshot() -> io::Result<Vec<(u32, u32, String)>> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -811,6 +829,15 @@ pub fn random_bytes(bytes: &mut [u8]) -> io::Result<()> {
 /// Rust's default Windows spawn inherits additional handles even with null stdio.
 pub struct BackgroundProcess(File);
 impl BackgroundProcess {
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        let millis = u32::try_from(timeout.as_millis())
+            .map_err(|_| io::Error::other("Process wait exceeds bound"))?;
+        match unsafe { WaitForSingleObject(self.0.as_raw_handle(), millis) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(last()),
+        }
+    }
     pub fn try_wait(&mut self) -> io::Result<Option<u32>> {
         match unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } {
             WAIT_TIMEOUT => Ok(None),
@@ -835,6 +862,40 @@ impl BackgroundProcess {
             return Err(last());
         }
         Ok(())
+    }
+}
+/// Pin an owned process incarnation before requesting a cooperative shutdown.
+/// The handle continues to identify this process even if its PID is recycled.
+pub fn pin_owned_process(pid: u32, creation_time: u64) -> io::Result<BackgroundProcess> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return Err(last());
+        }
+        let process = File::from_raw_handle(handle);
+        let (_token, user) = token_user(handle)?;
+        if sid_string((*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid)? != current_identity()? {
+            return Err(denied("Foreign process owner"));
+        }
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited = created;
+        let mut kernel = created;
+        let mut usertime = created;
+        if GetProcessTimes(
+            handle,
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut usertime,
+        ) == 0
+        {
+            return Err(last());
+        }
+        let actual = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+        if actual != creation_time || WaitForSingleObject(handle, 0) != WAIT_TIMEOUT {
+            return Err(denied("Process incarnation changed"));
+        }
+        Ok(BackgroundProcess(process))
     }
 }
 pub fn spawn_background(executable: &Path, args: &[&str]) -> io::Result<BackgroundProcess> {

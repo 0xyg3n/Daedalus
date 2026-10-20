@@ -25,6 +25,76 @@ pub fn destination() -> Result<PathBuf, String> {
     Ok(base.join("Daedalus/bin/daedalus.exe"))
 }
 
+/// Run from the uninstaller's temporary helper, never the file being removed.
+/// Only executable installation files are removed by NSIS; private data stays.
+pub fn prepare_uninstall() -> Result<(), String> {
+    let destination = destination()?;
+    let cwd = std::env::current_dir().map_err(|_| "Cannot resolve configuration directory")?;
+    let preferences = super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+    prepare_uninstall_at(
+        &destination,
+        &preferences,
+        std::time::Duration::from_secs(150),
+    )
+}
+
+fn prepare_uninstall_at(
+    destination: &Path,
+    preferences: &Path,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    if !destination.exists() {
+        return Ok(());
+    }
+    verify_installed(destination)?;
+    let deadline = std::time::Instant::now() + timeout;
+    for directory in super::instances::saved_directories(preferences)? {
+        super::telegram_supervisor::stop_for_uninstall(
+            &directory,
+            destination,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        )?;
+    }
+    // Check that the image can actually be removed before NSIS deletes anything.
+    // Never force-stop unrelated TUI, native terminal or agent processes.
+    platform::check_executable_not_running(destination)
+        .map_err(|_| "Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved.".into())
+}
+
+fn verify_installed(destination: &Path) -> Result<(), String> {
+    let base = destination
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("Missing Daedalus install directory")?;
+    let receipt = base.join("install.json");
+    platform::secure_owned_file(&receipt).map_err(|_| "Cannot verify install receipt ownership")?;
+    let bytes = layouts::read_private(&receipt)?
+        .ok_or("Existing Daedalus installer receipt disappeared")?;
+    let record = receipt_record(&bytes)?;
+    let expected = record
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit()))
+        .ok_or("Invalid Daedalus installer receipt checksum")?;
+    if record.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err("Unsupported Daedalus installer receipt".into());
+    }
+    let mut installed = platform::open_regular(destination).map_err(|e| e.to_string())?;
+    let mut previous = Vec::new();
+    Read::by_ref(&mut installed)
+        .take(MAX_BINARY + 1)
+        .read_to_end(&mut previous)
+        .map_err(|e| e.to_string())?;
+    if previous.len() as u64 > MAX_BINARY
+        || !format!("{:x}", Sha256::digest(&previous)).eq_ignore_ascii_case(expected)
+    {
+        return Err(
+            "Installed executable differs from its receipt; installation has been kept".into(),
+        );
+    }
+    Ok(())
+}
+
 fn wait_for_parent(pid: u32) -> Result<(), String> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
@@ -76,38 +146,7 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
 
     let receipt = base.join("install.json");
     if destination.exists() {
-        if !receipt.exists() {
-            return Err(
-                "Existing Daedalus executable has no installer receipt; refusing to replace it"
-                    .into(),
-            );
-        }
-        platform::secure_owned_file(&receipt)
-            .map_err(|e| format!("Cannot secure install receipt: {e}"))?;
-        let record = layouts::read_private(&receipt)?
-            .ok_or("Existing Daedalus installer receipt disappeared")?;
-        let record = receipt_record(&record)?;
-        let expected = record
-            .get("sha256")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit()))
-            .ok_or("Invalid Daedalus installer receipt checksum")?;
-        if record.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-            return Err("Unsupported Daedalus installer receipt".into());
-        }
-        let mut installed = platform::open_regular(&destination).map_err(|e| e.to_string())?;
-        let mut previous = Vec::new();
-        Read::by_ref(&mut installed)
-            .take(MAX_BINARY + 1)
-            .read_to_end(&mut previous)
-            .map_err(|e| e.to_string())?;
-        if previous.len() as u64 > MAX_BINARY
-            || !format!("{:x}", Sha256::digest(&previous)).eq_ignore_ascii_case(expected)
-        {
-            return Err(
-                "Installed executable differs from its receipt; refusing to replace it".into(),
-            );
-        }
+        verify_installed(&destination)?;
     }
     let same_file = if destination.exists() {
         let target = platform::open_regular(&destination).map_err(|e| e.to_string())?;
@@ -171,6 +210,176 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    struct Fixture {
+        root: PathBuf,
+        executable: PathBuf,
+        preferences: PathBuf,
+        directory: PathBuf,
+    }
+    impl Fixture {
+        fn new(saved: bool) -> Self {
+            let mut random = [0u8; 16];
+            platform::random_bytes(&mut random).unwrap();
+            let root = std::env::temp_dir().join(format!(
+                "daedalus-uninstall-{:x}",
+                u128::from_le_bytes(random)
+            ));
+            let executable = root.join("install/bin/daedalus.exe");
+            platform::ensure_private_dir(executable.parent().unwrap()).unwrap();
+            let bytes = fs::read(std::env::current_exe().unwrap()).unwrap();
+            let mut output = platform::create_private_new(&executable).unwrap();
+            output.write_all(&bytes).unwrap();
+            drop(output);
+            layouts::write_private(&root.join("install/install.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"sha256":format!("{:x}",Sha256::digest(&bytes))})).unwrap()).unwrap();
+            let preferences = root.join("config");
+            let directory = if saved {
+                root.join("custom-instance")
+            } else {
+                preferences.clone()
+            };
+            layouts::write_private(
+                &preferences.join("dashboard.json"),
+                &serde_json::to_vec(&serde_json::json!({"instances":[directory]})).unwrap(),
+            )
+            .unwrap();
+            let config = super::super::telegram_config::ServiceConfig {
+                version: 1,
+                instance: "fixture".into(),
+                bot_id: 123,
+                token_file: directory.join("token"),
+                grants: vec![],
+                listen_chats: Default::default(),
+                registrations: vec![],
+                hook_bindings: vec![],
+            };
+            layouts::write_private(
+                &directory.join("telegram-service.json"),
+                &serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            // No real token, network client or provider is used by this child.
+            layouts::write_private(&directory.join("preserve-private-data"), b"fixture").unwrap();
+            Self {
+                root,
+                executable,
+                preferences,
+                directory,
+            }
+        }
+        fn child(&self, ignores_stop: bool) -> std::process::Child {
+            let child = std::process::Command::new(&self.executable)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "app::windows_install::tests::uninstall_service_child",
+                    "--test-threads=1",
+                ])
+                .env("DAEDALUS_UNINSTALL_FIXTURE", &self.directory)
+                .env(
+                    "DAEDALUS_UNINSTALL_IGNORE_STOP",
+                    if ignores_stop { "1" } else { "0" },
+                )
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.directory.join("ready").exists() {
+                assert!(Instant::now() < deadline, "Fixture service did not start");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            child
+        }
+        fn assert_preserved(&self) {
+            assert!(self.executable.exists());
+            assert!(self.root.join("install/install.json").exists());
+            assert_eq!(
+                fs::read(self.directory.join("preserve-private-data")).unwrap(),
+                b"fixture"
+            );
+            assert!(self.directory.join("telegram-service.json").exists());
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    #[test]
+    #[ignore = "Child process fixture; invoked only by the uninstall tests"]
+    fn uninstall_service_child() {
+        let directory = PathBuf::from(std::env::var_os("DAEDALUS_UNINSTALL_FIXTURE").unwrap());
+        let config = super::super::telegram_config::ServiceConfig::load(
+            &directory.join("telegram-service.json"),
+        )
+        .unwrap();
+        let owner = super::super::telegram_service::Owner::acquire(
+            &directory,
+            &directory.join("owners"),
+            config.bot_id,
+        )
+        .unwrap();
+        super::super::telegram_supervisor::record(
+            &directory,
+            &config,
+            super::super::telegram_supervisor::Phase::Running,
+        )
+        .unwrap();
+        layouts::write_private(&directory.join("ready"), b"fixture").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if std::env::var("DAEDALUS_UNINSTALL_IGNORE_STOP").unwrap() != "1"
+                && super::super::telegram_supervisor::stop_requested(&directory).unwrap()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Fixture was not stopped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(owner);
+    }
+    #[test]
+    fn uninstall_waits_for_default_and_saved_service_exit_and_preserves_data() {
+        for saved in [false, true] {
+            let f = Fixture::new(saved);
+            let mut child = f.child(false);
+            let result =
+                prepare_uninstall_at(&f.executable, &f.preferences, Duration::from_secs(10));
+            if result.is_err() {
+                let _ = child.kill();
+            }
+            let status = child.wait().unwrap();
+            result.unwrap();
+            assert!(status.success());
+            f.assert_preserved();
+        }
+    }
+    #[test]
+    fn uninstall_timeout_keeps_installation_and_does_not_force_kill() {
+        let f = Fixture::new(false);
+        let mut child = f.child(true);
+        let result = prepare_uninstall_at(&f.executable, &f.preferences, Duration::from_millis(50));
+        let remained_running = child.try_wait().unwrap().is_none();
+        // Only this isolated test owns and terminates its deliberately stuck child.
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(result.unwrap_err().contains("not finished shutting down"));
+        assert!(remained_running);
+        f.assert_preserved();
+    }
+    #[test]
+    fn uninstall_rejects_receipt_tampering_before_requesting_shutdown() {
+        let f = Fixture::new(false);
+        layouts::write_private(&f.root.join("install/install.json"), br#"{"version":1,"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#).unwrap();
+        assert!(
+            prepare_uninstall_at(&f.executable, &f.preferences, Duration::from_millis(50)).is_err()
+        );
+        assert!(!f.directory.join("telegram-stop.json").exists());
+        f.assert_preserved();
+    }
     #[test]
     fn old_powershell_receipts_and_native_receipts_have_the_same_fields() {
         let json = br#"{"version":1,"sha256":"fixture-checksum"}"#;

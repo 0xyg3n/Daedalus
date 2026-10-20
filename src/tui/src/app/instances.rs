@@ -50,6 +50,28 @@ fn preferences(directory: &Path) -> Result<Value> {
     }
     Ok(value)
 }
+/// Explicitly configured instance roots, without process or home-tree scanning.
+#[cfg(windows)]
+pub(crate) fn saved_directories(preference_directory: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut paths = BTreeSet::from([preference_directory.to_path_buf()]);
+    let value = preferences(preference_directory)?;
+    for path in value["instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(std::iter::once(&value["last_instance"]))
+    {
+        if let Some(path) = path.as_str() {
+            let path = PathBuf::from(path);
+            layouts::check_path(&path)?;
+            paths.insert(path);
+            if paths.len() > MAX_INSTANCES {
+                return Err("Saved instance limit reached".into());
+            }
+        }
+    }
+    Ok(paths)
+}
 /// Remember only an explicitly selected, valid native configuration. Keep other
 /// dashboard keys; serialize updates with the stable configuration lock.
 pub fn remember(preference_directory: &Path, selected: &Path) -> Result<()> {

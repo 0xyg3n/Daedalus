@@ -262,9 +262,12 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "daedalus-pi-session-{}-{}",
+                "daedalus-pi-session-{}-{}-{}",
                 std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()

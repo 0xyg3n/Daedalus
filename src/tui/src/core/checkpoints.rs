@@ -219,11 +219,22 @@ fn codex_launch_sid(argv: &[String]) -> Option<&str> {
 
 /// A fork parent's launch ID is never reported as the new child's ID.
 pub fn resolve_sid(argv: &[String], harness: &str, reported: &str) -> Result<Option<String>> {
+    // OpenCode can switch conversations without restarting its UI. Its current
+    // native selection supersedes the --session value used at process launch.
+    if harness == "opencode" && !reported.is_empty() {
+        return if valid_sid(reported) {
+            Ok(Some(reported.into()))
+        } else {
+            Err("Invalid reported session ID".into())
+        };
+    }
     let forking = argv.iter().any(|a| a == "--fork-session")
         || (harness == "codex" && argv.get(1).is_some_and(|a| a == "fork"));
     let mut ids = Vec::new();
     for pair in argv.windows(2) {
-        if matches!(pair[0].as_str(), "--resume" | "-r" | "--session-id") {
+        if matches!(pair[0].as_str(), "--resume" | "-r" | "--session-id")
+            || (harness == "opencode" && matches!(pair[0].as_str(), "--session" | "-s"))
+        {
             ids.push(pair[1].as_str());
         }
     }
@@ -476,6 +487,26 @@ mod tests {
             resolve_sid(&args, "claude", "child").unwrap(),
             Some("child".into())
         );
+    }
+    #[test]
+    fn opencode_resume_flags_and_current_native_selection_are_distinct() {
+        for flag in ["--session", "-s"] {
+            let args = ["opencode", flag, "ses_original"].map(String::from);
+            assert_eq!(
+                resolve_sid(&args, "opencode", "").unwrap(),
+                Some("ses_original".into())
+            );
+            assert_eq!(
+                resolve_sid(&args, "opencode", "ses_selected").unwrap(),
+                Some("ses_selected".into())
+            );
+            assert_eq!(resolve_sid(&args, "claude", "").unwrap(), None);
+        }
+        assert_eq!(
+            resolve_sid(&["opencode".into()], "opencode", "").unwrap(),
+            None
+        );
+        assert!(resolve_sid(&[], "opencode", "../invalid").is_err());
     }
     #[test]
     fn codex_resume_options_do_not_hide_or_impersonate_session_id() {

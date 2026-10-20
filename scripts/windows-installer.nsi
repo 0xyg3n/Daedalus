@@ -62,10 +62,25 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Daedalus" "UninstallString" "$\"$INSTDIR\Uninstall Daedalus.exe$\""
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Daedalus" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Daedalus" "NoRepair" 1
-  ExecShell "open" "$INSTDIR\bin\daedalus.exe"
+  IfSilent installed
+    ExecShell "open" "$INSTDIR\bin\daedalus.exe"
+  installed:
 SectionEnd
 
 Section "Uninstall"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=daedalus-maintenance.exe "${BINARY}"
+  DetailPrint "Stopping the managed Telegram service gracefully..."
+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\daedalus-maintenance.exe" uninstall --prepare --yes'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "$1"
+    MessageBox MB_OK|MB_ICONSTOP "Daedalus could not finish a safe shutdown. Close its other windows and retry after Telegram stops. No installation files or private configuration were removed.$\r$\n$\r$\n$1"
+    Abort
+  ${EndIf}
+  SetOutPath "$PROFILE"
   ClearErrors
   Delete "$INSTDIR\bin\daedalus.exe"
   IfErrors 0 +3

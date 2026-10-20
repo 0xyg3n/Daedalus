@@ -377,6 +377,46 @@ pub fn install(registration: &Registration) -> Result<PathBuf> {
         .map_err(|_| Error::PrivateState)?;
     Ok(path)
 }
+/// Explicit installer review may replace a stopped OpenCode UI incarnation.
+/// Preserve scope/policy and uncertain reservations; fence old readiness before
+/// publishing the new process binding, so a crash cannot reuse a stale Idle.
+pub(crate) fn rebind_opencode(
+    expected: &Registration,
+    next: &Registration,
+    terminals: &Terminals,
+) -> Result<PathBuf> {
+    next.validate()?;
+    let _active = active_guard(&next.directory)?;
+    let mut policy = expected.clone();
+    policy.harness_process = next.harness_process.clone();
+    policy.server_emitter = next.server_emitter.clone();
+    if next.scope.harness != Harness::Opencode
+        || serde_json::to_value(&policy).map_err(|_| Error::Input)?
+            != serde_json::to_value(next).map_err(|_| Error::Input)?
+        || serde_json::to_value(inspect(&next.path())?).map_err(|_| Error::Input)?
+            != serde_json::to_value(expected).map_err(|_| Error::Input)?
+        || verify_live_session(expected, terminals).is_ok()
+    {
+        return Err(Error::Invalid(
+            "Hook binding changed; review the restarted OpenCode session again",
+        ));
+    }
+    verify_live_session(next, terminals)?;
+    let scope = serde_json::to_string(&next.scope).map_err(|_| Error::Input)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Input)?
+        .as_millis();
+    let con = readiness_connection(&next.directory)?;
+    con.execute("INSERT INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) VALUES(?,?,?,'\"unknown\"',?,1)",
+        params![scope,format!("process-rebind:{}", invocation_id()?),"process binding changed",i64::try_from(now).map_err(|_|Error::Input)?]).map_err(|_| Error::Persistence)?;
+    layouts::write_private(
+        &next.path(),
+        &serde_json::to_vec_pretty(next).map_err(|_| Error::Input)?,
+    )
+    .map_err(|_| Error::PrivateState)?;
+    Ok(next.path())
+}
 pub fn inspect(path: &Path) -> Result<Registration> {
     let file = private_file(path)?;
     if file.metadata().map_err(|_| Error::PrivateState)?.len() > 64 * 1024 {

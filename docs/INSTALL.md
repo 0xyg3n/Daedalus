@@ -37,7 +37,7 @@ it from a source you trust. ARM64 builds have not been tested on real hardware.
 
 ## Native Windows install
 
-Download **Daedalus-0.2.0-beta.23-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.23), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer and `daedalus.exe` use `assets/daedalus.png` as their Windows icon. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
+Download **Daedalus-0.2.0-beta.24-setup.exe** from the [current release](https://github.com/0xyg3n/Daedalus/releases/tag/v0.2.0-beta.24), then double-click it. The self-contained installer needs no PowerShell, Git or compiler. It installs to `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut and opens the TUI. On first run, use its setup flow. The built-in terminal backend needs no separate multiplexer. The installer and `daedalus.exe` use `assets/daedalus.png` as their Windows icon. The installer has no admin requirement and leaves private configuration in place when uninstalled. The release also includes a standalone executable and SHA-256 checksums for advanced users. Stable update checks do not select prereleases.
 
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
@@ -263,8 +263,14 @@ Stop the managed Telegram service from Telegram settings before approving a Wind
 update, and close other Daedalus instances: Windows cannot replace an executable
 while another process is using it. Start Telegram again after installation.
 
-On Windows, close Daedalus and stop its Telegram service before deleting its
-installation prefix; private configuration remains separate.
+On Windows, use **Installed apps → Daedalus → Uninstall**. The uninstaller verifies
+the installation receipt, requests a graceful shutdown of the managed Telegram
+service in the default and saved instances, and waits for the process and its
+ownership lock to be released. It never force-kills agents or terminals. Close
+other Daedalus windows first. If shutdown times out or process identity cannot
+be verified, the installation stays in place so you can retry. Private
+configuration, Telegram routes and credentials are preserved. Optional harnesses
+and terminal backends are not removed.
 
 On Linux, stop its Telegram service, then delete `PREFIX/bin/daedalus`
 and `PREFIX/share/daedalus/`. The configuration directory stays until you delete

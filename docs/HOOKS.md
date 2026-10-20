@@ -6,6 +6,19 @@ Daedalus uses that journal to know when a turn ends, what to send to Telegram an
 whether a goal should continue. Hooks are not a sandbox and do not make tool output
 trusted.
 
+## OpenCode conversations and relaunches
+
+Open or resume a conversation in OpenCode before connecting its pane to Telegram.
+The home screen has no selected conversation ID. Daedalus uses the terminal's
+native selection; it does not select the newest conversation from history.
+After restarting OpenCode, reconnect the pane through Telegram settings and
+review its standard hooks. The installer can rebind the same conversation to
+its new UI process and reuse a still-verified server previously registered for
+that exact terminal. It rejects stale or ambiguous servers and changed policy.
+Rebinding invalidates previous readiness and preserves uncertain input records;
+it does not replay messages or claim that a queued message was delivered.
+A newly selected conversation needs its own reviewed recipient binding.
+
 ## Features
 
 Each registration pins one tool, process start, terminal generation and

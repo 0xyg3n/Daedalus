@@ -110,6 +110,17 @@ enum Step {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
+    if args.first().is_some_and(|arg| arg == "uninstall") {
+        if args != ["uninstall", "--prepare", "--yes"] {
+            return Err(io::Error::other(
+                "Usage: daedalus uninstall --prepare --yes (installer helper)",
+            ));
+        }
+        daedalus_tui::app::windows_install::prepare_uninstall().map_err(io::Error::other)?;
+        println!("Telegram shutdown complete. Private configuration is preserved.");
+        return Ok(());
+    }
+    #[cfg(windows)]
     if args.first().is_some_and(|arg| arg == "install") {
         let wait_pid = match args.as_slice() {
             [install, yes] if install == "install" && yes == "--yes" => None,

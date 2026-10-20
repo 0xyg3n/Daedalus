@@ -337,6 +337,13 @@ pub fn start(directory: &Path) -> Result<Value> {
 
 #[cfg(windows)]
 fn verify(record: &Record, _: &Path) -> Result<()> {
+    verify_windows_executable(
+        record,
+        &std::env::current_exe().map_err(|_| "Cannot inspect native executable")?,
+    )
+}
+#[cfg(windows)]
+fn verify_windows_executable(record: &Record, executable: &Path) -> Result<()> {
     let process = crate::platform::process_identity(record.pid)
         .map_err(|_| "Service process is unavailable")?;
     let owner =
@@ -346,8 +353,16 @@ fn verify(record: &Record, _: &Path) -> Result<()> {
         || process.owner != owner
         || record.start_ticks != process.creation_time
         || record.executable != process.executable
-        || record.executable
-            != std::env::current_exe().map_err(|_| "Cannot inspect native executable")?
+        || crate::platform::file_identity(
+            &crate::platform::open_regular(&record.executable)
+                .map_err(|_| "Cannot inspect service executable")?,
+        )
+        .map_err(|_| "Cannot identify service executable")?
+            != crate::platform::file_identity(
+                &crate::platform::open_regular(executable)
+                    .map_err(|_| "Cannot inspect expected executable")?,
+            )
+            .map_err(|_| "Cannot identify expected executable")?
     {
         return Err("Service process identity changed".into());
     }
@@ -412,6 +427,13 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
     if !held(directory)? {
         return Err("Service already released ownership".into());
     }
+    write_stop_request(directory, expected)?;
+    Ok(
+        json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Ownership remains observed until shutdown finishes."}),
+    )
+}
+#[cfg(windows)]
+fn write_stop_request(directory: &Path, expected: &Record) -> Result<()> {
     let request = StopRequest {
         pid: expected.pid,
         start_ticks: expected.start_ticks,
@@ -421,10 +443,43 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
     layouts::write_private(
         &directory.join("telegram-stop.json"),
         &serde_json::to_vec(&request).map_err(|_| "Cannot encode stop request")?,
-    )?;
-    Ok(
-        json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Ownership remains observed until shutdown finishes."}),
     )
+}
+/// Only the installer uses an explicit, receipt-verified executable. Ordinary
+/// service controls still require the caller's own executable identity.
+#[cfg(windows)]
+pub(crate) fn stop_for_uninstall(
+    directory: &Path,
+    executable: &Path,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    if !held(directory)? {
+        return Ok(());
+    }
+    let bytes = telegram_config::read_private(&directory.join(STATE), 8192)?
+        .ok_or("Telegram is starting; wait and retry uninstall")?;
+    let record: Record =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private service record")?;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    if record.directory != directory
+        || record.instance != config.instance
+        || record.bot_id != config.bot_id
+    {
+        return Err("Telegram instance identity changed; installation has been kept".into());
+    }
+    verify_windows_executable(&record, executable)?;
+    let process = crate::platform::pin_owned_process(record.pid, record.start_ticks)
+        .map_err(|_| "Cannot pin Telegram service for shutdown")?;
+    verify_windows_executable(&record, executable)?;
+    write_stop_request(directory, &record)?;
+    if !process
+        .wait_timeout(timeout)
+        .map_err(|_| "Cannot observe Telegram shutdown")?
+        || held(directory)?
+    {
+        return Err("Telegram has not finished shutting down; installation has been kept. Retry after shutdown completes.".into());
+    }
+    Ok(())
 }
 #[cfg(unix)]
 pub fn stop_requested(_: &Path) -> Result<bool> {
