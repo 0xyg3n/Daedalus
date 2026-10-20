@@ -18,6 +18,13 @@
 <img src="assets/icons/telegram.svg" width="28" alt="Telegram">
 </p>
 
+| <img src="assets/icons/linux.png" height="42" alt="Linux"> Linux | <img src="assets/icons/windows.svg" height="42" alt="Windows"> Windows |
+| :---: | :---: |
+| [**Download for Linux**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/daedalus-0.2.0-beta.31-x86_64-linux) | [**Download Windows installer**](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/Daedalus-0.2.0-beta.31-setup.exe) |
+| x86-64 executable · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/daedalus-0.2.0-beta.31-x86_64-linux.sha256) | x64 setup · [SHA-256](https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.31/Daedalus-0.2.0-beta.31-setup.exe.sha256) |
+
+[Release notes and all downloads](https://github.com/0xyg3n/Daedalus/releases).
+
 <img src="assets/screenshots/demo.gif" alt="Daedalus tour: terminal tree, Tiles, Wall, Cube, resizing and workspace switching" width="100%">
 
 [Watch the 30-second video](assets/screenshots/demo.mp4). The demo uses sample data;
@@ -44,10 +51,16 @@ numbers and aliases; Hindsight supplies scoped memory.
 
 ## Install
 
-| Platform | Get started |
-| --- | --- |
-| Linux x86-64 | Download the executable and matching checksum from [Releases](https://github.com/0xyg3n/Daedalus/releases), or use the source installer below. |
-| Windows x64 | Download `Daedalus-<version>-setup.exe` from [Releases](https://github.com/0xyg3n/Daedalus/releases) and double-click it. No compiler or PowerShell script is required. |
+**Windows:** click **Download Windows installer** above and open the downloaded
+setup file. It installs Daedalus and creates a Start Menu shortcut.
+
+**Linux:** click **Download for Linux**, verify the matching SHA-256 checksum,
+then launch setup:
+
+```sh
+chmod +x daedalus-0.2.0-beta.31-x86_64-linux
+./daedalus-0.2.0-beta.31-x86_64-linux setup
+```
 
 To install from source on Linux:
 

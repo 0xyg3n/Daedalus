@@ -19,3 +19,14 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+Platform download icons:
+
+- assets/icons/linux.png: Tux by Larry Ewing, from
+  https://www.kernel.org/theme/images/logos/tux.png
+  Original artwork: https://isc.tamu.edu/~lewing/linux/
+- assets/icons/windows.svg: Windows client icon from Microsoft Learn,
+  https://learn.microsoft.com/en-us/windows/images/windows-client.svg
+  Copyright Microsoft Corporation. Windows is a Microsoft trademark.
+
+These icons identify the supported platforms; they do not imply endorsement.
