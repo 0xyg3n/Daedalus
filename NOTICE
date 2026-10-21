@@ -25,8 +25,9 @@ Platform download icons:
 - assets/icons/linux.png: Tux by Larry Ewing, from
   https://www.kernel.org/theme/images/logos/tux.png
   Original artwork: https://isc.tamu.edu/~lewing/linux/
-- assets/icons/windows.svg: Windows client icon from Microsoft Learn,
-  https://learn.microsoft.com/en-us/windows/images/windows-client.svg
+- assets/icons/windows.svg: Windows brand symbol reproduced as vector shapes from Microsoft’s
+  Windows trademark guidelines (January 2025, page 3),
+  https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/mscle/documents/presentations/Windows_trademark_guidelines_2025.pdf
   Copyright Microsoft Corporation. Windows is a Microsoft trademark.
 
 These icons identify the supported platforms; they do not imply endorsement.
