@@ -13,6 +13,36 @@ pub fn clean(text: &str) -> String {
 pub fn width(text: &str) -> usize {
     Span::raw(text).width()
 }
+/// Bound query growth equally for pasted and typed input; strip transport controls.
+pub fn append_query(query: &mut String, text: &str, limit: usize) {
+    let room = limit.saturating_sub(query.chars().count());
+    query.extend(text.chars().filter(|c| !c.is_control()).take(room));
+}
+pub fn backspace(query: &mut String) {
+    if let Some((at, _)) = query.grapheme_indices(true).next_back() {
+        query.truncate(at);
+    }
+}
+/// A modal's source is normally immutable while it is read. Reflow only when
+/// its text or width changes; scrolling must not rebuild every wrapped line.
+#[derive(Default)]
+pub struct WrappedText {
+    source: String,
+    columns: usize,
+    lines: Vec<String>,
+}
+impl WrappedText {
+    pub fn lines(&mut self, text: &str, columns: usize) -> &[String] {
+        let columns = columns.max(1);
+        if self.columns != columns || self.source != text {
+            self.source.clear();
+            self.source.push_str(text);
+            self.lines = wrap(text, columns);
+            self.columns = columns;
+        }
+        &self.lines
+    }
+}
 
 pub fn fit(text: &str, max: usize, theme: &Theme) -> String {
     let text = clean(text).replace('\n', " ");
@@ -102,6 +132,27 @@ pub fn wrap(text: &str, max: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_wrapping_reflows_changed_text_and_width_without_stale_lines() {
+        let mut cache = WrappedText::default();
+        assert_eq!(cache.lines("alpha beta", 5), ["alpha", "beta"]);
+        let allocation = cache.lines("alpha beta", 5).as_ptr();
+        assert_eq!(allocation, cache.lines("alpha beta", 5).as_ptr());
+        assert_eq!(cache.lines("gamma beta", 5), ["gamma", "beta"]);
+        assert_eq!(cache.lines("gamma beta", 20), ["gamma beta"]);
+    }
+    #[test]
+    fn pasted_queries_share_limits_and_backspace_removes_whole_graphemes() {
+        let mut query = String::new();
+        append_query(&mut query, "one\n", 4);
+        append_query(&mut query, "two", 4);
+        assert_eq!(query, "onet");
+        query = "👩‍💻e\u{301}".into();
+        backspace(&mut query);
+        assert_eq!(query, "👩‍💻");
+        backspace(&mut query);
+        assert!(query.is_empty());
+    }
 
     #[test]
     fn graphemes_survive_truncation_wrapping_and_editing() {

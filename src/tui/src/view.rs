@@ -145,7 +145,7 @@ fn empty_page(page: usize) -> (&'static str, &'static str) {
         ),
     }
 }
-fn page_count_label(page: usize, count: usize) -> String {
+fn page_count_label(page: usize, count: usize, total: Option<usize>) -> String {
     let (one, many) = match page {
         WORKSPACES => ("node / action", "nodes / actions"),
         COMMANDS => ("command", "commands"),
@@ -153,7 +153,15 @@ fn page_count_label(page: usize, count: usize) -> String {
         9 => ("guide", "guides"),
         _ => ("entry", "entries"),
     };
-    format!("{count} {}", if count == 1 { one } else { many })
+    let quantity = total.map_or_else(|| count.to_string(), |total| format!("{count} / {total}"));
+    format!(
+        "{quantity} {}",
+        if count == 1 && total.is_none() {
+            one
+        } else {
+            many
+        }
+    )
 }
 fn panel<'a>(theme: &Theme, title: Line<'a>) -> Block<'a> {
     Block::default()
@@ -375,15 +383,7 @@ fn saver(f: &mut Frame, ui: &mut Ui) -> bool {
 }
 
 pub fn draw(f: &mut Frame, ui: &mut Ui) {
-    ui.detail_view.area = None;
-    ui.dialog_hits.clear();
-    // Never reuse an old input viewport after resize, a splash or a hidden page.
-    ui.inline_screen = None;
-    ui.view_hits.clear();
-    ui.quick_items.clear();
-    ui.quick_hits.clear();
-    ui.pane_hits.clear();
-    ui.tile_hits.clear();
+    ui.reset_hit_regions();
     if let Some(embed) = ui.embed.as_mut() {
         embed.origin = None;
     }
@@ -401,16 +401,6 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     let theme = ui.theme;
     let area = f.area();
     f.render_widget(Block::default().style(theme.base()), area);
-    ui.nav_hits.clear();
-    ui.list_hits.clear();
-    ui.focus_tree_hits.clear();
-    ui.focus_tree_toggles.clear();
-    ui.focus_tree_area = None;
-    ui.handles.clear();
-    ui.pane_dividers.clear();
-    ui.side_hits.clear();
-    ui.option_hits.clear();
-    ui.tooltip = None;
     if area.width < 44 || area.height < 14 {
         f.render_widget(
             Paragraph::new(vec![
@@ -446,7 +436,6 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     header(f, rows[0], ui, wide);
     ui.wall_roster = false;
     // Whatever draws a terminal preview this frame asks for it again.
-    ui.preview_targets.clear();
     let workspaces = ui.page == WORKSPACES;
     // Preview views reserve the workspace width for terminals; sections stay one key away.
     let side = wide && !(workspaces && ui.view != View::Tree);
@@ -1586,7 +1575,11 @@ fn main_panel(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], peek: bool) 
     let (title, icon, _) = page_meta(ui, ui.page);
     let tone = tone_of(ui);
     let count = rows.iter().filter(|r| r.kind != Kind::Header).count();
-    let count_label = page_count_label(ui.page, count);
+    let count_label = page_count_label(
+        ui.page,
+        count,
+        (!ui.filter.trim().is_empty()).then(|| ui.available_count()),
+    );
     let workspaces = ui.page == WORKSPACES;
     let heading = if workspaces {
         // The view switcher takes the title's place.
@@ -1765,10 +1758,16 @@ fn selection_peek(f: &mut Frame, area: Rect, ui: &Ui, row: Option<&Row>) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn search(f: &mut Frame, area: Rect, ui: &Ui, title: &str) {
+fn search(f: &mut Frame, area: Rect, ui: &mut Ui, title: &str) {
+    ui.search_area = Some(area);
     let theme = ui.theme;
+    let over = hovered(ui, area);
     let field = if theme.color {
-        Style::default().bg(theme.rgb(theme::RAISED))
+        Style::default().bg(theme.rgb(if over || ui.searching {
+            theme::SELECT
+        } else {
+            theme::RAISED
+        }))
     } else {
         Style::default()
     };
@@ -1795,10 +1794,13 @@ fn search(f: &mut Frame, area: Rect, ui: &Ui, title: &str) {
         ])
     } else {
         Line::from(vec![
-            Span::styled(format!(" {icon} "), field.patch(theme.fg(Tone::Faint))),
+            Span::styled(
+                format!(" {icon} "),
+                field.patch(theme.fg(if over { Tone::Accent } else { Tone::Faint })),
+            ),
             Span::styled(
                 format!(
-                    "Search {}{}   press /",
+                    "Search {}{}   click or /",
                     title.to_lowercase(),
                     theme.glyph("…", "...")
                 ),
@@ -2028,12 +2030,18 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
     if ui.offset == selected && selected > 0 && rows[selected - 1].kind == Kind::Header {
         ui.offset = selected - 1;
     }
-    let used = |offset: usize| -> u16 { (offset..=selected).map(|i| height(i, i == offset)).sum() };
-    while ui.offset < selected && used(ui.offset) > area.height {
+    let mut used: usize = (ui.offset..=selected)
+        .map(|i| height(i, i == ui.offset) as usize)
+        .sum();
+    while ui.offset < selected && used > area.height as usize {
+        used = used.saturating_sub(height(ui.offset, true) as usize);
         ui.offset += 1;
+        used = used
+            .saturating_sub(height(ui.offset, false) as usize)
+            .saturating_add(height(ui.offset, true) as usize);
     }
-    let total: u16 = (0..rows.len()).map(|i| height(i, i == 0)).sum();
-    let scroll = total > area.height;
+    let total: usize = (0..rows.len()).map(|i| height(i, i == 0) as usize).sum();
+    let scroll = total > area.height as usize;
     let body = Rect {
         width: area.width.saturating_sub(u16::from(scroll)),
         ..area
@@ -2225,20 +2233,12 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
     if scroll {
         let track = area.height as usize;
         let before: usize = (0..ui.offset).map(|i| height(i, i == 0) as usize).sum();
-        let thumb = (track * track / total as usize).clamp(1, track);
-        let start = (before * track / total as usize).min(track - thumb);
-        let lines: Vec<Line> = (0..track)
-            .map(|i| {
-                if (start..start + thumb).contains(&i) {
-                    Line::from(Span::styled(theme.glyph("┃", "#"), theme.fg(tone)))
-                } else {
-                    Line::from(Span::styled(theme.glyph("│", "|"), theme.fg(Tone::Faint)))
-                }
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines),
+        crate::ui_scroll::scrollbar(
+            f,
             Rect::new(area.right() - 1, area.y, 1, area.height),
+            crate::ui_scroll::Window::new(total, track, before),
+            &theme,
+            tone,
         );
     }
 }
@@ -2888,6 +2888,33 @@ mod tests {
         }
         let mut empty = Ui::default();
         render(&mut empty, 120, 40);
+    }
+    #[test]
+    fn long_output_scrolls_past_the_old_u16_line_limit() {
+        let mut ui = fixture(Theme {
+            reduced_motion: true,
+            ..Theme::default()
+        });
+        ui.dialog = Some(Dialog {
+            mode: "output".into(),
+            title: "Long result".into(),
+            text: format!("{}END_OF_RESULT", "v\n".repeat(70_000)),
+            scroll: usize::MAX,
+            ..Dialog::default()
+        });
+        assert!(text(&render(&mut ui, 100, 30)).contains("END_OF_RESULT"));
+        assert!(ui.dialog.as_ref().unwrap().scroll > 65_535);
+    }
+    #[test]
+    fn shrinking_or_hiding_a_page_drops_preview_targets_and_click_regions() {
+        let mut ui = workspace(Theme::default(), View::Tiles);
+        render(&mut ui, 160, 48);
+        assert!(!ui.preview_targets.is_empty());
+        render(&mut ui, 40, 10);
+        assert!(ui.preview_targets.is_empty());
+        assert!(ui.tile_hits.is_empty());
+        assert!(ui.nav_hits.is_empty());
+        assert!(ui.search_area.is_none());
     }
     #[test]
     fn long_details_can_be_read_without_moving_the_selected_terminal() {

@@ -23,6 +23,17 @@ pub enum Item {
 }
 
 impl Item {
+    pub fn is_action(self) -> bool {
+        matches!(self, Self::Settings | Self::Updates | Self::Reset)
+    }
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Settings => "Open",
+            Self::Updates => "Check",
+            Self::Reset => "Reset",
+            _ => "Change",
+        }
+    }
     pub const ALL: [Item; 16] = [
         Item::Settings,
         Item::Order,

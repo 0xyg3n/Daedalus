@@ -10,6 +10,7 @@ mod shortcuts;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod ui_scroll;
 mod ui_text;
 mod update_ui;
 mod view;
@@ -568,6 +569,7 @@ fn main() -> io::Result<()> {
                 }
                 if matches!(event, Event::Resize(..)) {
                     ui.pane_resize = None;
+                    ui.dragging = None;
                     ui.inline_screen = None;
                     if let Some(embed) = ui.embed.as_mut() {
                         embed.origin = None;
@@ -625,11 +627,16 @@ fn main() -> io::Result<()> {
                             key_event(&mut ui, key)
                         }
                     }
-                    Event::Mouse(mouse) if ui.dialog.is_some() => {
-                        dialog_mouse(&mut ui, mouse);
-                        Step::Continue
+                    Event::Mouse(mouse) => {
+                        if shortcuts::mouse(&mut ui, mouse) {
+                            Step::Continue
+                        } else if ui.dialog.is_some() {
+                            dialog_mouse(&mut ui, mouse);
+                            Step::Continue
+                        } else {
+                            mouse_event(&mut ui, mouse)
+                        }
                     }
-                    Event::Mouse(mouse) => mouse_event(&mut ui, mouse),
                     _ => Step::Continue,
                 };
                 match step {
@@ -871,9 +878,9 @@ fn leave_focus(ui: &mut Ui) {
 
 fn paste(ui: &mut Ui, text: &str) -> Step {
     if let Some(query) = ui.binding_search.as_mut() {
-        let room = 160usize.saturating_sub(query.chars().count());
-        query.extend(text.chars().filter(|c| !c.is_control()).take(room));
+        ui_text::append_query(query, text, 160);
         ui.binding_scroll = 0;
+        ui.binding_notice = None;
         return Step::Continue;
     }
 
@@ -900,13 +907,8 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
         ui.status = "Paste paused until the selected terminal is visible and connected.".into();
         return Step::Continue;
     }
-    let clean: String = text
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(8192)
-        .collect();
     if ui.searching {
-        ui.filter.push_str(&clean);
+        ui_text::append_query(&mut ui.filter, text, 1024);
         ui.select(0, true);
         ui.select_tile(0);
     }
@@ -964,7 +966,7 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
             dialog.moved = Some(Instant::now());
         }
         KeyCode::Home if dialog.mode != "input" => dialog.scroll = 0,
-        KeyCode::End if dialog.mode != "input" => dialog.scroll = u16::MAX,
+        KeyCode::End if dialog.mode != "input" => dialog.scroll = usize::MAX,
         KeyCode::Backspace if dialog.mode == "input" => {
             dialog.erase_input(true);
         }
@@ -1225,6 +1227,18 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
     if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return open_switcher(ui);
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Step::Quit,
+            KeyCode::Char('p') => {
+                leave_focus(ui);
+                ui.navigate(COMMANDS);
+                ui.searching = true;
+                return Step::Continue;
+            }
+            _ => {}
+        }
+    }
     if ui.switching {
         if key.code == KeyCode::Esc {
             ui.switching = false;
@@ -1270,13 +1284,25 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             KeyCode::Down if tiles => ui.move_tile(row),
             KeyCode::Up => ui.move_by(-1),
             KeyCode::Down => ui.move_by(1),
+            KeyCode::PageUp if tiles => ui.move_tile(-10),
+            KeyCode::PageDown if tiles => ui.move_tile(10),
+            KeyCode::Home if tiles => ui.select_tile(0),
+            KeyCode::End if tiles => ui.select_tile(usize::MAX),
+            KeyCode::PageUp => ui.move_by(-10),
+            KeyCode::PageDown => ui.move_by(10),
+            KeyCode::Home => ui.select(0, true),
+            KeyCode::End => ui.select(usize::MAX, false),
             KeyCode::Backspace => {
-                ui.filter.pop();
+                ui_text::backspace(&mut ui.filter);
                 ui.select(0, true);
                 ui.select_tile(0);
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                ui.filter.push(c);
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
+                ui_text::append_query(&mut ui.filter, &c.to_string(), 1024);
                 ui.select(0, true);
                 ui.select_tile(0);
             }
@@ -1302,13 +1328,6 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
         KeyCode::Char(',') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
             open_options(ui);
-            return Step::Continue;
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Step::Quit,
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            leave_focus(ui);
-            ui.navigate(COMMANDS);
-            ui.searching = true;
             return Step::Continue;
         }
         KeyCode::Char('/') if ui.view != View::Focus || !workspaces => {
@@ -1877,6 +1896,16 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         return Step::Continue;
     }
     let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+    if mouse.kind == MouseEventKind::Down(event::MouseButton::Left)
+        && ui.search_area.is_some_and(|area| area.contains(position))
+    {
+        if let Some(mut embed) = ui.embed.take() {
+            embed.detach();
+        }
+        ui.inline_screen = None;
+        ui.searching = true;
+        return Step::Continue;
+    }
     if ui
         .detail_view
         .area
@@ -2087,8 +2116,14 @@ fn options_mouse(ui: &mut Ui, mouse: MouseEvent) {
     };
     let last = Item::ALL.len() - 1;
     match mouse.kind {
-        MouseEventKind::ScrollDown => menu.selected = (menu.selected + 1).min(last),
-        MouseEventKind::ScrollUp => menu.selected = menu.selected.saturating_sub(1),
+        MouseEventKind::ScrollDown => {
+            menu.selected = (menu.selected + 1).min(last);
+            menu.moved = Some(Instant::now());
+        }
+        MouseEventKind::ScrollUp => {
+            menu.selected = menu.selected.saturating_sub(1);
+            menu.moved = Some(Instant::now());
+        }
         MouseEventKind::Down(event::MouseButton::Left) => match hit {
             Some(i) => {
                 menu.selected = i;
@@ -2508,10 +2543,29 @@ fn options_key(ui: &mut Ui, key: KeyEvent) {
             };
             menu.moved = Some(Instant::now());
         }
-        KeyCode::Home => menu.selected = 0,
-        KeyCode::End => menu.selected = last,
-        KeyCode::Left => change_option(ui, item, false),
-        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => change_option(ui, item, true),
+        KeyCode::BackTab => {
+            menu.selected = menu.selected.checked_sub(1).unwrap_or(last);
+            menu.moved = Some(Instant::now());
+        }
+        KeyCode::PageUp => {
+            menu.selected = menu.selected.saturating_sub(5);
+            menu.moved = Some(Instant::now());
+        }
+        KeyCode::PageDown => {
+            menu.selected = menu.selected.saturating_add(5).min(last);
+            menu.moved = Some(Instant::now());
+        }
+        KeyCode::Home => {
+            menu.selected = 0;
+            menu.moved = Some(Instant::now());
+        }
+        KeyCode::End => {
+            menu.selected = last;
+            menu.moved = Some(Instant::now());
+        }
+        KeyCode::Left if !item.is_action() => change_option(ui, item, false),
+        KeyCode::Right if !item.is_action() => change_option(ui, item, true),
+        KeyCode::Enter | KeyCode::Char(' ') => change_option(ui, item, true),
         KeyCode::Char(c) => {
             if let Some(item) = Item::by_key(c) {
                 menu.selected = Item::ALL.iter().position(|i| *i == item).unwrap_or(0);
@@ -2717,6 +2771,71 @@ fn activate(ui: &mut Ui) -> Option<Value> {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn command_search_and_quit_work_while_a_filter_is_active() {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            searching: true,
+            filter: "old query".into(),
+            ..Ui::default()
+        };
+        assert!(matches!(
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            ),
+            Step::Continue
+        ));
+        assert_eq!(ui.page, COMMANDS);
+        assert!(ui.searching);
+        assert!(ui.filter.is_empty());
+        assert!(matches!(
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Step::Quit
+        ));
+    }
+    #[test]
+    fn clicking_search_focuses_the_query_without_opening_a_terminal() {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            search_area: Some(ratatui::layout::Rect::new(4, 2, 30, 1)),
+            ..Ui::default()
+        };
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: 6,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, event), Step::Continue));
+        assert!(ui.searching);
+        assert!(!ui.action_pending);
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(ui.filter, "a");
+    }
+    #[test]
+    fn options_tab_navigation_never_opens_an_action_with_an_arrow() {
+        let mut ui = Ui::default();
+        open_options(&mut ui);
+        options_key(&mut ui, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(ui.options.is_some());
+        assert_eq!(ui.page, OVERVIEW);
+        options_key(
+            &mut ui,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        );
+        assert_eq!(ui.options.as_ref().unwrap().selected, Item::ALL.len() - 1);
+        options_key(&mut ui, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!ui.updates_requested);
+        options_key(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(ui.updates_requested);
+    }
     #[test]
     fn details_scroll_does_not_move_or_activate_the_selected_action() {
         let mut ui = Ui::default();

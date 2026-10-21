@@ -47,26 +47,32 @@ See the [Telegram guide](TELEGRAM.md) for the complete connection flow.
 ## Find a shortcut
 
 Press **F1** to search keyboard shortcuts by key, action or category (for example,
-`Telegram`, `cube`, `resize` or `shell`). Arrow keys scroll the results; F1 or Esc
+`Telegram`, `cube`, `resize` or `shell`). Arrow keys or the mouse wheel scroll the results; F1 or Esc
 closes the window. It also works while attached: typing in this search does not
 reach the terminal. **Ctrl+P** searches executable commands; **Ctrl+K** finds terminals.
 
 Shortcut descriptions wrap to the available width. Paste a search phrase or type
 to filter; Home/End moves to the first or last result. **Options** (`,`) explains the selected preference below its list;
-changes apply immediately. **Settings** holds connection and harness configuration.
+changes apply immediately. Tab / Shift+Tab selects the next / previous option;
+PageUp / PageDown moves five. Left/Right changes preferences; press Enter to open
+settings, check updates or reset panel sizes. **Settings** holds connection and
+harness configuration.
 
 Forms keep pasted secrets hidden and show how many characters were entered.
 Left/Right moves the cursor; Home/End jumps to either end. Backspace/Delete
 removes the character before/after it. Pasting inserts at the cursor, including
 when using Ctrl+V or Shift+Insert on Windows. Enter continues; Esc cancels.
 Click a choice or use the wheel to select it, then press Enter to confirm.
-Choice menus also support Home/End.
+Choice menus also support Home/End and show a scrollbar when their choices overflow.
 Long result dialogs scroll with arrows, PageUp/PageDown or Home/End and show
 their position when space permits. Empty results explain the next step.
 
 The Details panel scrolls independently with **Alt+PageUp / Alt+PageDown** or the
 mouse wheel over its text. Its action stays visible, and selecting another item
-starts at the top. On narrower terminals, a compact selection summary shows
+starts at the top. Click the search bar or press `/` to filter the current list;
+Home/End and PageUp/PageDown move through matches. The heading shows matching and
+total counts. Ctrl+P opens command search while a filter is active.
+On narrower terminals, a compact selection summary shows
 reported status, action badges and context below the list.
 
 ## Workspaces

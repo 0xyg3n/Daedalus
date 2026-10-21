@@ -1441,9 +1441,9 @@ pub(super) fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
             if index < ui.focus_tree_offset {
                 ui.focus_tree_offset = index;
             }
-            while ui.focus_tree_offset < index
-                && heights[ui.focus_tree_offset..=index].iter().sum::<usize>() > visible
-            {
+            let mut used = heights[ui.focus_tree_offset..=index].iter().sum::<usize>();
+            while ui.focus_tree_offset < index && used > visible {
+                used = used.saturating_sub(heights[ui.focus_tree_offset]);
                 ui.focus_tree_offset += 1;
             }
         }

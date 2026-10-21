@@ -5,6 +5,7 @@ use crate::{
     neon,
     options::{self, Item},
     theme::{self, Theme, Tone},
+    ui_scroll::{self, Window},
     ui_text::{clean, fit, input_tail, width, wrap},
 };
 use ratatui::{
@@ -95,30 +96,58 @@ pub(super) fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
     if inner.height < 4 || inner.width < 30 {
         return;
     }
+    let item = Item::ALL[selected];
+    let count = format!("{}/{}", selected + 1, Item::ALL.len());
+    let name = fit(
+        item.label(),
+        (inner.width as usize).saturating_sub(width(&count) + 4),
+        &theme,
+    );
+    let pad = (inner.width as usize).saturating_sub(width(&name) + width(&count) + 3);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", theme.icon(item.icon())),
+                theme.fg(Tone::Accent),
+            ),
+            Span::styled(name, theme.fg(Tone::Text).add_modifier(Modifier::BOLD)),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(count, theme.fg(Tone::Muted)),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let group = if item.group().is_empty() {
+        "Layout"
+    } else {
+        item.group()
+    };
+    let note = match item {
+        Item::Settings => "Enter opens settings",
+        Item::Updates => "Enter checks releases",
+        Item::Reset => "Enter restores default sizes",
+        _ => "Saved with your view",
+    };
     f.render_widget(
         Paragraph::new(Span::styled(
-            fit(
-                "Changes apply at once and are remembered with the view.",
-                inner.width as usize,
-                &theme,
-            ),
+            fit(&format!("{group} · {note}"), inner.width as usize, &theme),
             theme.fg(Tone::Muted),
         )),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
     let help_height = if inner.height >= 12 { 3 } else { 0 };
     let list = Rect::new(
         inner.x,
-        inner.y + 2,
+        inner.y + 3,
         inner.width,
-        inner.height.saturating_sub(3 + help_height),
+        inner.height.saturating_sub(4 + help_height),
     );
     let at = rows
         .iter()
         .position(|r| matches!(r, OptionRow::Item(i) if *i == selected))
         .unwrap_or(0);
-    let start = (at + 1).saturating_sub(list.height as usize);
-    let w = list.width as usize;
+    let window = Window::following(rows.len(), list.height as usize, at);
+    let start = window.offset;
+    let w = list.width.saturating_sub(u16::from(window.overflow())) as usize;
     let label_w = Item::ALL
         .iter()
         .map(|i| width(i.label()))
@@ -132,7 +161,7 @@ pub(super) fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         .enumerate()
     {
         let y = list.y + n as u16;
-        let rect = Rect::new(list.x, y, list.width, 1);
+        let rect = Rect::new(list.x, y, w as u16, 1);
         let i = match row {
             OptionRow::Blank => continue,
             OptionRow::Heading(name) => {
@@ -156,85 +185,8 @@ pub(super) fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         } else {
             Style::default()
         };
-        let key = item.key();
-        let keycap = if key.is_empty() {
-            String::new()
-        } else {
-            format!(" {key} ")
-        };
-        let on = options::is_on(ui, item);
-        let mark = match on {
-            Some(true) => format!("{} ", theme.glyph("━●", "-*")),
-            Some(false) => format!("{} ", theme.glyph("○─", "o-")),
-            None => String::new(),
-        };
-        let (open, close) = if active {
-            (theme.glyph("‹ ", "< "), theme.glyph(" ›", " >"))
-        } else {
-            ("  ", "  ")
-        };
-        let value_room = w.saturating_sub(label_w + 6 + width(&keycap) + 1 + width(&mark) + 4);
-        let value = fit(&options::value(ui, item), value_room, &theme);
-        let label = fit(item.label(), label_w, &theme);
-        let pad = w.saturating_sub(
-            1 + 3
-                + label_w
-                + 2
-                + width(open)
-                + width(&mark)
-                + width(&value)
-                + width(close)
-                + width(&keycap)
-                + 1,
-        );
-        let tone = match on {
-            Some(true) => Tone::Ok,
-            Some(false) => Tone::Faint,
-            None => Tone::Info,
-        };
-        // The new choice decodes briefly as the selection lands on it.
-        let label = if active {
-            neon::decode(
-                &label,
-                since(menu.moved, &theme, 0.16),
-                i as u64,
-                theme.ascii,
-            )
-        } else {
-            label
-        };
-        let label = format!(
-            "{label}{}",
-            " ".repeat(label_w.saturating_sub(width(&label)))
-        );
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    if active { theme.glyph("▌", ">") } else { " " },
-                    base.patch(theme.fg(Tone::Accent)),
-                ),
-                Span::styled(
-                    format!(" {} ", theme.icon(item.icon())),
-                    base.patch(theme.fg(if active { Tone::Accent } else { Tone::Muted })),
-                ),
-                Span::styled(
-                    label,
-                    base.patch(theme.fg(if active { Tone::Text } else { Tone::Muted }))
-                        .add_modifier(if active {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Span::styled("  ", base),
-                Span::styled(open, base.patch(theme.fg(Tone::Accent))),
-                Span::styled(mark, base.patch(theme.fg(tone))),
-                Span::styled(value, base.patch(theme.fg(tone))),
-                Span::styled(close, base.patch(theme.fg(Tone::Accent))),
-                Span::styled(" ".repeat(pad), base),
-                Span::styled(keycap, theme.keycap()),
-                Span::styled(" ", base),
-            ])),
+            Paragraph::new(option_line(ui, item, active, base, w, label_w, menu.moved)),
             rect,
         );
         if active {
@@ -248,6 +200,13 @@ pub(super) fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
         }
         ui.option_hits.push((rect, i));
     }
+    ui_scroll::scrollbar(
+        f,
+        Rect::new(list.right().saturating_sub(1), list.y, 1, list.height),
+        window,
+        &theme,
+        Tone::Accent,
+    );
     let enter = theme.glyph("⏎", "Enter");
     let arrows = theme.glyph("↑↓", "Up/Dn");
     let change = theme.glyph("←→", "Lt/Rt");
@@ -264,18 +223,135 @@ pub(super) fn options_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
             help,
         );
     }
+    let compact = inner.width < 42;
+    let change_key = if item.is_action() || compact {
+        enter.to_owned()
+    } else {
+        format!("{change} / {enter}")
+    };
     f.render_widget(
         Paragraph::new(keys(
             &theme,
             &[
                 (arrows, "Choose"),
-                (&format!("{change} / {enter}"), "Change"),
+                (
+                    &change_key,
+                    if compact && !item.is_action() {
+                        "Set"
+                    } else {
+                        item.verb()
+                    },
+                ),
                 ("Esc", "Close"),
             ],
             inner.width as usize,
         )),
         Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
     );
+}
+
+/// Present values and actions differently; compact rows keep the current value visible.
+fn option_line(
+    ui: &Ui,
+    item: Item,
+    active: bool,
+    base: Style,
+    w: usize,
+    label_width: usize,
+    moved: Option<std::time::Instant>,
+) -> Line<'static> {
+    let theme = ui.theme;
+    let on = options::is_on(ui, item);
+    let tone = match on {
+        Some(true) => Tone::Ok,
+        Some(false) => Tone::Faint,
+        None => Tone::Info,
+    };
+    let compact = w < 58;
+    let label_width = if compact {
+        label_width.min(w.saturating_sub(6) * 3 / 5)
+    } else {
+        label_width
+    };
+    let label = fit(item.label(), label_width, &theme);
+    let label = if active {
+        neon::decode(&label, since(moved, &theme, 0.16), item as u64, theme.ascii)
+    } else {
+        label
+    };
+    let label = format!(
+        "{label}{}",
+        " ".repeat(label_width.saturating_sub(width(&label)))
+    );
+    let mut spans = vec![
+        Span::styled(
+            if active { theme.glyph("▌", ">") } else { " " },
+            base.patch(theme.fg(Tone::Accent)),
+        ),
+        Span::styled(
+            format!(" {} ", theme.icon(item.icon())),
+            base.patch(theme.fg(if active { Tone::Accent } else { Tone::Muted })),
+        ),
+        Span::styled(
+            label,
+            base.patch(theme.fg(if active { Tone::Text } else { Tone::Muted }))
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ),
+    ];
+    if compact {
+        let value = fit(
+            &options::value(ui, item),
+            w.saturating_sub(label_width + 6),
+            &theme,
+        );
+        spans.push(Span::styled(
+            format!(" {value}"),
+            base.patch(theme.fg(tone)),
+        ));
+        let used = spans.iter().map(Span::width).sum::<usize>();
+        spans.push(Span::styled(" ".repeat(w.saturating_sub(used)), base));
+        return Line::from(spans);
+    }
+    let key = if item.key().is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", item.key())
+    };
+    let mark = match on {
+        Some(true) => format!("{} ", theme.glyph("━●", "-*")),
+        Some(false) => format!("{} ", theme.glyph("○─", "o-")),
+        None => String::new(),
+    };
+    let (open, close) = if active && !item.is_action() {
+        (theme.glyph("‹ ", "< "), theme.glyph(" ›", " >"))
+    } else {
+        ("  ", "  ")
+    };
+    let value = fit(
+        &options::value(ui, item),
+        w.saturating_sub(
+            label_width + 10 + width(&key) + width(&mark) + width(open) + width(close),
+        ),
+        &theme,
+    );
+    spans.extend([
+        Span::styled("  ", base),
+        Span::styled(open, base.patch(theme.fg(Tone::Accent))),
+        Span::styled(mark, base.patch(theme.fg(tone))),
+        Span::styled(value, base.patch(theme.fg(tone))),
+        Span::styled(close, base.patch(theme.fg(Tone::Accent))),
+    ]);
+    let used = spans.iter().map(Span::width).sum::<usize>();
+    spans.extend([
+        Span::styled(" ".repeat(w.saturating_sub(used + width(&key) + 1)), base),
+        Span::styled(key, theme.keycap()),
+        Span::styled(" ", base),
+    ]);
+    Line::from(spans)
 }
 
 pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
@@ -288,20 +364,20 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
     let tone = if confirm { Tone::Warn } else { Tone::Accent };
     let modal_width = area.width.saturating_sub(6).min(96);
     let description = if dialog.description.trim().is_empty() {
-        Vec::new()
+        &[][..]
     } else {
-        wrap(
+        dialog.description_cache.lines(
             &dialog.description,
             modal_width.saturating_sub(4).max(1) as usize,
         )
     };
     let wanted = match dialog.mode.as_str() {
-        "input" => 9 + description.len() as u16,
-        "external" => 10 + description.len() as u16,
-        "choose" => 5 + description.len() as u16 + dialog.options.len() as u16 * 3,
+        "input" => 9 + description.len(),
+        "external" => 10 + description.len(),
+        "choose" => 5 + description.len() + dialog.options.len() * 3,
         _ => 34,
     };
-    let height = area.height.saturating_sub(4).min(wanted.max(8));
+    let height = (area.height.saturating_sub(4) as usize).min(wanted.max(8)) as u16;
     let modal = Rect::new(
         area.x + (area.width - modal_width) / 2,
         area.y + (area.height - height) / 2,
@@ -367,15 +443,12 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
     };
     // Keep two choices visible while long review details scroll independently.
     let reserve = if dialog.mode == "choose" { 6 } else { 5 };
-    let desc_height = (description.len() as u16).min(inner.height.saturating_sub(reserve));
+    let desc_height = description
+        .len()
+        .min(inner.height.saturating_sub(reserve) as usize) as u16;
     let description_scroll = if dialog.mode == "choose" {
-        dialog.scroll = dialog.scroll.min(
-            description
-                .len()
-                .saturating_sub(desc_height as usize)
-                .min(u16::MAX as usize) as u16,
-        );
-        dialog.scroll as usize
+        dialog.scroll = Window::new(description.len(), desc_height as usize, dialog.scroll).offset;
+        dialog.scroll
     } else {
         0
     };
@@ -399,7 +472,9 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ),
         regions[0],
     );
-    let w = regions[1].width as usize;
+    let w = regions[1].width.saturating_sub(u16::from(
+        dialog.mode != "input" && dialog.mode != "external",
+    )) as usize;
     let enter = theme.glyph("⏎", "Enter");
     let arrows = theme.glyph("↑↓", "Up/Dn");
     let mut position = None;
@@ -432,7 +507,8 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 3usize
             };
             let capacity = (regions[1].height as usize / per).max(1);
-            let start = dialog.selected.saturating_sub(capacity - 1);
+            let window = Window::following(dialog.options.len(), capacity, dialog.selected);
+            let start = window.offset;
             let mut lines = Vec::new();
             for (i, (value, title, note)) in
                 dialog.options.iter().enumerate().skip(start).take(capacity)
@@ -442,7 +518,7 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                     Rect::new(
                         regions[1].x,
                         y,
-                        regions[1].width,
+                        w as u16,
                         (per as u16).min(regions[1].bottom().saturating_sub(y)),
                     ),
                     i,
@@ -519,6 +595,18 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 }
             }
             f.render_widget(Paragraph::new(lines), regions[1]);
+            ui_scroll::scrollbar(
+                f,
+                Rect::new(
+                    regions[1].right().saturating_sub(1),
+                    regions[1].y,
+                    1,
+                    regions[1].height,
+                ),
+                window,
+                &theme,
+                tone,
+            );
             // A neon wash under the selected choice, brightest at its bar.
             if theme.truecolor && !confirm && !dialog.options.is_empty() {
                 let row = regions[1].y + dialog.selected.saturating_sub(start) as u16 * per as u16;
@@ -630,7 +718,7 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
             vec![(enter, "Open"), ("Esc", "Cancel")]
         }
         _ => {
-            let lines = wrap(
+            let lines = dialog.output_cache.lines(
                 if dialog.text.trim().is_empty() {
                     "No output was returned. Close this view to continue."
                 } else {
@@ -639,22 +727,30 @@ pub(super) fn dialog(f: &mut Frame, area: Rect, ui: &mut Ui) {
                 w,
             );
             let visible = regions[1].height as usize;
-            let most = lines.len().saturating_sub(visible).min(u16::MAX as usize) as u16;
-            dialog.scroll = dialog.scroll.min(most);
+            let window = Window::new(lines.len(), visible, dialog.scroll);
+            let most = window.max_offset();
+            dialog.scroll = window.offset;
             let shown: Vec<Line> = lines
                 .iter()
-                .skip(dialog.scroll as usize)
+                .skip(window.offset)
                 .take(visible)
                 .map(|l| result_line(l, &theme))
                 .collect();
             f.render_widget(Paragraph::new(shown), regions[1]);
+            ui_scroll::scrollbar(
+                f,
+                Rect::new(
+                    regions[1].right().saturating_sub(1),
+                    regions[1].y,
+                    1,
+                    regions[1].height,
+                ),
+                window,
+                &theme,
+                tone,
+            );
             if most > 0 {
-                position = Some(format!(
-                    "{}–{} / {}",
-                    dialog.scroll + 1,
-                    (dialog.scroll as usize + visible).min(lines.len()),
-                    lines.len()
-                ));
+                position = Some(window.label(&theme));
             }
             if most > 0 {
                 vec![("PgUp/PgDn", "Scroll"), (enter, "Close")]

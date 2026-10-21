@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="120" viewBox="0 0 260 120" role="img" aria-label="Download for Windows">
+  <title>Download for Windows</title>
+  <rect x=".5" y=".5" width="259" height="119" rx="12" fill="#161b22" stroke="#30363d"/>
+  <svg x="106" y="16" width="48" height="48" viewBox="0 0 1920 1920" fill="#0078d4"><path d="M0 268l768-107v735H0V268zM1920 0v896H896V143L1920 0zM896 1024h1024v896L896 1777v-753zm-896 0h768v735L0 1652v-628z"/></svg>
+  <text x="130" y="86" text-anchor="middle" font-family="system-ui,Segoe UI,sans-serif" font-size="16" font-weight="600" fill="#f0f6fc">Download for Windows</text>
+  <text x="130" y="107" text-anchor="middle" font-family="system-ui,Segoe UI,sans-serif" font-size="12" fill="#b1bac4">x64 installer</text>
+</svg>

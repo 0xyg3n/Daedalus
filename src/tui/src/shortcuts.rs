@@ -1,6 +1,7 @@
 //! Searchable shortcut reference. Input remains local while the overlay is open.
+use crate::ui_scroll::{self, Window};
 use crate::{model::Ui, theme::Tone};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -32,10 +33,12 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
             "Open a numbered search result",
         ),
         ("Options", "Up / Down / j / k", "Select a setting"),
+        ("Options", "Tab / Shift+Tab", "Next / previous setting"),
+        ("Options", "PageUp / PageDown", "Move five settings"),
         (
             "Options",
             "Left / Right / Enter / Space",
-            "Change selected setting",
+            "Change a preference; Enter opens actions",
         ),
         (
             "Attached terminal",
@@ -255,6 +258,7 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
             Some(String::new())
         };
         ui.binding_scroll = 0;
+        ui.binding_notice = None;
         if let Some(e) = ui.embed.as_mut() {
             e.prefix = false;
         }
@@ -263,33 +267,66 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
     if ui.binding_search.is_none() {
         return false;
     }
+    #[cfg(windows)]
+    if crate::clipboard::paste_key(key) {
+        match crate::clipboard::read() {
+            Ok(text) => {
+                crate::ui_text::append_query(ui.binding_search.as_mut().unwrap(), &text, 160);
+                ui.binding_notice = None;
+                ui.binding_scroll = 0;
+            }
+            Err(error) => ui.binding_notice = Some(error.into()),
+        }
+        return true;
+    }
     match key.code {
         KeyCode::Esc => ui.binding_search = None,
         KeyCode::Up => ui.binding_scroll = ui.binding_scroll.saturating_sub(1),
         KeyCode::Down => {
-            ui.binding_scroll = (ui.binding_scroll + 1).min(matching(ui).len().saturating_sub(1))
+            ui.binding_scroll = ui
+                .binding_scroll
+                .saturating_add(1)
+                .min(matching(ui).len().saturating_sub(1))
         }
         KeyCode::PageDown => {
-            ui.binding_scroll = (ui.binding_scroll + 10).min(matching(ui).len().saturating_sub(1))
+            ui.binding_scroll = ui
+                .binding_scroll
+                .saturating_add(10)
+                .min(matching(ui).len().saturating_sub(1))
         }
         KeyCode::PageUp => ui.binding_scroll = ui.binding_scroll.saturating_sub(10),
         KeyCode::Home => ui.binding_scroll = 0,
         KeyCode::End => ui.binding_scroll = matching(ui).len().saturating_sub(1),
         KeyCode::Backspace => {
-            ui.binding_search.as_mut().unwrap().pop();
+            crate::ui_text::backspace(ui.binding_search.as_mut().unwrap());
             ui.binding_scroll = 0;
+            ui.binding_notice = None;
         }
         KeyCode::Char(c)
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            let q = ui.binding_search.as_mut().unwrap();
-            if q.chars().count() < 160 {
-                q.push(c);
-            }
+            crate::ui_text::append_query(ui.binding_search.as_mut().unwrap(), &c.to_string(), 160);
             ui.binding_scroll = 0;
+            ui.binding_notice = None;
         }
+        _ => {}
+    }
+    true
+}
+pub fn mouse(ui: &mut Ui, mouse: MouseEvent) -> bool {
+    if ui.binding_search.is_none() {
+        return false;
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            ui.binding_scroll = ui
+                .binding_scroll
+                .saturating_add(3)
+                .min(matching(ui).len().saturating_sub(1))
+        }
+        MouseEventKind::ScrollUp => ui.binding_scroll = ui.binding_scroll.saturating_sub(3),
         _ => {}
     }
     true
@@ -317,7 +354,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let rows = matching(ui);
-    let room = inner.width.saturating_sub(2) as usize;
+    let room = inner.width.saturating_sub(3) as usize;
     let query = ui.binding_search.as_deref().unwrap_or("");
     let query = crate::ui_text::input_tail(query, room.saturating_sub(9));
     let header = vec![
@@ -337,16 +374,24 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
             ),
         ]),
         Line::from(Span::styled(
-            format!(
-                " {} {}",
-                rows.len(),
-                if rows.len() == 1 {
-                    "shortcut"
-                } else {
-                    "shortcuts"
-                }
-            ),
-            theme.fg(Tone::Muted),
+            if let Some(notice) = &ui.binding_notice {
+                crate::ui_text::fit(notice, room, &theme)
+            } else {
+                format!(
+                    " {} {}",
+                    rows.len(),
+                    if rows.len() == 1 {
+                        "shortcut"
+                    } else {
+                        "shortcuts"
+                    }
+                )
+            },
+            theme.fg(if ui.binding_notice.is_some() {
+                Tone::Warn
+            } else {
+                Tone::Muted
+            }),
         )),
     ];
     f.render_widget(
@@ -378,7 +423,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
             Span::styled(" ", theme.fg(Tone::Text)),
             Span::styled(format!(" {} ", row.key), theme.keycap()),
         ])];
-        if room >= row.key.chars().count() + row.scope.chars().count() + 6 {
+        if room >= crate::ui_text::width(&row.key) + crate::ui_text::width(&row.scope) + 6 {
             entry[0].spans.push(Span::styled(
                 format!("  {}", row.scope),
                 theme.fg(Tone::Muted),
@@ -390,22 +435,36 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
                 .map(|line| Line::from(Span::styled(format!("  {line}"), theme.fg(Tone::Text)))),
         );
         if lines.len() + entry.len() > body.height as usize {
-            break;
+            if !lines.is_empty() || body.height == 0 {
+                break;
+            }
+            entry.truncate(body.height as usize);
         }
         lines.extend(entry);
         shown += 1;
     }
+    let window = Window::new(rows.len(), shown, start);
     f.render_widget(Paragraph::new(lines), body);
+    ui_scroll::scrollbar(
+        f,
+        Rect::new(body.right().saturating_sub(1), body.y, 1, body.height),
+        window,
+        &theme,
+        Tone::Accent,
+    );
     if inner.height >= 4 {
         let position = if rows.is_empty() {
             String::new()
         } else {
-            format!(" · {}–{} / {}", start + 1, start + shown, rows.len())
+            format!(" · {}", window.label(&theme))
         };
         f.render_widget(
             Paragraph::new(Span::styled(
                 crate::ui_text::fit(
-                    &format!(" Esc Close · ↑↓ Scroll{position}"),
+                    &format!(
+                        " Esc Close · {} Scroll{position}",
+                        theme.glyph("↑↓", "Up/Dn")
+                    ),
                     inner.width as usize,
                     &theme,
                 ),

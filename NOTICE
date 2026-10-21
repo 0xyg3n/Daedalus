@@ -25,9 +25,10 @@ Platform download icons:
 - assets/icons/linux.png: Tux by Larry Ewing, from
   https://www.kernel.org/theme/images/logos/tux.png
   Original artwork: https://isc.tamu.edu/~lewing/linux/
-- assets/icons/windows.svg: Windows brand symbol reproduced as vector shapes from Microsoft’s
-  Windows trademark guidelines (January 2025, page 3),
-  https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/mscle/documents/presentations/Windows_trademark_guidelines_2025.pdf
+- assets/icons/windows.svg and assets/badges/download-windows.svg: WindowsLogoIcon
+  from Microsoft Fluent UI (the viewBox is fitted to the symbol bounds),
+  https://github.com/microsoft/fluentui/blob/master/packages/react-icons-mdl2-branded/src/components/WindowsLogoIcon.tsx
   Copyright Microsoft Corporation. Windows is a Microsoft trademark.
+- assets/badges/download-linux.svg embeds the same Tux artwork credited above.
 
 These icons identify the supported platforms; they do not imply endorsement.

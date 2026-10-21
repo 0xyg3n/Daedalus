@@ -616,16 +616,52 @@ struct Forest<'a> {
     children: HashMap<&'a str, Vec<usize>>,
     key: Vec<(bool, f64)>,
 }
+/// One indexed ancestry walk per projection, shared by search and selection.
+/// A malformed parent cycle must never trap the interface in a refresh.
+struct NodeIndex<'a> {
+    nodes: HashMap<&'a str, &'a Node>,
+}
+impl<'a> NodeIndex<'a> {
+    fn new(nodes: &'a [Node]) -> Self {
+        let mut index = HashMap::with_capacity(nodes.len());
+        for node in nodes {
+            index.entry(node.id.as_str()).or_insert(node);
+        }
+        Self { nodes: index }
+    }
+    fn chain<'b>(&'b self, first: &'b str) -> impl Iterator<Item = &'a Node> + 'b {
+        let mut current = Some(first);
+        let mut seen = HashSet::new();
+        std::iter::from_fn(move || {
+            let key = current.take()?;
+            if !seen.insert(key) {
+                return None;
+            }
+            let node = self.nodes.get(key).copied()?;
+            current = Some(node.parent.as_str());
+            Some(node)
+        })
+    }
+}
 impl Forest<'_> {
-    fn walk(&self, items: &[usize], prefix: &str, out: &mut Vec<(usize, String)>) {
+    fn walk(
+        &self,
+        items: &[usize],
+        prefix: &str,
+        out: &mut Vec<(usize, String)>,
+        visited: &mut HashSet<usize>,
+    ) {
         let mut sorted = items.to_vec();
         sorted.sort_by_key(|&i| recency(self.key[i].0, self.key[i].1));
         for (n, &i) in sorted.iter().enumerate() {
+            if !visited.insert(i) {
+                continue;
+            }
             let last = n + 1 == sorted.len();
             out.push((i, format!("{prefix}{}", if last { "└─ " } else { "├─ " })));
             if let Some(kids) = self.children.get(self.nodes[i].id.as_str()) {
                 let deeper = format!("{prefix}{}", if last { "   " } else { "│  " });
-                self.walk(kids, &deeper, out);
+                self.walk(kids, &deeper, out, visited);
             }
         }
     }
@@ -834,12 +870,14 @@ pub struct Dialog {
     /// Icon names beside options, where the backend sends them.
     pub icons: Vec<String>,
     pub text: String,
+    pub output_cache: crate::ui_text::WrappedText,
+    pub description_cache: crate::ui_text::WrappedText,
     pub secret: bool,
     pub input: String,
     /// Byte position on a grapheme boundary; None follows the end of a new form.
     pub input_cursor: Option<usize>,
     pub selected: usize,
-    pub scroll: u16,
+    pub scroll: usize,
     /// When it opened and when the choice last moved, for the menu's
     /// decode effect; unset, everything shows at once.
     pub opened: Option<Instant>,
@@ -1078,6 +1116,7 @@ impl DetailView {
 pub struct Ui {
     pub binding_search: Option<String>,
     pub binding_scroll: usize,
+    pub binding_notice: Option<String>,
     pub snapshot: Snapshot,
     pub theme: Theme,
     pub page: usize,
@@ -1088,6 +1127,7 @@ pub struct Ui {
     pub detail_view: DetailView,
     pub filter: String,
     pub searching: bool,
+    pub search_area: Option<ratatui::layout::Rect>,
     pub switching: bool,
     pub collapsed: HashSet<String>,
     pub dialog: Option<Dialog>,
@@ -1235,6 +1275,49 @@ fn search_hint(terms: &[String], shown: &str, aliases: &[String]) -> Option<Stri
 }
 
 impl Ui {
+    /// A hidden or resized view cannot keep clickable geometry or capture targets.
+    pub fn reset_hit_regions(&mut self) {
+        self.detail_view.area = None;
+        self.search_area = None;
+        self.inline_screen = None;
+        self.dialog_hits.clear();
+        self.view_hits.clear();
+        self.quick_items.clear();
+        self.quick_hits.clear();
+        self.pane_hits.clear();
+        self.tile_hits.clear();
+        self.nav_hits.clear();
+        self.list_hits.clear();
+        self.focus_tree_hits.clear();
+        self.focus_tree_toggles.clear();
+        self.focus_tree_area = None;
+        self.handles.clear();
+        self.pane_dividers.clear();
+        self.side_hits.clear();
+        self.option_hits.clear();
+        self.option_panel = ratatui::layout::Rect::default();
+        self.tooltip = None;
+        self.preview_targets.clear();
+    }
+    pub fn available_count(&self) -> usize {
+        if self.switching {
+            return self
+                .snapshot
+                .tree
+                .iter()
+                .filter(|n| n.kind == "pane" && n.tile.is_some())
+                .count();
+        }
+        if self.page == COMMANDS {
+            return self.snapshot.catalog.len();
+        }
+        self.section().map_or(0, |section| section.items.len())
+            + if self.page == WORKSPACES {
+                self.snapshot.tree.len()
+            } else {
+                0
+            }
+    }
     pub fn page_count(&self) -> usize {
         if self.snapshot.sections.is_empty() {
             PAGES
@@ -1269,6 +1352,18 @@ impl Ui {
         rows
     }
     fn switch_rows(&self, terms: &[String]) -> Vec<Row> {
+        let index = NodeIndex::new(&self.snapshot.tree);
+        let mut pins = HashMap::new();
+        for (rank, pin) in self
+            .snapshot
+            .workspace
+            .pins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.status == "live")
+        {
+            pins.entry(pin.id.as_str()).or_insert(rank);
+        }
         let mut entries: Vec<_> = self
             .snapshot
             .tree
@@ -1278,16 +1373,10 @@ impl Ui {
                 if n.kind != "pane" || n.tile.is_none() {
                     return None;
                 }
-                let mut path = Vec::new();
-                let mut parent = n.parent.as_str();
-                let mut seen = HashSet::new();
-                while let Some(p) = self.snapshot.tree.iter().find(|p| p.id == parent) {
-                    if !seen.insert(&p.id) {
-                        break;
-                    }
-                    path.push(p.label.as_str());
-                    parent = &p.parent;
-                }
+                let mut path = index
+                    .chain(&n.parent)
+                    .map(|p| p.label.as_str())
+                    .collect::<Vec<_>>();
                 path.reverse();
                 let place = path.join(" › ");
                 let fields = n
@@ -1302,12 +1391,7 @@ impl Ui {
                 ) {
                     return None;
                 }
-                let pinned = self
-                    .snapshot
-                    .workspace
-                    .pins
-                    .iter()
-                    .position(|p| p.id == n.id && p.status == "live");
+                let pinned = pins.get(n.id.as_str()).copied();
                 Some((i, n, place, pinned))
             })
             .collect();
@@ -1357,6 +1441,7 @@ impl Ui {
         let nodes = &self.snapshot.tree;
         let mut visible: HashSet<&str> = HashSet::new();
         if !terms.is_empty() {
+            let index = NodeIndex::new(nodes);
             for n in nodes {
                 // Field values, and label parts such as the program's topic.
                 let fields: Vec<&str> = n
@@ -1369,12 +1454,10 @@ impl Ui {
                     terms,
                     &format!("{} {} {} {}", n.label, n.state, n.kind, fields.join(" ")),
                 ) {
-                    let mut key = n.id.as_str();
-                    while let Some(node) = nodes.iter().find(|n| n.id == key) {
-                        if !visible.insert(key) {
+                    for node in index.chain(&n.id) {
+                        if !visible.insert(node.id.as_str()) {
                             break;
                         }
-                        key = &node.parent;
                     }
                 }
             }
@@ -1478,7 +1561,7 @@ impl Ui {
             children,
             key,
         }
-        .walk(&roots, "", &mut out);
+        .walk(&roots, "", &mut out, &mut HashSet::new());
         out
     }
     /// The split layout of the tab holding terminal `id`, when the tab
@@ -1797,22 +1880,20 @@ impl Ui {
                 }
             }
             View::Tree => {
-                let mut key = id.to_owned();
-                while let Some(n) = self.snapshot.tree.iter().find(|n| n.id == key) {
-                    self.collapsed.remove(&n.parent);
-                    key = n.parent.clone();
-                }
+                self.unfold_ancestors(id);
                 self.select_id(id);
             }
             View::Focus => {
                 self.focus_target = id.to_owned();
                 self.focus_tree_reveal = true;
-                let mut key = id.to_owned();
-                while let Some(n) = self.snapshot.tree.iter().find(|n| n.id == key) {
-                    self.collapsed.remove(&n.parent);
-                    key = n.parent.clone();
-                }
+                self.unfold_ancestors(id);
             }
+        }
+    }
+    fn unfold_ancestors(&mut self, id: &str) {
+        let index = NodeIndex::new(&self.snapshot.tree);
+        for node in index.chain(id) {
+            self.collapsed.remove(&node.parent);
         }
     }
     /// Nearest selectable row, preferring the direction of travel.
@@ -1923,14 +2004,15 @@ impl Ui {
     }
     pub fn update(&mut self, mut snapshot: Snapshot) {
         let old = self.selected_row();
-        let mut ancestry = Vec::new();
-        if let Some(ref row) = old {
-            let mut key = row.parent.clone();
-            while let Some(n) = self.snapshot.tree.iter().find(|n| n.id == key) {
-                ancestry.push(n.id.clone());
-                key = n.parent.clone();
-            }
-        }
+        let ancestry = old
+            .as_ref()
+            .map(|row| {
+                NodeIndex::new(&self.snapshot.tree)
+                    .chain(&row.parent)
+                    .map(|node| node.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if snapshot.catalog.is_empty() {
             snapshot.catalog = std::mem::take(&mut self.snapshot.catalog);
         }
@@ -1991,11 +2073,7 @@ impl Ui {
             // Reveal the focused item: clear the filter and unfold its ancestors.
             self.filter.clear();
             self.searching = false;
-            let mut key = focus.clone();
-            while let Some(n) = self.snapshot.tree.iter().find(|n| n.id == key) {
-                self.collapsed.remove(&n.parent);
-                key = n.parent.clone();
-            }
+            self.unfold_ancestors(&focus);
             if self.select_id(&focus) {
                 return;
             }
@@ -2020,6 +2098,53 @@ impl Ui {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    #[test]
+    fn parent_cycles_cannot_trap_selection_or_inventory_refresh() {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            order: Order::Layout,
+            ..Ui::default()
+        };
+        ui.snapshot.tree = vec![
+            Node {
+                id: "one".into(),
+                parent: "two".into(),
+                kind: "pane".into(),
+                ..Node::default()
+            },
+            Node {
+                id: "two".into(),
+                parent: "one".into(),
+                kind: "pane".into(),
+                ..Node::default()
+            },
+        ];
+        ui.collapsed.extend(["one".into(), "two".into()]);
+        ui.reveal("one");
+        assert!(ui.collapsed.is_empty());
+        assert_eq!(ui.selected_row().unwrap().id, "one");
+        ui.update(Snapshot::default());
+        assert!(ui.snapshot.tree.is_empty());
+    }
+    #[test]
+    fn duplicated_ids_do_not_recurse_forever_in_activity_order() {
+        let mut ui = Ui::default();
+        ui.snapshot.tree = vec![
+            Node {
+                id: "same".into(),
+                parent: "missing".into(),
+                ..Node::default()
+            },
+            Node {
+                id: "same".into(),
+                parent: "same".into(),
+                ..Node::default()
+            },
+        ];
+        let rows = ui.tree_order();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].0, rows[1].0);
+    }
     #[test]
     fn form_editing_preserves_graphemes_and_inserts_at_the_cursor() {
         let mut dialog = Dialog {

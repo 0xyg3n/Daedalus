@@ -405,11 +405,11 @@ pub(super) fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row
     let available = (rest.height as usize).saturating_sub(footer.len());
     let overflow = lines.len() > available;
     let room = available.saturating_sub(usize::from(overflow));
-    ui.detail_view.max_scroll = lines.len().saturating_sub(room);
-    ui.detail_view.scroll = ui.detail_view.scroll.min(ui.detail_view.max_scroll);
+    let window = crate::ui_scroll::Window::new(lines.len(), room, ui.detail_view.scroll);
+    ui.detail_view.max_scroll = window.max_offset();
+    ui.detail_view.scroll = window.offset;
     let body = Rect::new(rest.x, rest.y, rest.width, room as u16);
     ui.detail_view.area = (room > 0).then_some(body);
-    let total = lines.len();
     let shown = lines
         .into_iter()
         .skip(ui.detail_view.scroll)
@@ -417,12 +417,7 @@ pub(super) fn inspector(f: &mut Frame, area: Rect, ui: &mut Ui, row: Option<&Row
         .collect::<Vec<_>>();
     f.render_widget(Paragraph::new(shown), body);
     if overflow && available > 0 {
-        let position = format!(
-            " {}–{} / {}",
-            ui.detail_view.scroll + 1,
-            (ui.detail_view.scroll + room).min(total),
-            total
-        );
+        let position = format!(" {}", window.label(&theme));
         let hint = if rest.width >= 48 {
             " Alt+PgUp/PgDn or wheel"
         } else {

@@ -16,7 +16,11 @@ once. The protocol is not a network API.
 
 `view.rs` composes navigation and lists. Modules in `view/` own the overview,
 selected-record details, dialogs and terminal layouts. `ui_text.rs` supplies
-shared grapheme-aware fitting, wrapping and input display. Form editing and
+shared grapheme-aware fitting, wrapping and input display. Wrapped dialog text is
+cached until its source or width changes. `ui_scroll.rs` shares viewport bounds
+and scroll indicators across lists and overlays; source positions use `usize`
+independently of terminal dimensions. Inventory projections index parent links
+and stop at cycles. Form editing and
 independent inspector scrolling live in the UI model; rendering does not perform
 backend operations. Selecting a modal choice is separate from confirming it.
 

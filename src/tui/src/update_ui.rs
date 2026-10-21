@@ -1,5 +1,6 @@
 //! Launch, exit and manual update checks with explicit consent. Workers never own UI state.
 use crate::theme::{Theme, Tone};
+use crate::ui_scroll::{self, Window};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use daedalus_tui::app::update::{self, InstallReceipt, UpdateReview, UpdateStatus};
 use ratatui::{
@@ -33,7 +34,8 @@ pub struct Controller {
     pending_prompt: bool,
     update_selected: bool,
     installing: bool,
-    body_scroll: u16,
+    body_scroll: usize,
+    body_cache: crate::ui_text::WrappedText,
     #[cfg(any(windows, test))]
     pending_installer: Option<PathBuf>,
     later_hit: Rect,
@@ -62,6 +64,7 @@ impl Controller {
             update_selected: false,
             installing: false,
             body_scroll: 0,
+            body_cache: crate::ui_text::WrappedText::default(),
             #[cfg(any(windows, test))]
             pending_installer: None,
             later_hit: Rect::default(),
@@ -283,7 +286,7 @@ impl Controller {
             KeyCode::PageUp => self.body_scroll = self.body_scroll.saturating_sub(8),
             KeyCode::PageDown => self.body_scroll = self.body_scroll.saturating_add(8),
             KeyCode::Home => self.body_scroll = 0,
-            KeyCode::End => self.body_scroll = u16::MAX,
+            KeyCode::End => self.body_scroll = usize::MAX,
             KeyCode::Left | KeyCode::Right | KeyCode::Tab if self.review.is_some() => {
                 self.update_selected = !self.update_selected;
             }
@@ -296,6 +299,11 @@ impl Controller {
     pub fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if !self.visible {
             return false;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.body_scroll = self.body_scroll.saturating_add(3),
+            MouseEventKind::ScrollUp => self.body_scroll = self.body_scroll.saturating_sub(3),
+            _ => {}
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let point = ratatui::layout::Position::new(mouse.column, mouse.row);
@@ -386,8 +394,15 @@ impl Controller {
             inner.width,
             inner.height.saturating_sub(4),
         );
-        let lines = crate::ui_text::wrap(&detail, body.width.saturating_sub(2) as usize)
-            .into_iter()
+        let wrapped = self
+            .body_cache
+            .lines(&detail, body.width.saturating_sub(2) as usize);
+        let window = Window::new(wrapped.len(), body.height as usize, self.body_scroll);
+        self.body_scroll = window.offset;
+        let shown = wrapped
+            .iter()
+            .skip(window.offset)
+            .take(window.visible)
             .map(|line| {
                 if let Some((label, value)) = line.split_once(": ")
                     && matches!(label, "Release" | "Platform" | "Download" | "Install")
@@ -401,20 +416,19 @@ impl Controller {
                 }
             })
             .collect::<Vec<_>>();
-        let most = lines
-            .len()
-            .saturating_sub(body.height as usize)
-            .min(u16::MAX as usize) as u16;
-        self.body_scroll = self.body_scroll.min(most);
-        frame.render_widget(Paragraph::new(lines).scroll((self.body_scroll, 0)), body);
-        if most > 0 && inner.height >= 3 {
+        frame.render_widget(Paragraph::new(shown), body);
+        ui_scroll::scrollbar(
+            frame,
+            Rect::new(body.right().saturating_sub(1), body.y, 1, body.height),
+            window,
+            theme,
+            Tone::Accent,
+        );
+        if window.overflow() && inner.height >= 3 {
             let hint = format!(
-                " {} Scroll details · {}–{} / {}",
+                " {} Scroll details · {}",
                 theme.glyph("↑↓", "Up/Dn"),
-                self.body_scroll + 1,
-                (self.body_scroll as usize + body.height as usize)
-                    .min(most as usize + body.height as usize),
-                most as usize + body.height as usize
+                window.label(theme)
             );
             frame.render_widget(
                 Paragraph::new(Span::styled(
