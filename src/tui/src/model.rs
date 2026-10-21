@@ -836,6 +836,8 @@ pub struct Dialog {
     pub text: String,
     pub secret: bool,
     pub input: String,
+    /// Byte position on a grapheme boundary; None follows the end of a new form.
+    pub input_cursor: Option<usize>,
     pub selected: usize,
     pub scroll: u16,
     /// When it opened and when the choice last moved, for the menu's
@@ -844,6 +846,76 @@ pub struct Dialog {
     pub moved: Option<Instant>,
 }
 impl Dialog {
+    pub fn cursor(&self) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
+        let at = self
+            .input_cursor
+            .unwrap_or(self.input.len())
+            .min(self.input.len());
+        if at == self.input.len() {
+            return at;
+        }
+        self.input
+            .grapheme_indices(true)
+            .map(|(at, _)| at)
+            .take_while(|&boundary| boundary <= at)
+            .last()
+            .unwrap_or(0)
+    }
+    pub fn insert_text(&mut self, text: &str) {
+        use unicode_segmentation::UnicodeSegmentation;
+        let cleaned: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(8192)
+            .collect();
+        let room = 32768usize.saturating_sub(self.input.len());
+        let mut end = 0;
+        for (at, cluster) in cleaned.grapheme_indices(true) {
+            if at + cluster.len() > room {
+                break;
+            }
+            end = at + cluster.len();
+        }
+        let cursor = self.cursor();
+        self.input.insert_str(cursor, &cleaned[..end]);
+        let next = cursor + end;
+        self.input_cursor = Some(if next == self.input.len() {
+            next
+        } else {
+            self.input
+                .grapheme_indices(true)
+                .map(|(at, _)| at)
+                .find(|&at| at >= next)
+                .unwrap_or(self.input.len())
+        });
+    }
+    pub fn move_cursor(&mut self, forward: bool) {
+        use unicode_segmentation::UnicodeSegmentation;
+        let cursor = self.cursor();
+        self.input_cursor = Some(if forward {
+            self.input
+                .grapheme_indices(true)
+                .map(|(at, _)| at)
+                .find(|&at| at > cursor)
+                .unwrap_or(self.input.len())
+        } else {
+            self.input
+                .grapheme_indices(true)
+                .map(|(at, _)| at)
+                .take_while(|&at| at < cursor)
+                .last()
+                .unwrap_or(0)
+        });
+    }
+    pub fn erase_input(&mut self, backwards: bool) {
+        let cursor = self.cursor();
+        self.move_cursor(!backwards);
+        let other = self.cursor();
+        self.input
+            .replace_range(cursor.min(other)..cursor.max(other), "");
+        self.input_cursor = Some(cursor.min(other));
+    }
     pub fn from(value: Value) -> Self {
         let s = |name| value[name].as_str().unwrap_or("").to_owned();
         Self {
@@ -987,6 +1059,22 @@ impl Saver {
     }
 }
 #[derive(Default)]
+pub struct DetailView {
+    pub key: (usize, String),
+    pub scroll: usize,
+    pub max_scroll: usize,
+    pub area: Option<ratatui::layout::Rect>,
+}
+impl DetailView {
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(delta)
+            .min(self.max_scroll);
+    }
+}
+
+#[derive(Default)]
 pub struct Ui {
     pub binding_search: Option<String>,
     pub binding_scroll: usize,
@@ -996,11 +1084,15 @@ pub struct Ui {
     pub selected: usize,
     /// First visible row of the main list.
     pub offset: usize,
+    /// The inspector scrolls independently from the action or terminal list.
+    pub detail_view: DetailView,
     pub filter: String,
     pub searching: bool,
     pub switching: bool,
     pub collapsed: HashSet<String>,
     pub dialog: Option<Dialog>,
+    /// Choice rows from the current modal only; a click selects, Enter confirms.
+    pub dialog_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub busy: bool,
     pub status: String,
     pub status_error: bool,
@@ -1928,6 +2020,43 @@ impl Ui {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    #[test]
+    fn form_editing_preserves_graphemes_and_inserts_at_the_cursor() {
+        let mut dialog = Dialog {
+            input: "a👩‍💻e\u{301}界".into(),
+            ..Dialog::default()
+        };
+        dialog.move_cursor(false);
+        assert_eq!(&dialog.input[dialog.cursor()..], "界");
+        dialog.erase_input(true);
+        assert_eq!(dialog.input, "a👩‍💻界");
+        dialog.insert_text("X\n\t");
+        assert_eq!(dialog.input, "a👩‍💻X界");
+        dialog.erase_input(false);
+        assert_eq!(dialog.input, "a👩‍💻X");
+        dialog.input_cursor = Some(1);
+        dialog.erase_input(false);
+        assert_eq!(dialog.input, "aX");
+        dialog.input_cursor = Some(0);
+        dialog.erase_input(true);
+        assert_eq!(dialog.input, "aX");
+    }
+    #[test]
+    fn pasted_fields_are_bounded_without_cutting_unicode() {
+        let mut dialog = Dialog::default();
+        for _ in 0..8 {
+            dialog.insert_text(&"界".repeat(8192));
+        }
+        assert!(dialog.input.len() <= 32768);
+        assert_eq!(dialog.input.len() % 3, 0);
+        assert_eq!(dialog.cursor(), dialog.input.len());
+        dialog.input_cursor = Some(1);
+        assert_eq!(
+            dialog.cursor(),
+            0,
+            "a partial wide glyph cannot become a cursor"
+        );
+    }
     fn fixture() -> Ui {
         let mut ui = Ui {
             page: WORKSPACES,

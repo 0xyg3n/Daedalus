@@ -14,6 +14,12 @@ it over a local, versioned JSON protocol (version 2). Requests carry state queri
 previews, exact-target operations and dialog answers; each confirmation can be used
 once. The protocol is not a network API.
 
+`view.rs` composes navigation and lists. Modules in `view/` own the overview,
+selected-record details, dialogs and terminal layouts. `ui_text.rs` supplies
+shared grapheme-aware fitting, wrapping and input display. Form editing and
+independent inspector scrolling live in the UI model; rendering does not perform
+backend operations. Selecting a modal choice is separate from confirming it.
+
 ## Native terminal backend
 
 `app/native_terminal.rs` owns a detached PTY/ConPTY daemon for each native

@@ -10,6 +10,7 @@ mod shortcuts;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod ui_text;
 mod update_ui;
 mod view;
 use crossterm::{
@@ -624,7 +625,11 @@ fn main() -> io::Result<()> {
                             key_event(&mut ui, key)
                         }
                     }
-                    Event::Mouse(mouse) if ui.dialog.is_none() => mouse_event(&mut ui, mouse),
+                    Event::Mouse(mouse) if ui.dialog.is_some() => {
+                        dialog_mouse(&mut ui, mouse);
+                        Step::Continue
+                    }
+                    Event::Mouse(mouse) => mouse_event(&mut ui, mouse),
                     _ => Step::Continue,
                 };
                 match step {
@@ -853,7 +858,7 @@ fn close_focus(ui: &mut Ui) {
 }
 
 /// Leaving Workspaces stops a live view; nothing streams in the background.
-/// Page of a number key in sidebar order: 1 is the first page, 0 the tenth.
+/// Stable page shortcut shown beside each entry: 1 starts, 0 opens Help.
 fn digit_page(c: char) -> usize {
     (c as usize - '0' as usize + 9) % 10
 }
@@ -865,19 +870,17 @@ fn leave_focus(ui: &mut Ui) {
 }
 
 fn paste(ui: &mut Ui, text: &str) -> Step {
-    if ui.binding_search.is_some() {
+    if let Some(query) = ui.binding_search.as_mut() {
+        let room = 160usize.saturating_sub(query.chars().count());
+        query.extend(text.chars().filter(|c| !c.is_control()).take(room));
+        ui.binding_scroll = 0;
         return Step::Continue;
     }
 
     // A form owns paste even when a controlled terminal remains behind it.
     if let Some(dialog) = ui.dialog.as_mut() {
         if dialog.mode == "input" {
-            let clean: String = text
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(8192)
-                .collect();
-            dialog.input.push_str(&clean);
+            dialog.insert_text(text);
         }
         return Step::Continue;
     }
@@ -915,9 +918,7 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
     #[cfg(windows)]
     if dialog.mode == "input" && clipboard::paste_key(key) {
         match clipboard::read() {
-            Ok(text) => dialog
-                .input
-                .extend(text.chars().filter(|c| !c.is_control()).take(8192)),
+            Ok(text) => dialog.insert_text(&text),
             Err(message) => dialog.description = message.into(),
         }
         ui.dialog = Some(dialog);
@@ -965,14 +966,20 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
         KeyCode::Home if dialog.mode != "input" => dialog.scroll = 0,
         KeyCode::End if dialog.mode != "input" => dialog.scroll = u16::MAX,
         KeyCode::Backspace if dialog.mode == "input" => {
-            dialog.input.pop();
+            dialog.erase_input(true);
         }
+        KeyCode::Delete if dialog.mode == "input" => dialog.erase_input(false),
+        KeyCode::Left if dialog.mode == "input" => dialog.move_cursor(false),
+        KeyCode::Right if dialog.mode == "input" => dialog.move_cursor(true),
+        KeyCode::Home if dialog.mode == "input" => dialog.input_cursor = Some(0),
+        KeyCode::End if dialog.mode == "input" => dialog.input_cursor = Some(dialog.input.len()),
         KeyCode::Char(c)
             if dialog.mode == "input"
-                && !key.modifiers.contains(KeyModifiers::CONTROL)
-                && dialog.input.len() < 32768 =>
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            dialog.input.push(c);
+            dialog.insert_text(&c.to_string());
         }
         _ => {}
     }
@@ -994,6 +1001,43 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
     }
     host.send(json!({"op":"reply","id":dialog.id,"value":value}))?;
     Ok(external)
+}
+
+/// A modal owns mouse input; choosing a row never confirms an action.
+fn dialog_mouse(ui: &mut Ui, mouse: MouseEvent) {
+    if ui.binding_search.is_some() {
+        return;
+    }
+    let Some(dialog) = ui.dialog.as_mut() else {
+        return;
+    };
+    match mouse.kind {
+        MouseEventKind::Down(event::MouseButton::Left) if dialog.mode == "choose" => {
+            let at = ratatui::layout::Position::new(mouse.column, mouse.row);
+            if let Some((_, selected)) = ui.dialog_hits.iter().find(|(rect, _)| rect.contains(at)) {
+                dialog.selected = *selected;
+                dialog.moved = Some(Instant::now());
+            }
+        }
+        MouseEventKind::ScrollDown if dialog.mode == "choose" => {
+            dialog.selected = dialog
+                .selected
+                .saturating_add(1)
+                .min(dialog.options.len().saturating_sub(1));
+            dialog.moved = Some(Instant::now());
+        }
+        MouseEventKind::ScrollUp if dialog.mode == "choose" => {
+            dialog.selected = dialog.selected.saturating_sub(1);
+            dialog.moved = Some(Instant::now());
+        }
+        MouseEventKind::ScrollDown if dialog.mode != "input" => {
+            dialog.scroll = dialog.scroll.saturating_add(3)
+        }
+        MouseEventKind::ScrollUp if dialog.mode != "input" => {
+            dialog.scroll = dialog.scroll.saturating_sub(3)
+        }
+        _ => {}
+    }
 }
 
 /// The key after Ctrl+] while a terminal is open in Focus.
@@ -1199,6 +1243,19 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
     }
     let tiles = ui.page == WORKSPACES && ui.view.grid();
+    if ui.detail_view.area.is_some() && key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::PageUp => {
+                ui.detail_view.scroll_by(-8);
+                return Step::Continue;
+            }
+            KeyCode::PageDown => {
+                ui.detail_view.scroll_by(8);
+                return Step::Continue;
+            }
+            _ => {}
+        }
+    }
     if ui.searching {
         let row = ui.tile_columns.max(1) as isize;
         match key.code {
@@ -1820,6 +1877,23 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         return Step::Continue;
     }
     let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+    if ui
+        .detail_view
+        .area
+        .is_some_and(|area| area.contains(position))
+    {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                ui.detail_view.scroll_by(3);
+                return Step::Continue;
+            }
+            MouseEventKind::ScrollUp => {
+                ui.detail_view.scroll_by(-3);
+                return Step::Continue;
+            }
+            _ => {}
+        }
+    }
     if ui.focus_tree_area.is_some_and(|r| r.contains(position)) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
@@ -2643,6 +2717,89 @@ fn activate(ui: &mut Ui) -> Option<Value> {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn details_scroll_does_not_move_or_activate_the_selected_action() {
+        let mut ui = Ui::default();
+        ui.detail_view.area = Some(ratatui::layout::Rect::new(80, 4, 40, 20));
+        ui.detail_view.max_scroll = 25;
+        let selected = ui.selected;
+        assert!(matches!(
+            key_event(&mut ui, KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT)),
+            Step::Continue
+        ));
+        assert_eq!(ui.detail_view.scroll, 8);
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 82,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, event), Step::Continue));
+        assert_eq!(ui.detail_view.scroll, 11);
+        assert_eq!(ui.selected, selected);
+        assert!(!ui.busy);
+    }
+    #[test]
+    fn modal_mouse_selection_is_local_and_never_confirms_a_choice() {
+        let mut ui = Ui {
+            dialog: Some(Dialog {
+                mode: "choose".into(),
+                options: vec![
+                    (
+                        "cancel".into(),
+                        "Cancel".into(),
+                        "Keep current values".into(),
+                    ),
+                    ("yes".into(), "Apply".into(), "Use reviewed values".into()),
+                ],
+                ..Dialog::default()
+            }),
+            ..Ui::default()
+        };
+        ui.dialog_hits
+            .push((ratatui::layout::Rect::new(8, 5, 30, 2), 1));
+        dialog_mouse(
+            &mut ui,
+            MouseEvent {
+                kind: MouseEventKind::Down(event::MouseButton::Left),
+                column: 10,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(ui.dialog.as_ref().unwrap().selected, 1);
+        assert!(!ui.busy && !ui.action_pending);
+        ui.binding_search = Some(String::new());
+        dialog_mouse(
+            &mut ui,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            ui.dialog.as_ref().unwrap().selected,
+            1,
+            "the help overlay owns input"
+        );
+    }
+    #[test]
+    fn shortcut_paste_is_bounded_and_does_not_modify_a_form_behind_it() {
+        let mut ui = Ui {
+            binding_search: Some(String::new()),
+            dialog: Some(Dialog {
+                mode: "input".into(),
+                input: "unchanged".into(),
+                ..Dialog::default()
+            }),
+            ..Ui::default()
+        };
+        paste(&mut ui, &"界\n".repeat(200));
+        assert_eq!(ui.binding_search.as_ref().unwrap().chars().count(), 160);
+        assert_eq!(ui.dialog.as_ref().unwrap().input, "unchanged");
+    }
     use std::process::Command;
     fn press(ui: &mut Ui, code: KeyCode) -> Option<Value> {
         match key_event(ui, KeyEvent::new(code, KeyModifiers::NONE)) {

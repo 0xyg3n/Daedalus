@@ -45,6 +45,11 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ("Lists", "Up / Down", "Select previous / next item"),
         ("Lists", "PageUp / PageDown", "Move ten rows"),
         ("Lists", "Home / End", "First / last item"),
+        (
+            "Details",
+            "Alt+PageUp / Alt+PageDown",
+            "Scroll the details panel without moving the selection",
+        ),
         ("Lists", "Enter", "Open selected item or terminal menu"),
         (
             "Workspaces",
@@ -191,6 +196,16 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ),
         ("Dialogs", "Esc", "Cancel or close without applying changes"),
         (
+            "Forms",
+            "Left / Right / Home / End",
+            "Move the cursor inside the current field",
+        ),
+        (
+            "Forms",
+            "Backspace / Delete",
+            "Remove the character before / after the cursor",
+        ),
+        (
             "Dialogs",
             "Enter",
             "Confirm selected choice or entered value",
@@ -270,7 +285,7 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             let q = ui.binding_search.as_mut().unwrap();
-            if q.len() < 160 {
+            if q.chars().count() < 160 {
                 q.push(c);
             }
             ui.binding_scroll = 0;
@@ -304,7 +319,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
     let rows = matching(ui);
     let room = inner.width.saturating_sub(2) as usize;
     let query = ui.binding_search.as_deref().unwrap_or("");
-    let query = crate::view::input_tail(query, room.saturating_sub(9));
+    let query = crate::ui_text::input_tail(query, room.saturating_sub(9));
     let header = vec![
         Line::from(vec![
             Span::styled(" Search  ", theme.fg(Tone::Info)),
@@ -348,7 +363,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
     let mut lines = Vec::new();
     let mut shown = 0;
     if rows.is_empty() {
-        for line in crate::view::wrap(
+        for line in crate::ui_text::wrap(
             "No shortcuts match. Try Telegram, cube, shell or resize.",
             room,
         ) {
@@ -370,7 +385,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
             ));
         }
         entry.extend(
-            crate::view::wrap(&row.description, room.saturating_sub(2))
+            crate::ui_text::wrap(&row.description, room.saturating_sub(2))
                 .into_iter()
                 .map(|line| Line::from(Span::styled(format!("  {line}"), theme.fg(Tone::Text)))),
         );
@@ -389,7 +404,7 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
         };
         f.render_widget(
             Paragraph::new(Span::styled(
-                crate::view::fit(
+                crate::ui_text::fit(
                     &format!(" Esc Close · ↑↓ Scroll{position}"),
                     inner.width as usize,
                     &theme,

@@ -375,7 +375,7 @@ impl Controller {
         let version = format!(" Installed {}", env!("CARGO_PKG_VERSION"));
         frame.render_widget(
             Paragraph::new(Span::styled(
-                crate::view::fit(&version, inner.width as usize, theme),
+                crate::ui_text::fit(&version, inner.width as usize, theme),
                 theme.fg(Tone::Muted),
             )),
             Rect::new(inner.x, inner.y, inner.width, 1.min(inner.height)),
@@ -386,7 +386,7 @@ impl Controller {
             inner.width,
             inner.height.saturating_sub(4),
         );
-        let lines = crate::view::wrap(&detail, body.width.saturating_sub(2) as usize)
+        let lines = crate::ui_text::wrap(&detail, body.width.saturating_sub(2) as usize)
             .into_iter()
             .map(|line| {
                 if let Some((label, value)) = line.split_once(": ")
@@ -418,7 +418,7 @@ impl Controller {
             );
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    crate::view::fit(&hint, inner.width as usize, theme),
+                    crate::ui_text::fit(&hint, inner.width as usize, theme),
                     theme.fg(Tone::Muted),
                 )),
                 Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),

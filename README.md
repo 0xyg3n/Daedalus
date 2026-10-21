@@ -21,16 +21,16 @@
 <table align="center">
   <tr>
     <td align="center" valign="middle" width="300">
-      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/daedalus-0.2.0-beta.33-x86_64-linux"><img src="assets/icons/linux.png" height="42" alt="Linux"></a><br>
+      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/daedalus-0.2.0-beta.34-x86_64-linux"><img src="assets/icons/linux.png" height="42" alt="Linux"></a><br>
       <strong>Linux</strong><br>
-      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/daedalus-0.2.0-beta.33-x86_64-linux"><strong>Download for Linux</strong></a><br>
-      x86-64 executable · <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/daedalus-0.2.0-beta.33-x86_64-linux.sha256">SHA-256</a>
+      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/daedalus-0.2.0-beta.34-x86_64-linux"><strong>Download for Linux</strong></a><br>
+      x86-64 executable · <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/daedalus-0.2.0-beta.34-x86_64-linux.sha256">SHA-256</a>
     </td>
     <td align="center" valign="middle" width="300">
-      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/Daedalus-0.2.0-beta.33-setup.exe"><img src="assets/icons/windows.svg" width="42" height="42" alt="Windows"></a><br>
+      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/Daedalus-0.2.0-beta.34-setup.exe"><img src="assets/icons/windows.svg" width="42" height="42" alt="Windows"></a><br>
       <strong>Windows</strong><br>
-      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/Daedalus-0.2.0-beta.33-setup.exe"><strong>Download Windows installer</strong></a><br>
-      x64 setup · <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.33/Daedalus-0.2.0-beta.33-setup.exe.sha256">SHA-256</a>
+      <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/Daedalus-0.2.0-beta.34-setup.exe"><strong>Download Windows installer</strong></a><br>
+      x64 setup · <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.34/Daedalus-0.2.0-beta.34-setup.exe.sha256">SHA-256</a>
     </td>
   </tr>
 </table>
@@ -70,8 +70,8 @@ setup file. It installs Daedalus and creates a Start Menu shortcut.
 then launch setup:
 
 ```sh
-chmod +x daedalus-0.2.0-beta.33-x86_64-linux
-./daedalus-0.2.0-beta.33-x86_64-linux setup
+chmod +x daedalus-0.2.0-beta.34-x86_64-linux
+./daedalus-0.2.0-beta.34-x86_64-linux setup
 ```
 
 To install from source on Linux:
