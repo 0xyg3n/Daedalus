@@ -1065,12 +1065,17 @@ fn stream(id: &str, generation: &str, control: bool, cols: u16, rows: u16) -> Re
                     lease.request(json!({"op":"input","bytes":value["bytes"]}))?;
                 }
                 Some("terminal.resize") => {
-                    let lease = lease
-                        .as_ref()
-                        .ok_or("Observer cannot resize the source terminal")?;
-                    lease.request(
-                        json!({"op":"resize","cols":value["cols"],"rows":value["rows"]}),
-                    )?;
+                    let cols = value["cols"].as_u64().and_then(|n| u16::try_from(n).ok());
+                    let rows = value["rows"].as_u64().and_then(|n| u16::try_from(n).ok());
+                    if let (Some(cols), Some(rows)) = (cols, rows) {
+                        if let Some(lease) = &lease {
+                            lease.request(json!({"op":"resize","cols":cols,"rows":rows}))?;
+                        } else {
+                            // Size a free terminal to the view. A controller keeps
+                            // its size; the view wraps that screen instead.
+                            let _ = resize(id, generation, cols, rows);
+                        }
+                    }
                 }
                 _ => return Err("Unknown terminal stream command".into()),
             }

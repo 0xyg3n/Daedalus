@@ -796,7 +796,12 @@ fn open_embed(ui: &mut Ui, plan: &Value) {
     }
     ui.inline_screen = None;
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
-    let (rows, cols) = view::focus_size(cols, rows);
+    // Zoomed Focus draws on the whole pane, so the stream starts at that size.
+    let (rows, cols) = if ui.zoomed && ui.view == View::Focus {
+        (rows, cols)
+    } else {
+        view::focus_size(cols, rows)
+    };
     let node = plan.node.clone();
     let control = plan.mode == "control";
     match Embed::start(plan, rows, cols) {
@@ -1755,7 +1760,6 @@ fn focus_pane(ui: &mut Ui, id: &str) -> Step {
     ui.reveal(id);
     ui.takeover_armed = false;
     ui.last_preview = None;
-    ui.zoomed = false;
     ui.fullscreen_from = None;
     quick_action(ui, "terminal.watch")
 }
@@ -1803,7 +1807,8 @@ fn switch_view(ui: &mut Ui, target: View) -> Step {
     // Remembered once it settles, like a panel size.
     ui.sizes_changed = Some(Instant::now());
     if target == View::Focus {
-        // Focus starts read-only; attaching for input is a separate choice.
+        // One terminal, full size. Z shows the tab once the window can hold it.
+        ui.zoomed = true;
         return quick_action(ui, "terminal.watch");
     }
     Step::Continue

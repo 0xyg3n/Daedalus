@@ -1584,22 +1584,32 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         Some((Phase::Live, Mode::Control)) => ("CONTROL", Tone::Warn),
         Some((Phase::Live, Mode::Observe)) => ("OBSERVE", Tone::Accent),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(theme.border())
-        .border_style(theme.fg(if chip == "CONTROL" {
-            Tone::Warn
-        } else {
-            Tone::Faint
-        }))
-        .style(theme.surface());
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if chip != "CONTROL" {
-        // Control keeps its amber edge: input goes to the terminal.
-        glow(f.buffer_mut(), area, &theme, page_hue(ui), 0.6);
-    }
-    switcher(f, area.x + 2, area.y, area.width.saturating_sub(4), ui);
+    // Zoomed, the terminal is the pane. A frame would hide a row and a column.
+    let full = ui.zoomed;
+    let inner = if full {
+        area
+    } else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme.border())
+            .border_style(theme.fg(if chip == "CONTROL" {
+                Tone::Warn
+            } else {
+                Tone::Faint
+            }))
+            .style(theme.surface())
+            .title_top(
+                Line::from(Span::styled(format!(" {chip} "), theme.fg(tone))).right_aligned(),
+            );
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if chip != "CONTROL" {
+            // Control keeps its amber edge: input goes to the terminal.
+            glow(f.buffer_mut(), area, &theme, page_hue(ui), 0.6);
+        }
+        switcher(f, area.x + 2, area.y, area.width.saturating_sub(4), ui);
+        inner
+    };
     let (views, input) = match (&ui.embed, &node) {
         (Some(e), _) => (e.plan.views, e.plan.input.clone()),
         (None, Some(n)) => (n.tile.as_ref().map(|t| t.views).unwrap_or(0), String::new()),
@@ -1631,77 +1641,26 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         format!(" {} ", parts.join(" · "))
     };
     let w = width(&facts) as u16;
-    if w > 0 && w + 32 < area.width {
+    if !full && w > 0 && w + 32 < area.width {
         f.render_widget(
             Paragraph::new(Span::styled(facts, theme.fg(Tone::Info))),
             Rect::new(area.right() - w - 1, area.y, w, 1),
         );
     }
-    if inner.height < 3 || inner.width < 20 {
+    if inner.height < 2 || inner.width < 2 {
         return None;
     }
-    let title = match (&ui.embed, &node) {
-        (Some(e), _) if !e.plan.title.is_empty() => e.plan.title.clone(),
-        (_, Some(n)) => n.label.clone(),
-        _ => "No terminal selected".into(),
-    };
-    let notice = ui
-        .embed
-        .as_ref()
-        .map(|e| e.notice.clone())
-        .filter(|n| !n.is_empty())
-        .unwrap_or(input);
-    let cap = format!(" {chip} ");
-    let chip_style = if theme.color {
-        Style::default()
-            .bg(theme.rgb(tone.rgb()))
-            .fg(theme.rgb(theme::BG))
-            .add_modifier(Modifier::BOLD)
+    let _ = input;
+    let screen = inner;
+    let hints = if full {
+        Rect::new(area.x, area.bottom() - 1, area.width, 1)
     } else {
-        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        Rect::new(area.x + 1, area.bottom() - 1, area.width.saturating_sub(2), 1)
     };
-    let room = (inner.width as usize).saturating_sub(width(&cap) + 2);
-    let title = fit(
-        &title,
-        (room / 2).max(room.saturating_sub(width(&notice) + 3)),
-        &theme,
-    );
-    let notice = fit(&notice, room.saturating_sub(width(&title) + 3), &theme);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(cap, chip_style),
-            Span::styled(
-                format!(" {title}"),
-                theme.fg(Tone::Text).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {notice}"), theme.fg(Tone::Muted)),
-        ])),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    let context = u16::from(inner.height >= 12 && node.is_some());
-    if context > 0
-        && let Some(node) = &node
-    {
-        let folder = session_field(node, "Folder")
-            .unwrap_or_else(|| node.tile.as_ref().map_or("", |t| t.place.as_str()));
-        let context = format!(" {} · {}", session_meta(node), clean(folder));
-        f.render_widget(
-            Paragraph::new(fit(&context, usize::from(inner.width), &theme))
-                .style(theme.fg(Tone::Muted)),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
-        );
-    }
-    let screen = Rect::new(
-        inner.x,
-        inner.y + 1 + context,
-        inner.width,
-        inner.height.saturating_sub(2 + context),
-    );
-    let hints = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
     // A terminal in a split tab is shown with its neighbors, where the
     // backend places them; z zooms it alone.
     let current = node.as_ref().map(|n| n.id.clone()).unwrap_or_default();
-    let layout = if ui.zoomed {
+    let layout = if ui.zoomed || screen.width < 80 || screen.height < 16 {
         None
     } else {
         ui.tab_layout(&current).cloned()
@@ -1710,6 +1669,10 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         Some(layout) => split_panes(f, screen, ui, &layout, &current),
         None => focus_screen(f, screen, ui, node.is_some()),
     };
+    // The command menu is the only overlay. A status line would cover a row.
+    if full && !ui.embed.as_ref().is_some_and(|e| e.prefix) {
+        return cursor;
+    }
     let control = ui
         .embed
         .as_ref()
@@ -1814,6 +1777,10 @@ pub(super) fn focus_screen(
         return None;
     }
     ui.inline_screen = Some(screen);
+    // Only the full Focus view sizes a tmux window. A tile must not.
+    if ui.zoomed && ui.view == View::Focus && embed.is_tmux() {
+        embed.fit = true;
+    }
     embed.resize(screen.height, screen.width);
     let cursor = embed.render(screen, f.buffer_mut(), &theme);
     if let Phase::Ended(reason) = &embed.phase {

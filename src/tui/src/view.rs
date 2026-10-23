@@ -423,6 +423,12 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         );
         return;
     }
+    // Zoomed Focus is the terminal. A header, key bar or border would hide rows.
+    if ui.page == WORKSPACES && ui.view == View::Focus && ui.zoomed {
+        let cursor = focus_panel(f, area, ui);
+        present(f, ui, area, area, cursor, None);
+        return;
+    }
     let wide = area.width >= 100 && area.height >= 20;
     let rows = split(
         area,
@@ -487,28 +493,18 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
     } else if workspaces && ui.view == View::Wall {
         wall_panel(f, content, ui);
     } else if workspaces && ui.view == View::Focus {
-        if content.width >= 80 && content.height >= 12 {
-            let width = (content.width * 3 / 10)
-                .clamp(30, 48)
-                .min(content.width.saturating_sub(50));
+        // The terminal fills the page. A side tree only appears when the
+        // window is large enough that the screen still shows every column.
+        let show_tree = !ui.zoomed && content.width >= 120 && content.height >= 36;
+        if show_tree {
+            let width = (content.width / 5).clamp(24, 36);
             let columns = split(
                 content,
                 Direction::Horizontal,
-                vec![Constraint::Length(width), Constraint::Min(50)],
+                vec![Constraint::Length(width), Constraint::Min(80)],
             );
             focus_structure(f, columns[0], ui);
             cursor = focus_panel(f, columns[1], ui);
-        } else if content.height >= 20 {
-            let parts = split(
-                content,
-                Direction::Vertical,
-                vec![
-                    Constraint::Length(if content.height < 24 { 6 } else { 8 }),
-                    Constraint::Min(12),
-                ],
-            );
-            focus_structure(f, parts[0], ui);
-            cursor = focus_panel(f, parts[1], ui);
         } else {
             cursor = focus_panel(f, content, ui);
         }
@@ -561,8 +557,23 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
             ui.status = "Input paused: enlarge the terminal window to see the selected pane. Ctrl+] then D detaches.".into();
         }
     }
+    present(f, ui, area, content, cursor, Some(rows[2]));
+}
+
+/// Dialogs, the key bar and the cursor, after the page itself is drawn.
+fn present(
+    f: &mut Frame,
+    ui: &mut Ui,
+    area: Rect,
+    content: Rect,
+    cursor: Option<(u16, u16)>,
+    keys: Option<Rect>,
+) {
+    let theme = ui.theme;
     light_handle(f, ui);
-    footer(f, rows[2], ui);
+    if let Some(keys) = keys {
+        footer(f, keys, ui);
+    }
     // Before the page fade and any dialog, so both dim the background too.
     match ui.look {
         Look::Glow => {
@@ -3874,6 +3885,17 @@ mod tests {
         assert!(!rendered.contains("preview-ok"));
         assert!(ui.preview_targets.is_empty());
         assert!(ui.pane_hits.is_empty());
+    }
+    #[test]
+    fn zoomed_focus_fills_the_pane_without_the_frame() {
+        let mut ui = workspace(Theme::default(), View::Focus);
+        ui.zoomed = true;
+        let rendered = text(&render(&mut ui, 66, 23));
+        assert!(rendered.contains("Not connected"), "{rendered}");
+        assert!(!rendered.contains("DAEDALUS"), "{rendered}");
+        let mut framed = workspace(Theme::default(), View::Focus);
+        let framed = text(&render(&mut framed, 66, 23));
+        assert!(framed.contains("DAEDALUS"), "{framed}");
     }
     #[test]
     fn details_map_a_split_tab_with_the_selected_terminal_bright() {

@@ -1024,20 +1024,16 @@ impl Embed {
         }
         if self.is_tmux() {
             if changed && self.fit {
+                self.command(Purpose::Flags, "refresh-client -f '!ignore-size'");
                 self.command(Purpose::Flags, &format!("refresh-client -C {cols}x{rows}"));
             }
         } else if self.requested != (rows, cols) {
-            if self.mode == Mode::Control {
-                // A Herdr controller owns the terminal size, like a native attach.
-                // A layout can settle while Connecting. Compare with the size sent
-                // to the client, not the viewport recorded before it became live.
-                self.requested = (rows, cols);
-                self.herdr_line(&format!(
-                    r#"{{"type":"terminal.resize","cols":{cols},"rows":{rows}}}"#
-                ));
-            } else {
-                self.respawn = true;
-            }
+            // Size the source to this view. A cropped window hides the rest of
+            // the terminal; observe used to restart instead of resizing.
+            self.requested = (rows, cols);
+            self.herdr_line(&format!(
+                r#"{{"type":"terminal.resize","cols":{cols},"rows":{rows}}}"#
+            ));
         }
     }
 
@@ -1052,23 +1048,25 @@ impl Embed {
 
     /// Draw the visible part of the screen. Returns the cursor cell when shown.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) -> Option<(u16, u16)> {
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-        let (cursor_row, cursor_col) = screen.cursor_position();
-        // Follow the cursor when the terminal is larger than the view.
-        let follow = |len: u16, view: u16, at: u16| {
-            if len <= view {
-                0
-            } else {
-                at.saturating_add(1).saturating_sub(view).min(len - view)
-            }
+        let (rows, cols, cursor_row, cursor_col) = {
+            let screen = self.parser.screen();
+            let (rows, cols) = screen.size();
+            let (cursor_row, cursor_col) = screen.cursor_position();
+            (rows, cols, cursor_row, cursor_col)
         };
-        let top = follow(rows, area.height, cursor_row);
-        let left = follow(cols, area.width, cursor_col);
+        // A wider screen used to slide sideways and hide the rest of the line.
+        if area.width >= 2 && cols > area.width {
+            return self.paint_wrapped(area, buf, theme);
+        }
+        // Show every column. Extra rows keep the latest lines, until resize
+        // makes the source the same size as this view.
+        let top = rows.saturating_sub(area.height);
+        let left = 0;
         self.scroll = (top, left);
         let shown_w = cols.saturating_sub(left).min(area.width);
         let shown_h = rows.saturating_sub(top).min(area.height);
         self.origin = Some((area.x, area.y, shown_w, shown_h));
+        let screen = self.parser.screen();
         draw_screen(
             screen,
             Rect::new(area.x, area.y, shown_w, shown_h),
@@ -1092,6 +1090,130 @@ impl Embed {
         }
         Some(at)
     }
+
+    /// Draw a screen that is wider than the view by wrapping whole lines.
+    /// Nothing on a line is dropped; only older rows scroll above the view.
+    fn paint_wrapped(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) -> Option<(u16, u16)> {
+        let (cursor_row, cursor_col) = self.parser.screen().cursor_position();
+        let width = area.width;
+        let segments: Vec<(u16, u16, u16)> = {
+            let screen = self.parser.screen();
+            let (rows, cols) = screen.size();
+            let mut all = Vec::new();
+            for row in 0..rows {
+                let end = (0..cols)
+                    .rev()
+                    .find(|&col| {
+                        screen.cell(row, col).is_some_and(|cell| {
+                            cell.is_wide_continuation()
+                                || cell.contents().chars().any(|c| !c.is_whitespace())
+                        })
+                    })
+                    .map_or(0, |col| col + 1);
+                if end == 0 {
+                    all.push((row, 0, 0));
+                    continue;
+                }
+                let mut left = 0;
+                while left < end {
+                    let mut length = width.min(end - left);
+                    if length > 1
+                        && screen
+                            .cell(row, left + length - 1)
+                            .is_some_and(|cell| cell.is_wide())
+                    {
+                        length -= 1;
+                    }
+                    if length == 0 {
+                        break;
+                    }
+                    all.push((row, left, length));
+                    left += length;
+                }
+            }
+            all
+        };
+        let (start, end) = wrapped_window(&segments, usize::from(area.height));
+        let shown = &segments[start..end];
+        self.scroll = (0, 0);
+        self.origin = Some((area.x, area.y, area.width, shown.len() as u16));
+        let screen = self.parser.screen();
+        for (i, &(row, left, length)) in shown.iter().enumerate() {
+            if length == 0 {
+                continue;
+            }
+            draw_screen(
+                screen,
+                Rect::new(area.x, area.y + i as u16, length, 1),
+                buf,
+                theme,
+                (row, left),
+            );
+        }
+        let visible = !screen.hide_cursor() && self.live();
+        let at = segments.iter().enumerate().find_map(|(index, &(row, left, length))| {
+            let on_row = row == cursor_row
+                && (length == 0 || (cursor_col >= left && cursor_col < left + length));
+            if !on_row || index < start || index >= end {
+                return None;
+            }
+            let x = if length == 0 {
+                0
+            } else {
+                cursor_col - left
+            };
+            Some((area.x + x, area.y + (index - start) as u16))
+        });
+        if !visible {
+            return None;
+        }
+        if self.mode == Mode::Observe {
+            if let Some(at) = at {
+                buf[at].set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            return None;
+        }
+        at
+    }
+}
+
+/// First segment to draw. Blank rows do not push a visible line out of the
+/// view. A line is kept whole unless that one line is taller than the view.
+fn wrapped_window(segments: &[(u16, u16, u16)], height: usize) -> (usize, usize) {
+    if height == 0 || segments.is_empty() {
+        return (0, 0);
+    }
+    let mut end = segments.len();
+    while end > 0 && segments[end - 1].2 == 0 {
+        end -= 1;
+    }
+    if end < segments.len() && end < height {
+        end = segments.len().min(height);
+    }
+    if end <= height {
+        return (0, end);
+    }
+    let mut used = 0;
+    let mut start = 0;
+    let mut i = end;
+    while i > 0 {
+        let row = segments[i - 1].0;
+        let mut row_start = i;
+        while row_start > 0 && segments[row_start - 1].0 == row {
+            row_start -= 1;
+        }
+        let count = i - row_start;
+        if used + count > height {
+            if used == 0 {
+                return (i - height, i);
+            }
+            break;
+        }
+        used += count;
+        start = row_start;
+        i = row_start;
+    }
+    (start, end)
 }
 
 impl Drop for Embed {
@@ -1734,6 +1856,28 @@ fn main() {
     }
 
     #[test]
+    fn a_wide_line_wraps_instead_of_losing_its_end() {
+        let dir = scratch("wrap-line");
+        let fake = fake_herdr(&dir);
+        let mut embed = Embed::start(herdr_plan(&fake, "observe", &[]), 6, 20).unwrap();
+        embed.parser.screen_mut().set_size(4, 64);
+        embed.parser.process(b"\x1b[1;1HLEFT-EDGE");
+        embed
+            .parser
+            .process(b"\x1b[1;40HRIGHT-EDGE\x1b[2;1HSECOND-LINE-IS-ALSO-WIDER-THAN-THE-VIEW");
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        embed.render(area, &mut buf, &Theme::default());
+        let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("LEFT-EDGE"), "{text}");
+        assert!(text.contains("RIGHT-EDGE"), "{text}");
+        assert!(text.contains("SECOND-LINE"), "{text}");
+        assert!(text.contains("THE-VIEW"), "{text}");
+        embed.detach();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn herdr_applies_viewport_changes_made_before_the_first_frame() {
         let dir = scratch("herdr-connect-resize");
         let fake = fake_herdr(&dir);
@@ -1748,33 +1892,22 @@ fn main() {
             embed.resize(12, 60);
             assert!(pump_until(&mut embed, |_| {
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
-                if mode == "control" {
-                    text.contains("terminal.resize")
-                } else {
-                    text.lines().count() >= 3 && text.contains("\"60\"")
-                }
+                text.contains("terminal.resize")
             }));
             for _ in 0..5 {
                 embed.resize(12, 60);
                 embed.pump();
             }
             let text = std::fs::read_to_string(&log).unwrap();
-            if mode == "control" {
-                let sizes: Vec<serde_json::Value> = text
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                    .filter(|value| value["type"] == "terminal.resize")
-                    .collect();
-                assert_eq!(sizes.len(), 1);
-                assert_eq!(sizes[0]["cols"], 60);
-                assert_eq!(sizes[0]["rows"], 12);
-            } else {
-                assert!(
-                    !text.contains("terminal.resize"),
-                    "observers must not resize the source"
-                );
-                assert_eq!(embed.requested, (12, 60));
-            }
+            let sizes: Vec<serde_json::Value> = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|value| value["type"] == "terminal.resize")
+                .collect();
+            assert_eq!(sizes.len(), 1, "{mode}: {text}");
+            assert_eq!(sizes[0]["cols"], 60);
+            assert_eq!(sizes[0]["rows"], 12);
+            assert_eq!(embed.requested, (12, 60));
             embed.detach();
         }
         let _ = std::fs::remove_dir_all(dir);
