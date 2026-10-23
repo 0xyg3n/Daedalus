@@ -248,6 +248,9 @@ impl Engine {
         if updates.len() > 100 {
             return Err("Telegram update batch exceeds limit".into());
         }
+        // A competing getUpdates can hand back ids this cursor already confirmed.
+        // Re-admitting them replays old messages and must not move the cursor.
+        let cursor = self.cursor()?;
         // Validate the entire batch before acknowledging any part of it.
         let mut ordered = BTreeMap::new();
         for update in updates {
@@ -255,6 +258,9 @@ impl Engine {
                 .as_i64()
                 .filter(|id| *id >= 0 && *id < i64::MAX)
                 .ok_or("Invalid Telegram update ID")?;
+            if id < cursor {
+                continue;
+            }
             if serde_json::to_vec(&update)
                 .map_err(|_| "Invalid Telegram update")?
                 .len()
@@ -1044,20 +1050,23 @@ impl Engine {
         let frame: Frame =
             serde_json::from_value(row.payload).map_err(|_| "Invalid saved feeder frame")?;
         let live = feeder.live();
-        let authorized = frame.scope.instance == self.instance
+        // A restarted session is unverified before its replacement registration
+        // is live. The saved frame stays queued; it is not retargeted.
+        let route_bound = frame.scope.instance == self.instance
             && frame.scope.bot == self.bot.to_string()
             && frame.terminal == *target
-            && live
-                .as_ref()
+            && self
+                .routes
+                .resolve_send(
+                    &frame.scope,
+                    &frame.actor,
+                    std::slice::from_ref(&frame.terminal),
+                )
                 .ok()
-                .and_then(|live| {
-                    self.routes
-                        .resolve_send(&frame.scope, &frame.actor, live)
-                        .ok()
-                })
                 .is_some_and(|route| {
                     route.terminal == frame.terminal && route.revision == frame.route_revision
                 });
+        let verified_live = matches!(&live, Ok(ids) if ids.iter().filter(|id| *id == &frame.terminal).count() == 1);
         let (state, receipt, error, retry) = if live.is_err() {
             (
                 "not_sent",
@@ -1065,7 +1074,14 @@ impl Engine {
                 Some("Terminal discovery failed before submission"),
                 2.0,
             )
-        } else if !authorized {
+        } else if route_bound && !verified_live {
+            (
+                "not_sent",
+                None,
+                Some("Waiting for the restarted terminal session to verify; input remains queued"),
+                2.0,
+            )
+        } else if !route_bound {
             (
                 "draft_blocked",
                 None,
@@ -1214,10 +1230,15 @@ mod tests {
         target: TerminalId,
         sends: usize,
         outcome: Submission,
+        available: bool,
     }
     impl Feeder for MockFeeder {
         fn live(&mut self) -> Result<Vec<TerminalId>> {
-            Ok(vec![self.target.clone()])
+            if self.available {
+                Ok(vec![self.target.clone()])
+            } else {
+                Ok(vec![])
+            }
         }
         fn submit(&mut self, _: &Frame) -> Result<Submission> {
             self.sends += 1;
@@ -1510,6 +1531,7 @@ mod tests {
                 target,
                 sends: 0,
                 outcome: Submission::Accepted(json!({"submitted":true})),
+                available: true,
             },
         )
     }
@@ -1807,6 +1829,36 @@ mod tests {
         assert_eq!(rows[0].direction, "outbound");
     }
     #[test]
+    fn restarted_session_keeps_the_exact_frame_until_it_verifies_again() {
+        let (mut engine, mut api, mut feeder) = fixture();
+        api.updates = vec![update(1, "hello")];
+        engine.poll(&mut api, 1.0).unwrap();
+        engine
+            .stage(&mut api, &mut feeder, &mut MockFiles, 2.0)
+            .unwrap();
+        feeder.available = false;
+        let target = feeder.target.clone();
+        assert!(engine.feed_one(&mut feeder, &target, || 3.0).unwrap());
+        assert_eq!(feeder.sends, 0);
+        assert_eq!(engine.journal.rows().unwrap()[0].state, "retryable");
+        feeder.available = true;
+        assert!(!engine.feed_one(&mut feeder, &target, || 4.0).unwrap());
+        assert!(engine.feed_one(&mut feeder, &target, || 6.0).unwrap());
+        assert_eq!(feeder.sends, 1);
+        assert_eq!(engine.journal.rows().unwrap()[0].state, "accepted");
+    }
+    fn stale_update_ids_do_not_replay_or_move_the_cursor() {
+        let (mut engine, mut api, _) = fixture();
+        api.updates = vec![update(4, "kept")];
+        engine.poll(&mut api, 1.0).unwrap();
+        assert_eq!(engine.cursor().unwrap(), 5);
+        api.updates = vec![update(2, "stale replay"), update(4, "kept again")];
+        assert_eq!(engine.poll(&mut api, 2.0).unwrap(), 0);
+        assert_eq!(engine.cursor().unwrap(), 5);
+        let events = engine.journal.events("telegram", "123", &["admitted"]).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["message"]["text"], "kept");
+    }
     fn revoked_route_blocks_queued_input_without_retargeting() {
         let (mut engine, mut api, mut feeder) = fixture();
         api.updates = vec![update(1, "hello")];

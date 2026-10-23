@@ -160,9 +160,13 @@ impl BotApi {
         format!("{}/bot{}/{}", self.origin, self.token, method)
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value> {
+        self.call_timeout(method, params, Duration::from_secs(60))
+    }
+    fn call_timeout(&self, method: &str, params: &Value, timeout: Duration) -> Result<Value> {
         let response = self
             .client
             .post(self.url(method))
+            .timeout(timeout)
             .json(params)
             .send()
             .map_err(network)?;
@@ -335,7 +339,15 @@ impl Api for BotApi {
         if offset < 0 || timeout > 50 {
             return Err(Error::Invalid("Invalid Telegram polling parameters"));
         }
-        let result=self.call("getUpdates",&json!({"offset":offset,"timeout":timeout,"limit":100,"allowed_updates":["message","callback_query"]}))?;
+        // The client-wide deadline is 60s. A 50s long poll plus slow connect
+        // on Windows aborts the socket while Telegram still holds it, and the
+        // next getUpdates then conflicts with that in-flight poll.
+        let budget = Duration::from_secs(timeout.saturating_add(20).clamp(30, 80));
+        let result = self.call_timeout(
+            "getUpdates",
+            &json!({"offset":offset,"timeout":timeout,"limit":100,"allowed_updates":["message","callback_query"]}),
+            budget,
+        )?;
         let updates = result
             .as_array()
             .filter(|rows| rows.len() <= 100)
@@ -347,7 +359,11 @@ impl Api for BotApi {
         }) {
             return Err(Error::Uncertain);
         }
-        Ok(updates.clone())
+        Ok(updates
+            .iter()
+            .filter(|update| update["update_id"].as_i64().is_some_and(|id| id >= offset))
+            .cloned()
+            .collect())
     }
     fn typing(&mut self, chat: i64) -> Result<()> {
         valid_chat(chat)?;
@@ -727,12 +743,21 @@ mod tests {
     }
     #[test]
     fn polls_only_supported_update_types_and_bounds_offset() {
-        let (mut api, join) = server("200 OK", json!({"ok":true,"result":[{"update_id":12}]}));
-        assert_eq!(api.updates(12, 50).unwrap().len(), 1);
+        let (mut api, join) = server(
+            "200 OK",
+            json!({"ok":true,"result":[{"update_id":4},{"update_id":12}]}),
+        );
+        let rows = api.updates(12, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["update_id"], 12);
         let request = join.join().unwrap();
         assert!(request.contains("callback_query"));
         assert!(!request.contains("edited_message"));
+        let body: Value = serde_json::from_str(request.lines().last().unwrap()).unwrap();
+        assert_eq!(body["offset"], 12);
+        assert_eq!(body["timeout"], 50);
         assert!(api.updates(-1, 50).is_err());
+        assert!(api.updates(0, 51).is_err());
     }
     #[test]
     fn inline_controls_and_acknowledgements_validate_wire_contract() {

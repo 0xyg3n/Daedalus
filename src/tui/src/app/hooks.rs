@@ -5,7 +5,10 @@
 use crate::core::goals::{Binding, Decision, Goal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::Read;
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_ID_BYTES: usize = 512;
@@ -95,6 +98,72 @@ fn valid_id(id: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || c == '/' || c == '\\')
         && id != "."
         && id != ".."
+}
+
+/// Registration files and hook argv must agree after an update. Windows
+/// `GetModuleFileName`, Node, and JSON may spell the same file with `/`, `\`,
+/// or a `\\?\` prefix. Session identifiers stay separator-free.
+pub(crate) fn windows_native_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy().replace('/', "\\");
+        let text = if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                rest.to_string()
+            }
+        } else {
+            raw
+        };
+        return PathBuf::from(text);
+    }
+    #[cfg(not(windows))]
+    path.to_path_buf()
+}
+
+pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let fold = |path: &Path| {
+            windows_native_path(path)
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        };
+        return fold(left) == fold(right);
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+/// Hook commands must name the replaced install, not a content-addressed or
+/// pre-update copy of the same image. A different file is left untouched.
+pub(crate) fn stable_hook_binary(binary: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(stable) = windows_stable_binary(binary) {
+        return stable;
+    }
+    binary.to_path_buf()
+}
+
+#[cfg(windows)]
+fn windows_stable_binary(binary: &Path) -> Option<PathBuf> {
+    let stable = crate::app::windows_install::destination().ok()?;
+    if paths_equivalent(&stable, binary) {
+        return Some(windows_native_path(&stable));
+    }
+    let stable_file = crate::platform::open_regular(&stable).ok()?;
+    let given = crate::platform::open_regular(binary).ok()?;
+    if crate::platform::file_identity(&stable_file).ok()?
+        != crate::platform::file_identity(&given).ok()?
+    {
+        return None;
+    }
+    crate::core::layouts::check_path(&stable).ok()?;
+    Some(windows_native_path(&stable))
 }
 
 /// Normalizes each supported native harness lifecycle envelope.
@@ -390,6 +459,7 @@ pub fn goal_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     #[test]
     fn grok_native_snake_case_lifecycle_is_normalized() {
         for (native, expected) in [
@@ -546,5 +616,30 @@ mod tests {
             goal_response(&e, Some(&mut goal), 2, 8_000),
             Ok(GoalOutput::Empty)
         );
+    }
+    #[test]
+    fn stable_binary_without_matching_install_keeps_the_explicit_path() {
+        let path = Path::new(if cfg!(windows) {
+            r"C:\missing\daedalus-hook-binary.exe"
+        } else {
+            "/tmp/daedalus-hook-binary-missing"
+        });
+        assert_eq!(stable_hook_binary(path), path);
+        assert!(!paths_equivalent(path, Path::new("/other")));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_registration_paths_ignore_separator_case_and_verbatim_prefix() {
+        let native = Path::new(r"C:\Users\A\hooks\id.json");
+        assert!(paths_equivalent(native, Path::new(r"C:/Users/A/hooks/id.json")));
+        assert!(paths_equivalent(
+            native,
+            Path::new(r"\\?\C:\Users\a\hooks\id.json")
+        ));
+        assert_eq!(
+            windows_native_path(Path::new(r"C:/Users/A/hooks/id.json")),
+            PathBuf::from(r"C:\Users\A\hooks\id.json")
+        );
+        assert!(!paths_equivalent(native, Path::new(r"C:\Users\A\hooks\other.json")));
     }
 }

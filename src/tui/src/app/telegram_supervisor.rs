@@ -16,6 +16,16 @@ use std::{
 };
 pub type Result<T> = std::result::Result<T, String>;
 const STATE: &str = "telegram-runtime.json";
+/// The installed file is not the image this process launched.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn image_was_replaced(running: (u64, u64), installed: Option<(u64, u64)>) -> bool {
+    matches!(installed, Some(identity) if identity != running)
+}
+/// A byte-range lock Windows does not honor must not hide a live mapped image.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn service_blocks_replace(lock_visible: bool, live_image_matches: bool) -> bool {
+    lock_visible || live_image_matches
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -371,19 +381,8 @@ fn verify_windows_executable(record: &Record, executable: &Path) -> Result<()> {
 #[cfg(windows)]
 fn held(directory: &Path) -> Result<bool> {
     let path = directory.join(".telegram-service.lock");
-    let file = match crate::platform::open_private(&path, true, false) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Err("Cannot inspect service ownership".into()),
-    };
-    match crate::platform::lock_exclusive(&file, true) {
-        Ok(()) => {
-            crate::platform::unlock(&file).map_err(|_| "Cannot release owner probe")?;
-            Ok(false)
-        }
-        Err(error) if error.raw_os_error() == Some(33) => Ok(true),
-        Err(_) => Err("Cannot determine service ownership".into()),
-    }
+    super::telegram_service::probe_owner(&path)
+        .map_err(|_| "Cannot inspect service ownership".into())
 }
 #[cfg(windows)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
@@ -453,8 +452,21 @@ pub(crate) fn stop_for_uninstall(
     executable: &Path,
     timeout: std::time::Duration,
 ) -> Result<()> {
-    if !held(directory)? {
+    let lock_visible = held(directory)?;
+    let orphan = if lock_visible {
+        None
+    } else {
+        // A whole-file Windows lock can succeed without excluding anyone.
+        // The live process still maps the executable until it exits.
+        live_service_holding_image(directory, executable)?
+    };
+    if !service_blocks_replace(lock_visible, orphan.is_some()) {
         return Ok(());
+    }
+    if let Some(record) = orphan {
+        return shutdown_pinned(directory, &record, timeout, |record| {
+            verify_windows_executable(record, executable)
+        });
     }
     let bytes = telegram_config::read_private(&directory.join(STATE), 8192)?
         .ok_or("Telegram is starting; wait and retry uninstall")?;
@@ -468,16 +480,146 @@ pub(crate) fn stop_for_uninstall(
         return Err("Telegram instance identity changed; installation has been kept".into());
     }
     verify_windows_executable(&record, executable)?;
+    shutdown_pinned(directory, &record, timeout, |record| {
+        verify_windows_executable(record, executable)
+    })
+}
+#[cfg(windows)]
+fn shutdown_pinned(
+    directory: &Path,
+    record: &Record,
+    timeout: std::time::Duration,
+    confirm: impl Fn(&Record) -> Result<()>,
+) -> Result<()> {
     let process = crate::platform::pin_owned_process(record.pid, record.start_ticks)
         .map_err(|_| "Cannot pin Telegram service for shutdown")?;
-    verify_windows_executable(&record, executable)?;
-    write_stop_request(directory, &record)?;
+    confirm(record)?;
+    write_stop_request(directory, record)?;
     if !process
         .wait_timeout(timeout)
         .map_err(|_| "Cannot observe Telegram shutdown")?
         || held(directory)?
     {
         return Err("Telegram has not finished shutting down; installation has been kept. Retry after shutdown completes.".into());
+    }
+    Ok(())
+}
+#[cfg(windows)]
+fn live_service_holding_image(directory: &Path, executable: &Path) -> Result<Option<Record>> {
+    let Some(record) = live_service(directory)? else {
+        return Ok(None);
+    };
+    if verify_windows_executable(&record, executable).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+#[cfg(windows)]
+fn live_service(directory: &Path) -> Result<Option<Record>> {
+    let Some(bytes) = telegram_config::read_private(&directory.join(STATE), 8192)? else {
+        return Ok(None);
+    };
+    let record: Record = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    if record.directory != directory || record.pid == 0 || record.pid == std::process::id() {
+        return Ok(None);
+    }
+    let process = match crate::platform::process_identity(record.pid) {
+        Ok(process) => process,
+        Err(_) => return Ok(None),
+    };
+    let owner = crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
+    if record.version != 1
+        || record.boot_id != owner
+        || process.owner != owner
+        || record.start_ticks != process.creation_time
+        || process.executable != record.executable
+    {
+        return Ok(None);
+    }
+    let name = process.executable.file_name().and_then(|name| name.to_str());
+    if !name.is_some_and(|name| name.eq_ignore_ascii_case("daedalus.exe")) {
+        return Ok(None);
+    }
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    if record.instance != config.instance || record.bot_id != config.bot_id {
+        return Err("Telegram instance identity changed; installation has been kept".into());
+    }
+    Ok(Some(record))
+}
+/// Stop services that still map `executable`, or any live Daedalus service for
+/// a saved instance, so the image can be replaced. Cooperative stop only.
+/// Returns instance directories that were running and should be restarted from
+/// the installed image. Configuration and chat state are not deleted.
+///
+/// `install_current` must call this before replacing `destination`, then
+/// [`restart_services_after_install`] after the new image is in place.
+#[cfg(windows)]
+pub(crate) fn stop_running_services_for_install(
+    preferences: &Path,
+    executable: &Path,
+    timeout: std::time::Duration,
+) -> Result<Vec<PathBuf>> {
+    if !executable.is_absolute() {
+        return Err("Installed executable path must be absolute".into());
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut restart = Vec::new();
+    for directory in super::instances::saved_directories(preferences)? {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("Telegram has not finished shutting down; installation has been kept. Retry after shutdown completes.".into());
+        }
+        if stop_one_for_install(&directory, remaining)? {
+            restart.push(directory);
+        }
+    }
+    Ok(restart)
+}
+#[cfg(windows)]
+fn stop_one_for_install(directory: &Path, timeout: std::time::Duration) -> Result<bool> {
+    let lock_visible = held(directory)?;
+    let orphan = if lock_visible {
+        None
+    } else {
+        live_service(directory)?
+    };
+    if !service_blocks_replace(lock_visible, orphan.is_some()) {
+        return Ok(false);
+    }
+    if let Some(record) = orphan {
+        shutdown_pinned(directory, &record, timeout, confirm_same_process)?;
+        return Ok(true);
+    }
+    let bytes = telegram_config::read_private(&directory.join(STATE), 8192)?
+        .ok_or("Telegram is starting; wait and retry install")?;
+    let record: Record =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private service record")?;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    if record.directory != directory
+        || record.instance != config.instance
+        || record.bot_id != config.bot_id
+    {
+        return Err("Telegram instance identity changed; installation has been kept".into());
+    }
+    confirm_same_process(&record)?;
+    shutdown_pinned(directory, &record, timeout, confirm_same_process)?;
+    Ok(true)
+}
+#[cfg(windows)]
+fn confirm_same_process(record: &Record) -> Result<()> {
+    let process = crate::platform::process_identity(record.pid)
+        .map_err(|_| "Service process is unavailable")?;
+    let owner = crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
+    if record.version != 1
+        || process.owner != owner
+        || record.boot_id != owner
+        || process.creation_time != record.start_ticks
+        || process.executable != record.executable
+    {
+        return Err("Service process identity changed".into());
     }
     Ok(())
 }
@@ -507,14 +649,79 @@ pub fn stop_requested(directory: &Path) -> Result<bool> {
     Ok(matches)
 }
 #[cfg(windows)]
-pub fn start(directory: &Path) -> Result<Value> {
-    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
-    config.read_token()?;
-    config.check_registrations()?;
-    super::cutover::activation_check(directory)?;
-    if inspect(directory)?.state != "stopped" {
-        return Err("Service already owns or may be starting for this instance".into());
+fn installed_executable() -> Result<PathBuf> {
+    Ok(crate::platform::user_local_data_directory()
+        .map_err(|_| "Cannot resolve authoritative user data directory")?
+        .join("Daedalus")
+        .join("bin")
+        .join("daedalus.exe"))
+}
+#[cfg(windows)]
+fn file_identity(path: &Path) -> Result<(u64, u64)> {
+    let file = crate::platform::open_regular(path)
+        .map_err(|_| "Cannot inspect executable".to_string())?;
+    crate::platform::file_identity(&file).map_err(|_| "Cannot identify executable".to_string())
+}
+#[cfg(windows)]
+fn path_key(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let stripped = text.strip_prefix("\\\\?\\").unwrap_or(text.as_str());
+    stripped.to_ascii_lowercase()
+}
+#[cfg(windows)]
+fn installed_target(executable: &Path) -> Result<bool> {
+    let installed = match installed_executable() {
+        Ok(path) => path,
+        Err(_) => return Ok(false),
+    };
+    if !installed.exists() || !executable.exists() {
+        return Ok(false);
     }
+    Ok(path_key(executable) == path_key(&installed)
+        && file_identity(executable)? == file_identity(&installed)?)
+}
+/// Identity of the image this process launched. Compared later with the
+/// installed file so a replaced or temporary updater image does not keep polling.
+#[cfg(windows)]
+pub(crate) fn capture_running_image() -> Result<(u64, u64)> {
+    file_identity(&std::env::current_exe().map_err(|_| "Cannot inspect service executable")?)
+}
+#[cfg(windows)]
+pub(crate) fn replacement_for(running: &(u64, u64)) -> Result<Option<PathBuf>> {
+    let installed = match installed_executable() {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    if !installed.exists() {
+        return Ok(None);
+    }
+    let installed_id = match file_identity(&installed) {
+        Ok(identity) => identity,
+        Err(_) => return Ok(None),
+    };
+    if image_was_replaced(*running, Some(installed_id)) {
+        Ok(Some(installed))
+    } else {
+        Ok(None)
+    }
+}
+#[cfg(windows)]
+fn caller_service_executable() -> Result<PathBuf> {
+    let current = std::env::current_exe().map_err(|_| "Cannot locate native executable")?;
+    let installed = match installed_executable() {
+        Ok(path) => path,
+        Err(_) => return Ok(current),
+    };
+    if !installed.exists() {
+        return Ok(current);
+    }
+    if file_identity(&current)? != file_identity(&installed)? {
+        return Err("Refusing to start Telegram from a temporary updater. Use the installed Daedalus executable.".into());
+    }
+    Ok(installed)
+}
+#[cfg(windows)]
+fn service_environment() -> std::collections::BTreeMap<String, String> {
     let mut environment = std::collections::BTreeMap::new();
     for key in [
         "PATH",
@@ -537,14 +744,25 @@ pub fn start(directory: &Path) -> Result<Value> {
             environment.insert(key.into(), value);
         }
     }
+    environment
+}
+#[cfg(windows)]
+fn spawn_service(directory: &Path, executable: &Path) -> Result<Value> {
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    config.read_token()?;
+    config.check_registrations()?;
+    super::cutover::activation_check(directory)?;
+    if inspect(directory)?.state != "stopped" {
+        return Err("Service already owns or may be starting for this instance".into());
+    }
+    let environment = service_environment();
     // The daemon opens its own log. Inheriting any parent pipe here can keep a
     // PowerShell pipeline waiting forever after the start command has exited.
-    let executable = std::env::current_exe().map_err(|_| "Cannot locate native executable")?;
     let directory = directory
         .to_str()
         .ok_or("Configuration path must be UTF-8")?;
     let mut child = crate::platform::spawn_background_with_environment(
-        &executable,
+        executable,
         &["telegram", "serve", "--config-dir", directory],
         Some(&environment),
     )
@@ -556,6 +774,34 @@ pub fn start(directory: &Path) -> Result<Value> {
     Ok(
         json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested; service ownership and transport identity are checked separately."}),
     )
+}
+#[cfg(windows)]
+pub fn start(directory: &Path) -> Result<Value> {
+    spawn_service(directory, &caller_service_executable()?)
+}
+/// Spawn `telegram serve` from the installed image only. A temporary updater
+/// path is rejected even when it is the caller's `current_exe`.
+#[cfg(windows)]
+pub(crate) fn spawn_installed_service(directory: &Path, executable: &Path) -> Result<Value> {
+    if !installed_target(executable)? {
+        return Err(
+            "Refusing to start Telegram from a temporary updater path".into(),
+        );
+    }
+    spawn_service(directory, executable)
+}
+/// Restart instances stopped for an install. `executable` must be the installed
+/// image (`%LOCALAPPDATA%\Daedalus\bin\daedalus.exe`), never a temp updater.
+///
+#[cfg(windows)]
+pub(crate) fn restart_services_after_install(
+    executable: &Path,
+    directories: &[PathBuf],
+) -> Result<()> {
+    for directory in directories {
+        spawn_installed_service(directory, executable)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -705,5 +951,24 @@ mod tests {
         record.start_ticks = 42;
         layouts::write_private(&proc_root.join("17/cmdline"), b"daedalus\0tui\0").unwrap();
         assert!(verify(&record, proc_root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::{image_was_replaced, service_blocks_replace};
+    #[test]
+    fn replaced_or_temporary_image_hands_off_and_same_image_stays() {
+        assert!(!image_was_replaced((1, 2), None));
+        assert!(!image_was_replaced((1, 2), Some((1, 2))));
+        assert!(image_was_replaced((1, 2), Some((1, 3))));
+        assert!(image_was_replaced((9, 9), Some((1, 2))));
+    }
+    #[test]
+    fn blind_lock_still_blocks_replace_when_the_live_image_matches() {
+        assert!(!service_blocks_replace(false, false));
+        assert!(service_blocks_replace(true, false));
+        assert!(service_blocks_replace(false, true));
+        assert!(service_blocks_replace(true, true));
     }
 }

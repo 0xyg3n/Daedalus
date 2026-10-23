@@ -94,6 +94,71 @@ function Assert-WindowsExecutable([string]$Path) {
         if ($reader.ReadUInt16() -ne 0x020b) { throw 'Expected a PE32+ executable.' }
     } finally { $reader.Dispose(); $stream.Dispose() }
 }
+function Move-PrivateInstallFile([string]$Source, [string]$DestinationPath) {
+    # MoveFileEx replaces in one call. Move-Item -Force can delete the destination first.
+    if (-not ('DaedalusInstall.NativeMove' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace DaedalusInstall {
+    public static class NativeMove {
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "MoveFileExW")]
+        static extern bool MoveFileEx(string source, string destination, int flags);
+        public static int Replace(string source, string destination) {
+            if (MoveFileEx(source, destination, 0x1 | 0x8)) return 0;
+            return Marshal.GetLastWin32Error();
+        }
+    }
+}
+'@
+    }
+    $code = [DaedalusInstall.NativeMove]::Replace($Source, $DestinationPath)
+    if ($code -ne 0) {
+        $win32 = New-Object System.ComponentModel.Win32Exception $code
+        throw "Cannot replace ${DestinationPath} ($($win32.Message)). No installation files or private configuration were deleted."
+    }
+}
+function Invoke-ManagedServiceRelease([string]$Executable) {
+    # Existing helper: stops the managed Telegram service and does not delete files.
+    # There is no install flag that does this itself. Do not kill the helper or Telegram.
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $Executable
+    $info.Arguments = 'uninstall --prepare --yes'
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    if ($env:SystemRoot -and (Test-Path -LiteralPath $env:SystemRoot)) {
+        $info.WorkingDirectory = $env:SystemRoot
+    }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) { throw 'Daedalus maintenance process did not start.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(180000)) {
+            throw 'Daedalus did not finish releasing the installed executable within 180 seconds. The maintenance process was not killed. No installation files or private configuration were deleted.'
+        }
+        if (-not $stdoutTask.Wait(5000) -or -not $stderrTask.Wait(5000)) {
+            throw 'Daedalus did not report its shutdown result. No installation files or private configuration were deleted.'
+        }
+        if ($process.ExitCode -ne 0) {
+            $detail = ("$($stderrTask.Result) $($stdoutTask.Result)").Trim()
+            throw "Daedalus could not release the installed executable. Close other Daedalus windows and retry. No installation files or private configuration were deleted. $detail"
+        }
+    } catch {
+        $message = $_.Exception.Message
+        if ($message -notlike '*were deleted*') {
+            throw "Daedalus could not release the installed executable ($message). No installation files or private configuration were deleted."
+        }
+        throw
+    } finally {
+        if ($started -and $process.HasExited) { $process.Dispose() }
+    }
+}
 if ($env:OS -ne 'Windows_NT') { throw 'Run this installer in native Windows PowerShell.' }
 $architecture = $env:PROCESSOR_ARCHITECTURE
 if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
@@ -148,7 +213,8 @@ Write-Host "Target: x86_64-pc-windows-msvc; prefix: $Prefix"
 if ($Source) { Write-Host "Build committed revision '$Ref' from $Source in a temporary checkout (working edits excluded)." }
 if ($Binary) { Write-Host "Install reviewed local executable: $Binary" }
 if ($DownloadUrl) { Write-Host "Download executable over HTTPS; verify SHA-256 before installation." }
-Write-Host 'Install versioned executable and bin/daedalus.exe; preserve private configuration. No PATH, bot, service or profile changes.'
+Write-Host 'Install versioned executable and bin/daedalus.exe. Private configuration is preserved. No PATH, bot, or profile changes.'
+Write-Host 'Replacing the default per-user install runs "uninstall --prepare --yes" so a managed Telegram service can release the old executable. It does not kill processes, delete configuration, or start a service.'
 if ($missing.Count) {
     Write-Host ('Missing build prerequisites: ' + ($missing -join ', '))
     if ($missing -contains 'git') { Write-Host 'winget install --exact --id Git.Git' }
@@ -206,7 +272,20 @@ try {
         Write-NewPrivateInstallFile $staged ([IO.File]::ReadAllBytes($releaseBinary))
         Set-PrivateInstallAcl $staged
         if ((Get-Hash $staged) -ne $hash) { throw 'Installed copy failed checksum verification.' }
-        Move-Item -LiteralPath $staged -Destination $destination -Force
+        $hadDestination = Test-Path -LiteralPath $destination
+        $replacingDefault = $false
+        if ($hadDestination -and $env:LOCALAPPDATA) {
+            $defaultPrefix = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Daedalus')).TrimEnd('\')
+            if ($Prefix.TrimEnd('\') -ieq $defaultPrefix) { $replacingDefault = $true }
+        }
+        if ($replacingDefault) { Invoke-ManagedServiceRelease $releaseBinary }
+        try { Move-PrivateInstallFile $staged $destination }
+        catch {
+            if ($hadDestination -and -not (Test-Path -LiteralPath $destination)) {
+                throw "Replacement failed and the installed executable is missing. $($_.Exception.Message)"
+            }
+            throw
+        }
         Set-PrivateInstallAcl $destination
     } finally { if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force } }
     if (Test-Path -LiteralPath $receiptPath) { Set-PrivateInstallAcl $receiptPath }
@@ -214,7 +293,13 @@ try {
     try {
         $record = @{ version = 1; sha256 = $hash; target = 'x86_64-pc-windows-msvc' } | ConvertTo-Json
         Write-NewPrivateInstallFile $receiptStage ((New-Object Text.UTF8Encoding($false)).GetBytes($record))
-        Move-Item -LiteralPath $receiptStage -Destination $receiptPath -Force
+        try { Move-PrivateInstallFile $receiptStage $receiptPath }
+        catch {
+            if (Test-Path -LiteralPath $receiptPath) {
+                throw "The executable is in place but install.json was not updated ($($_.Exception.Message)). The previous receipt is still in place."
+            }
+            throw
+        }
     } finally { if (Test-Path -LiteralPath $receiptStage) { Remove-Item -LiteralPath $receiptStage -Force } }
     Write-Host "Installed $destination"
     Write-Host "Run: & '$destination' setup"

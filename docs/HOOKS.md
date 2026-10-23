@@ -117,10 +117,13 @@ profile. A Daedalus registration belongs to one exact conversation and terminal:
 events from other conversations receive an empty response and create no delivery
 record. When Codex resumes a conversation into a new rollout file, Daedalus uses
 the registered session and process identity; the older transcript path does not
-invalidate the hook. Installed profiles use the stable Daedalus launcher when it
-points to the running release, so later application updates keep the same hook
-command. Profiles installed by older releases can still contain a pinned binary
-path. Review and reinstall those profiles, trust changed commands in Codex
+invalidate the hook. On Unix, installed profiles use the stable Daedalus launcher
+(`~/.local/bin/daedalus`) when it points to the running release, so later
+application updates keep the same hook command. On Windows, `installed_launcher`
+returns `%LOCALAPPDATA%\Daedalus\bin\daedalus.exe` only when that file is the same
+image as the running process. A different temporary updater image keeps the
+running path. Profiles installed by older releases can still contain a pinned
+binary path. Review and reinstall those profiles, trust changed commands in Codex
 `/hooks`, and resume already running Codex sessions so they load the new command.
 
 ## Native Windows
@@ -130,6 +133,21 @@ Claude Code 2.1.296+, Hermes, Pi and OpenCode. Windows guided hooked first launc
 Codex/Grok/Cursor hook enrollment and hooks through native tmux-compatible
 backends are not enabled on Windows. Native terminal controls and ordinary launch are
 separate capabilities. See [the Windows matrix](HARNESSES.md#native-windows-boundaries).
+
+The TUI's backend launch scans managed hook profiles for a temporary setup
+command: an NSIS directory (`%TEMP%\ns*.tmp`), a `.daedalus-updates` copy, a
+`.daedalus-install-*.tmp` or `daedalus-*.tmp` file, `Daedalus-setup.exe`, or a
+`daedalus.exe.old` copy. A `daedalus.exe` whose parent directory is `Temp` or
+`tmp` is included. Only those commands are rewritten to
+`%LOCALAPPDATA%\Daedalus\bin\daedalus.exe`, and only when that installed file
+already exists. `hook run` and `telegram serve` do not scan profiles. The
+previous profile bytes are saved under `hook-reloads`. The original install
+receipt's `after_sha` then no longer matches, so hook rollback refuses until the
+profile is reviewed again. A rebind error is not shown, because backend launch
+cannot report it. This launch does not stop or start the Telegram service.
+New hook installs use `installed_launcher`. If the TUI itself was started from a
+temporary setup path and the installed file exists, the backend process is the
+installed executable.
 
 Native harness profile folders created from an elevated terminal may be owned by
 the local Administrators group. Daedalus accepts these when the ACL explicitly

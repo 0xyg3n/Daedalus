@@ -18,9 +18,28 @@ pub struct Plan {
     directory: PathBuf,
     binary: PathBuf,
     target: PathBuf,
+    /// Windows file index captured at review. A replaced `daedalus.exe` must not
+    /// reuse a plan that was reviewed against the previous image.
+    #[cfg(windows)]
+    image: (u64, u64),
     registrations: Vec<(PathBuf, Vec<u8>)>,
     profiles: Vec<Profile>,
     rows: Vec<Value>,
+}
+fn executable_unchanged(binary: &Path, target: &Path, image: Option<(u64, u64)>) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        let _ = target;
+        let file = crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
+        let current = crate::platform::file_identity(&file)
+            .map_err(|_| "Cannot identify hook executable")?;
+        return Ok(Some(current) == image);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = image;
+        Ok(std::fs::canonicalize(binary).map_err(|_| "Hook executable disappeared")? == target)
+    }
 }
 fn contains_registration(bytes: &[u8], r: &hook_runtime::Registration) -> Result<bool> {
     use super::hooks::Harness;
@@ -86,6 +105,16 @@ fn instruction(harness: &str) -> &'static str {
     }
 }
 impl Plan {
+    fn image_id(&self) -> Option<(u64, u64)> {
+        #[cfg(windows)]
+        {
+            Some(self.image)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
     pub fn review(&self) -> Value {
         json!({"operation":"reload_managed_hooks", "profiles":self.profiles.iter().map(|p|json!({"path":p.path,"changed":p.before!=p.after})).collect::<Vec<_>>(),"harnesses":self.rows,"notice":"Updates only managed handlers. Native approval and restart requirements remain visible; no session is killed and no model prompt is sent."})
     }
@@ -106,11 +135,10 @@ impl Plan {
             .map(hook_install::lock_profile)
             .collect::<Result<Vec<_>>>()?;
 
-        if std::fs::canonicalize(&self.binary).map_err(|_| "Hook executable disappeared")?
-            != self.target
-        {
+        if !executable_unchanged(&self.binary, &self.target, self.image_id())? {
             return Err("Daedalus changed since review; review reload again".into());
         }
+        hook_install::ensure_service_allows_hook_change(directory, Some(&self.binary))?;
         for (path, bytes) in &self.registrations {
             if layouts::read_private(path)?.as_ref() != Some(bytes) {
                 return Err("Hook registration changed; review reload again".into());
@@ -139,7 +167,9 @@ impl Plan {
     }
 }
 pub fn prepare(directory: &Path, binary: PathBuf, terminals: &Terminals) -> Result<Plan> {
+    let binary = hook_install::installed_launcher(binary);
     hook_install::check_binary_path(&binary)?;
+    hook_install::ensure_service_allows_hook_change(directory, Some(&binary))?;
     let mut receipts = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
     let root = directory.join("hook-backups");
     layouts::check_path(&root)?;
@@ -214,11 +244,22 @@ pub fn prepare(directory: &Path, binary: PathBuf, terminals: &Terminals) -> Resu
     if profiles.is_empty() {
         return Err("No managed hook installations found. Install standard hooks first.".into());
     }
+    #[cfg(not(windows))]
     let target = std::fs::canonicalize(&binary).map_err(|_| "Cannot resolve hook executable")?;
+    #[cfg(windows)]
+    let (target, image) = {
+        let file =
+            crate::platform::open_regular(&binary).map_err(|_| "Cannot resolve hook executable")?;
+        let image = crate::platform::file_identity(&file)
+            .map_err(|_| "Cannot resolve hook executable")?;
+        (binary.clone(), image)
+    };
     Ok(Plan {
         directory: directory.into(),
         binary,
         target,
+        #[cfg(windows)]
+        image,
         registrations,
         profiles: profiles.into_values().collect(),
         rows,
@@ -266,10 +307,17 @@ mod tests {
         layouts::write_private(&a, b"original-a").unwrap();
         layouts::write_private(&b, b"manual-edit").unwrap();
         layouts::write_private(&binary, b"fixture").unwrap();
+        #[cfg(windows)]
+        let image = crate::platform::file_identity(
+            &crate::platform::open_regular(&binary).unwrap(),
+        )
+        .unwrap();
         let plan = Plan {
             directory: root.clone(),
             target: std::fs::canonicalize(&binary).unwrap(),
             binary,
+            #[cfg(windows)]
+            image,
             registrations: vec![],
             rows: vec![],
             profiles: vec![

@@ -221,6 +221,42 @@ fn private_directory(path: &Path) -> Result<()> {
 fn private_directory(path: &Path) -> Result<()> {
     crate::platform::validate_private_dir(path).map_err(|_| Error::PrivateState)
 }
+/// Windows paths can differ by case, slash, or a verbatim `\\?\` prefix and
+/// still name one file. This does not resolve reparse points or `..`.
+pub(crate) fn same_local_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        return windows_path_key(left).is_some_and(|key| windows_path_key(right) == Some(key));
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+#[cfg(windows)]
+fn windows_path_key(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    let stripped = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let native = PathBuf::from(stripped.replace('/', "\\"));
+    layouts::check_path(&native).ok()?;
+    let mut parts = Vec::new();
+    for component in native.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => {
+                parts.push(prefix.as_os_str().to_string_lossy().to_ascii_lowercase());
+            }
+            std::path::Component::RootDir => parts.push("\\".into()),
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().to_ascii_lowercase());
+            }
+            _ => return None,
+        }
+    }
+    Some(parts.join("\\"))
+}
 fn active_directory(directory: &Path) -> Result<()> {
     match fs::symlink_metadata(directory.join("cutover-retired.json")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -230,7 +266,12 @@ fn active_directory(directory: &Path) -> Result<()> {
 /// Held for the complete state mutation. Cutover takes the same stable inode
 /// exclusively, then writes retirement before releasing its snapshot lock.
 pub(crate) struct ActiveGuard {
+    #[cfg(unix)]
     _file: File,
+    /// File index of `.cutover.lock`. Windows byte-range locks are per handle
+    /// and not reentrant, so nested guards share one process-owned handle.
+    #[cfg(windows)]
+    identity: (u64, u64),
 }
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
@@ -241,7 +282,7 @@ impl Drop for ActiveGuard {
             libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
         }
         #[cfg(windows)]
-        let _ = crate::platform::unlock(&self._file);
+        release_cutover(self.identity);
     }
 }
 #[cfg(unix)]
@@ -272,16 +313,75 @@ pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
     Ok(guard)
 }
 #[cfg(windows)]
-#[allow(unused_variables)]
+struct HeldCutover {
+    file: File,
+    count: u32,
+}
+#[cfg(windows)]
+fn cutover_holds() -> std::sync::MutexGuard<'static, std::collections::HashMap<(u64, u64), HeldCutover>>
+{
+    static HOLDS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(u64, u64), HeldCutover>>,
+    > = std::sync::OnceLock::new();
+    HOLDS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+#[cfg(windows)]
+fn release_cutover(identity: (u64, u64)) {
+    let mut holds = cutover_holds();
+    let remaining = {
+        let Some(slot) = holds.get_mut(&identity) else {
+            return;
+        };
+        slot.count = slot.count.saturating_sub(1);
+        slot.count
+    };
+    if remaining == 0
+        && let Some(slot) = holds.remove(&identity)
+    {
+        let _ = crate::platform::unlock(&slot.file);
+    }
+}
+/// Shared cutover ownership is process-wide on Windows. `hook run` and install
+/// both hold a guard and then call into code that takes one again; a second
+/// `LockFileEx` on the same range fails even for a shared lock and looks like
+/// an in-progress cutover. Another process's exclusive lock still fails.
+#[cfg(windows)]
 pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
     private_directory(directory)?;
     let file = crate::platform::open_private(&directory.join(".cutover.lock"), true, true)
         .map_err(|_| Error::PrivateState)?;
+    let identity = crate::platform::file_identity(&file).map_err(|_| Error::PrivateState)?;
+    let mut holds = cutover_holds();
+    if let Some(slot) = holds.get_mut(&identity) {
+        slot.count = slot
+            .count
+            .checked_add(1)
+            .ok_or(Error::Persistence)?;
+        drop(holds);
+        if let Err(error) = active_directory(directory) {
+            release_cutover(identity);
+            return Err(error);
+        }
+        return Ok(ActiveGuard { identity });
+    }
     crate::platform::lock_shared(&file, true)
         .map_err(|_| Error::Invalid("Instance cutover is in progress"))?;
-    let guard = ActiveGuard { _file: file };
-    active_directory(directory)?;
-    Ok(guard)
+    if let Err(error) = active_directory(directory) {
+        let _ = crate::platform::unlock(&file);
+        return Err(error);
+    }
+    holds.insert(
+        identity,
+        HeldCutover {
+            file,
+            count: 1,
+        },
+    );
+    drop(holds);
+    Ok(ActiveGuard { identity })
 }
 
 #[cfg(unix)]
@@ -436,7 +536,7 @@ pub fn inspect(path: &Path) -> Result<Registration> {
     registration.validate()?;
     private_directory(&registration.directory)?;
     private_directory(path.parent().ok_or(Error::PrivateState)?)?;
-    if registration.path() != path {
+    if !same_local_path(&registration.path(), path) {
         return Err(Error::Invalid(
             "Hook registration location does not match its instance",
         ));
@@ -477,20 +577,39 @@ fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
     Ok(connection)
 }
 #[cfg(windows)]
-#[allow(unused_variables)]
 fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
     private_directory(directory)?;
     let path = directory.join(filename);
-    let file = crate::platform::open_private(&path, true, true).map_err(|_| Error::PrivateState)?;
+    // Same protocol as the service journal: precreate the rollback file and
+    // keep TRUNCATE mode. DELETE journaling removes and recreates that file,
+    // which fights a live Telegram service opening the same database.
+    let file = crate::platform::prepare_sqlite(&path).map_err(|_| Error::PrivateState)?;
+    let identity = crate::platform::file_identity(&file).map_err(|_| Error::PrivateState)?;
     file.sync_all().map_err(|_| Error::PrivateState)?;
+    let reopened =
+        crate::platform::open_private(&path, false, false).map_err(|_| Error::PrivateState)?;
+    if crate::platform::file_identity(&reopened).map_err(|_| Error::PrivateState)? != identity {
+        return Err(Error::PrivateState);
+    }
     let connection = Connection::open_with_flags(
         &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| Error::Persistence)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|_| Error::Persistence)?;
+    connection
+        .execute_batch("PRAGMA temp_store=MEMORY;")
+        .map_err(|_| Error::Persistence)?;
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode=TRUNCATE", [], |row| row.get(0))
+        .map_err(|_| Error::Persistence)?;
+    if !mode.eq_ignore_ascii_case("truncate") {
+        return Err(Error::Persistence);
+    }
     connection
         .execute_batch("PRAGMA synchronous=FULL;")
         .map_err(|_| Error::Persistence)?;
@@ -1094,7 +1213,10 @@ pub fn execute(
     // a rollout path is only a hint and was never required by the parser.
     if registration.scope.harness != Harness::Codex
         && let Some(hint) = &event.transcript_path
-        && registration.transcript.as_deref() != Some(Path::new(hint))
+        && registration
+            .transcript
+            .as_deref()
+            .is_none_or(|registered| !same_local_path(registered, Path::new(hint)))
     {
         return Err(Error::Invalid(
             "Hook transcript does not match its registration",
@@ -3792,18 +3914,19 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     verify_process(&server.process, proc_root)?;
     let observed =
         crate::platform::process_identity(server.process.pid).map_err(|_| Error::Identity)?;
-    let mut pinned =
-        crate::platform::open_regular(&server.executable).map_err(|_| Error::Identity)?;
-    let running =
+    // The stored path is where the executable lived at review time. An update
+    // can rename that file or replace the path while this process image is
+    // still the reviewed one. Trust the live image's file identity, not the
+    // path string. A new image (different file index) still fails closed.
+    let mut running =
         crate::platform::open_regular(&observed.executable).map_err(|_| Error::Identity)?;
-    let expected = (server.device, server.inode);
-    if crate::platform::file_identity(&pinned).map_err(|_| Error::Identity)? != expected
-        || crate::platform::file_identity(&running).map_err(|_| Error::Identity)? != expected
+    if crate::platform::file_identity(&running).map_err(|_| Error::Identity)?
+        != (server.device, server.inode)
     {
         return Err(Error::Identity);
     }
     let mut magic = [0; 2];
-    pinned.read_exact(&mut magic).map_err(|_| Error::Identity)?;
+    running.read_exact(&mut magic).map_err(|_| Error::Identity)?;
     if magic != *b"MZ" {
         return Err(Error::Invalid(
             "OpenCode server requires a pinned native executable",
@@ -4085,7 +4208,7 @@ pub fn enrich_native_sessions(
             continue;
         }
         let registration = inspect(&path)?;
-        if registration.directory != directory {
+        if !same_local_path(&registration.directory, directory) {
             return Err(Error::Identity);
         }
         if registration.scope.terminal.backend == crate::core::identity::Backend::Native
@@ -4381,6 +4504,7 @@ impl Verifier for NativeVerifier {
 mod windows_tests {
     use super::*;
     use crate::core::identity::{Backend, TerminalId};
+    use std::path::PathBuf;
     #[test]
     fn windows_registration_storage_and_incarnation_are_verified() {
         let directory =
@@ -4436,10 +4560,62 @@ mod windows_tests {
         crate::platform::unlock(&lock).unwrap();
         drop(lock);
         let connection = private_connection(&directory, "fixture.sqlite3").unwrap();
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert!(mode.eq_ignore_ascii_case("truncate"));
         connection
             .execute_batch("CREATE TABLE fixture(id INTEGER);")
             .unwrap();
         drop(connection);
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn nested_cutover_lock_stays_shared_until_the_last_guard_drops() {
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-hooks-windows-nested-{}",
+            std::process::id()
+        ));
+        crate::platform::ensure_private_dir(&directory).unwrap();
+        let outer = active_guard(&directory).unwrap();
+        let inner = active_guard(&directory).unwrap();
+        let probe =
+            crate::platform::open_private(&directory.join(".cutover.lock"), true, false).unwrap();
+        assert!(crate::platform::lock_exclusive(&probe, true).is_err());
+        drop(inner);
+        assert!(crate::platform::lock_exclusive(&probe, true).is_err());
+        drop(outer);
+        crate::platform::lock_exclusive(&probe, true).unwrap();
+        crate::platform::unlock(&probe).unwrap();
+        drop(probe);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn replaced_emitter_path_still_matches_the_live_image() {
+        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let pin = capture_server_emitter(
+            ProcessIdentity {
+                pid: observed.pid,
+                start_ticks: observed.creation_time,
+            },
+            &observed.executable,
+            Path::new("unused"),
+        )
+        .unwrap();
+        verify_server_emitter(&pin, Path::new("unused")).unwrap();
+        let mut relocated = pin.clone();
+        relocated.executable = std::env::temp_dir().join("daedalus-replaced-hook-binary.exe");
+        verify_server_emitter(&relocated, Path::new("unused")).unwrap();
+        relocated.inode = relocated.inode.wrapping_add(1);
+        assert!(verify_server_emitter(&relocated, Path::new("unused")).is_err());
+    }
+    #[test]
+    fn windows_path_spelling_names_the_same_local_file() {
+        let base = std::env::temp_dir().join("DaedalusHookCase").join("Transcript.JSONL");
+        let folded = PathBuf::from(base.to_string_lossy().to_ascii_lowercase());
+        let slashed = PathBuf::from(base.to_string_lossy().replace('\\', "/"));
+        assert!(same_local_path(&base, &folded));
+        assert!(same_local_path(&base, &slashed));
+        assert!(!same_local_path(&base, &base.join("other")));
     }
 }

@@ -4,6 +4,7 @@ use super::{
     config::ControlConfig,
     hook_install::{Preview, Receipt},
     hook_runtime::Options,
+    hooks,
     session_menu::{Outcome, View},
     tree,
 };
@@ -11,6 +12,23 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 type Result<T> = std::result::Result<T, String>;
+
+fn live_hook_pane(pane: &Value) -> bool {
+    match pane.get("dead") {
+        Some(Value::Bool(true)) => return false,
+        Some(Value::String(value)) if value == "1" => return false,
+        Some(Value::Number(value)) if value.as_u64() == Some(1) => return false,
+        _ => {}
+    }
+    match pane.get("exited") {
+        Some(value) if !value.is_null() => false,
+        _ => true,
+    }
+}
+
+fn native_profile_path(text: &str) -> PathBuf {
+    hooks::windows_native_path(std::path::Path::new(text))
+}
 #[derive(Clone)]
 pub struct Spec {
     pub pane: Value,
@@ -126,12 +144,21 @@ impl Menu {
         self.batch.clear();
         self.batch_active = false;
         if let Some(pane) = view.selected {
+            if !live_hook_pane(&pane) {
+                return Err(
+                    "Selected terminal is not live. Refresh and choose a running pane before registering hooks."
+                        .into(),
+                );
+            }
             return self.profile(pane, source, config, seq);
         }
         let panes = view.snapshot["panes"]
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pane| live_hook_pane(pane))
+            .collect::<Vec<_>>();
         if panes.is_empty() {
             return Err("No live terminal is available for hook registration".into());
         }
@@ -175,6 +202,7 @@ impl Menu {
                     "claude" | "codex" | "grok" | "cursor" | "hermes" | "pi" | "opencode"
                 )
             })
+            .filter(|pane| live_hook_pane(pane))
             .filter(|pane| {
                 seen.insert((
                     pane["backend"].as_str().unwrap_or("").to_owned(),
@@ -249,7 +277,7 @@ impl Menu {
         seq: &mut u64,
     ) -> Result<Outcome> {
         let (detected, note) = match source.default_hook_spec(config, &pane) {
-            Ok(Some(spec)) => (Some(spec.profile), String::new()),
+            Ok(Some(spec)) => (Some(hooks::windows_native_path(&spec.profile)), String::new()),
             Ok(None) => (
                 None,
                 "No default hook profile was detected for this terminal.".to_owned(),
@@ -714,7 +742,7 @@ impl Menu {
             if path_input
                 && !skip
                 && !none
-                && crate::core::layouts::check_path(&PathBuf::from(text)).is_err()
+                && crate::core::layouts::check_path(&native_profile_path(text)).is_err()
             {
                 return self.retry_input(seq, "Use an absolute path without parent traversal or symbolic links. Your previous setup steps are preserved.");
             }
@@ -812,7 +840,7 @@ impl Menu {
                 self.profile(pane, source, config, seq)
             }
             Stage::Profile(pane) => {
-                let profile = PathBuf::from(text);
+                let profile = native_profile_path(text);
                 if let Err(error)=crate::core::layouts::check_path(&profile) {
                     if self.batch_active { return self.batch_error(pane,error,seq); }
                     return Err(error);
@@ -832,7 +860,7 @@ impl Menu {
             }
             Stage::Transcript(mut spec) => {
                 if text != "none" {
-                    let path = PathBuf::from(text);
+                    let path = native_profile_path(text);
                     if let Err(error)=crate::core::layouts::check_path(&path) {
                         if self.batch_active { return self.batch_error(spec.pane,error,seq); }
                         return Err(error);
@@ -944,7 +972,7 @@ impl Menu {
                 spec.config.credential_file = if text == "none" {
                     None
                 } else {
-                    let path = PathBuf::from(text);
+                    let path = native_profile_path(text);
                     crate::core::layouts::check_path(&path)?;
                     Some(path)
                 };
@@ -1360,6 +1388,26 @@ mod tests {
         menu.cancel();
         assert!(!menu.pending());
         assert!(menu.batch.is_empty());
+    }
+    #[test]
+    fn dead_panes_are_not_registered() {
+        let (mut menu, mut mock, mut seq) = (Menu::default(), Mock::new(), 0);
+        let mut fleet = view();
+        fleet.selected = None;
+        fleet.snapshot = json!({"panes":[
+            {"backend":"herdr","pane_id":"gone","terminal_id":"gone","agent":"claude","dead":"1"},
+            {"backend":"herdr","pane_id":"ended","terminal_id":"ended","agent":"codex","exited":0},
+            {"backend":"herdr","pane_id":"pane","terminal_id":"terminal","agent":"claude","dead":"0"}
+        ]});
+        let start = menu.start_all(fleet, &mut seq).unwrap();
+        let description = start.frames[0]["description"].as_str().unwrap();
+        assert!(!description.contains("gone"));
+        assert!(!description.contains("ended"));
+        assert!(description.contains("claude"));
+        let mut selected = view();
+        selected.selected = Some(json!({"backend":"herdr","pane_id":"gone","terminal_id":"gone","agent":"claude","dead":true}));
+        let config = ControlConfig::fresh(&mock.dir).unwrap();
+        assert!(Menu::default().start(selected, &mut mock, &config, &mut seq).is_err());
     }
     #[test]
     fn fleet_setup_requires_separate_review_for_each_session() {

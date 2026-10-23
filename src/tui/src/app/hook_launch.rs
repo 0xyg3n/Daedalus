@@ -304,6 +304,9 @@ pub fn prepare(spec: Spec, now_ms: u64) -> Result<Plan> {
 #[cfg(not(unix))]
 #[allow(unused_variables)]
 pub fn prepare(spec: Spec, now_ms: u64) -> Result<Plan> {
+    // Do not persist spec.daedalus_binary here. On Windows that path is often the
+    // NSIS plugin extract or Daedalus-setup.exe, both deleted when the installer
+    // exits. Guided launch stays unsupported; hook install uses the stable exe.
     Err("Guided first-launch requires Unix exec; on Windows start the harness normally, then configure hooks for its existing session".into())
 }
 #[cfg(unix)]

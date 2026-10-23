@@ -190,47 +190,59 @@ impl Controller {
                 self.review = None;
                 self.notice = match result {
                     Ok(receipt) => {
-                        if receipt.installer_ready {
-                            #[cfg(any(windows, test))]
-                            {
-                                self.pending_installer =
-                                    Some(PathBuf::from(&receipt.installed_path));
-                            }
-                            self.quit = true;
-                        }
-                        // This process still runs the old executable. Keep the receipt
-                        // until restart instead of offering the same update again.
-                        self.installed = true;
-                        self.banner = Some(if receipt.installer_ready {
-                            format!("Installing {} · closing Daedalus", receipt.version)
-                        } else if receipt.activated {
-                            format!(
-                                "Updated to {} · Restart Daedalus to use it",
-                                receipt.version
-                            )
+                        // Only Daedalus-setup.exe may be handed to the parent-pid
+                        // launch. A retained daedalus.exe must not be started as
+                        // if Windows had replaced the mapped image.
+                        let handoff = installer_handoff(&receipt);
+                        if receipt.installer_ready && !handoff {
+                            self.banner = Some("Update failed · Ctrl+U details".into());
+                            "Update failed: installer handoff is not Daedalus-setup.exe. Nothing was replaced.".into()
                         } else {
-                            format!(
-                                "Downloaded {} · Manual activation required",
-                                receipt.version
-                            )
-                        });
-                        format!(
-                            "{} {}. {}{}",
-                            if receipt.installer_ready {
-                                "Starting installer for"
-                            } else if receipt.activated {
-                                "Updated to"
-                            } else {
-                                "Downloaded"
-                            },
-                            receipt.version,
-                            receipt.message,
-                            if receipt.restart_required && receipt.activated {
-                                " Restart Daedalus when ready to use the new version; your terminals stay open."
-                            } else {
-                                ""
+                            if handoff {
+                                #[cfg(any(windows, test))]
+                                {
+                                    self.pending_installer =
+                                        Some(PathBuf::from(&receipt.installed_path));
+                                }
+                                self.quit = true;
                             }
-                        )
+                            // This process still runs the old executable. Keep the receipt
+                            // until restart instead of offering the same update again.
+                            self.installed = true;
+                            self.banner = Some(if receipt.installer_ready {
+                                format!(
+                                    "Closing to run installer {} · image not replaced yet",
+                                    receipt.version
+                                )
+                            } else if receipt.activated {
+                                format!(
+                                    "Updated to {} · Restart Daedalus to use it",
+                                    receipt.version
+                                )
+                            } else {
+                                format!(
+                                    "Downloaded {} · Manual activation required",
+                                    receipt.version
+                                )
+                            });
+                            format!(
+                                "{} {}. {}{}",
+                                if receipt.installer_ready {
+                                    "Starting installer for"
+                                } else if receipt.activated {
+                                    "Updated to"
+                                } else {
+                                    "Downloaded"
+                                },
+                                receipt.version,
+                                receipt.message,
+                                if receipt.restart_required && receipt.activated {
+                                    " Restart Daedalus when ready to use the new version; your terminals stay open."
+                                } else {
+                                    ""
+                                }
+                            )
+                        }
                     }
                     Err(error) => format!(
                         "Update failed: {error}. Check the installed version before retrying."
@@ -373,7 +385,7 @@ impl Controller {
                 review.platform,
                 download_size(review.size),
                 if review.platform.ends_with("windows") {
-                    "Current-user Windows installation"
+                    "Current-user Windows installation. After this window closes, the installer asks the managed Telegram service to stop, then replaces the executable. Close other Daedalus windows first; they are not force-closed."
                 } else {
                     &review.install_path
                 }
@@ -475,6 +487,13 @@ impl Controller {
     }
 }
 
+fn installer_handoff(receipt: &InstallReceipt) -> bool {
+    receipt.installer_ready
+        && std::path::Path::new(&receipt.installed_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("Daedalus-setup.exe")
+}
 fn download_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
@@ -602,6 +621,38 @@ mod tests {
             Some(PathBuf::from("C:/private/Daedalus-setup.exe"))
         );
         assert!(ui.take_installer().is_none());
+        assert!(ui.notice.contains("was not replaced") || ui.notice.contains("Starting installer"));
+        assert!(!ui.notice.contains("Updated to 1.1.0"));
+    }
+    #[test]
+    fn retained_executable_is_not_a_parent_pid_handoff() {
+        let mut ui = Controller::new(false);
+        ui.complete(Completion::Install(Ok(InstallReceipt {
+            version: "1.1.0".into(),
+            installed_path: "C:/private/daedalus.exe".into(),
+            previous_path: "C:/private/previous.exe".into(),
+            restart_required: true,
+            activated: false,
+            installer_ready: true,
+            message: "wrong path".into(),
+        })));
+        assert!(!ui.should_quit());
+        assert!(ui.take_installer().is_none());
+        assert!(!ui.installed);
+        assert!(ui.notice.contains("Nothing was replaced"));
+    }
+    #[test]
+    fn mapped_image_failure_does_not_close_or_hand_off() {
+        let mut ui = Controller::new(false);
+        ui.show();
+        ui.complete(Completion::Install(Err(
+            "Windows cannot replace the installed Daedalus executable while the Telegram service or another Daedalus window still has it mapped. Stop the managed Telegram service from Telegram settings, close the other windows, and retry. Nothing was replaced.".into(),
+        )));
+        assert!(!ui.should_quit());
+        assert!(ui.take_installer().is_none());
+        assert!(!ui.installed);
+        assert!(ui.notice.contains("Nothing was replaced"));
+        assert!(ui.consent().is_none());
     }
     #[test]
     fn errors_and_current_release_are_visible_without_install_offer() {

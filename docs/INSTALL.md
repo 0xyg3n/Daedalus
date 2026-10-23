@@ -43,8 +43,9 @@ it from a source you trust. The Linux source installer also supports ARM64.
 Download `Daedalus-<version>-setup.exe` from [Releases](https://github.com/0xyg3n/Daedalus/releases)
 and double-click it. The per-user installer needs no PowerShell script, Git or
 compiler. It installs under `%LOCALAPPDATA%\Daedalus`, creates a Start Menu shortcut
-and opens setup. The release also includes a standalone executable and SHA-256
-checksums. Install a standalone executable before using in-app updates.
+and opens Daedalus. Setup is shown only when that launch finds no `control.json`;
+an upgrade does not rewrite configuration. The release also includes a standalone
+executable and SHA-256 checksums. Install a standalone executable before using in-app updates.
 
 The built-in **Daedalus native terminals** backend uses ConPTY; Herdr is optional.
 Native Windows multiplexers such as [tmux-windows](https://github.com/arndawg/tmux-windows)
@@ -96,7 +97,9 @@ need to be closed before replacement. PATH is not changed automatically.
 
 Windows packages target x64. On ARM64, `-AllowEmulation` explicitly selects x64
 emulation; there is no native Windows ARM64 package.
-Installation never starts a bot, service, private setup or provider sign-in.
+The installer copies the executable. It does not write private configuration, start
+Telegram, or sign in to a provider. The app opens setup only when configuration
+is absent. `telegram serve` remains an explicit command.
 Guided first launch with hooks is unavailable on Windows. Existing verified
 Herdr processes have native hook contracts for Claude Code 2.1.296+, Hermes, Pi
 and OpenCode. Codex/Grok/Cursor hook enrollment and hooks through native
@@ -214,9 +217,25 @@ Daedalus and runs that installer. The installer waits for the old process to exi
 then replaces the current-user installation and opens Daedalus. The command-line
 `update install` returns the verified installer path for manual launch after
 closing Daedalus. Neither path restarts Telegram or changes private configuration.
-Stop the managed Telegram service from Telegram settings before approving a Windows
-update, and close other Daedalus instances: Windows cannot replace an executable
-while another process is using it. Start Telegram again after installation.
+The installer asks the managed service to stop before replacing the file. If that
+request fails, stop the connection from Telegram settings, close other Daedalus
+windows, and retry: Windows cannot replace an executable while another process is
+using it. Start Telegram again after installation.
+
+The setup package runs `daedalus install` from a temporary NSIS directory
+(`%TEMP%\ns*.tmp`), not from `%LOCALAPPDATA%\Daedalus\bin\daedalus.exe`. Before
+replacing an existing file, `install_current` asks saved instances to stop via
+`release_mapped_installation` (`stop_for_uninstall`). It does not start the
+service again. `telegram_supervisor::restart_services_after_install` can spawn
+`telegram serve` from the installed image, and nothing calls it. The next TUI
+launch also does not start Telegram. It rewrites managed hook profiles that still
+name a temporary setup command (`%TEMP%\ns*.tmp`, `.daedalus-updates`,
+`.daedalus-install-*.tmp`, `daedalus-*.tmp`, `Daedalus-setup.exe`, or a
+`daedalus.exe.old` copy) so the command is the installed executable. Profiles
+that name another absolute path, including a Downloads copy or
+`share\daedalus\native\...`, are not changed. `hook run` and `telegram serve` do
+not rewrite hooks. If the graceful stop fails, installation stops and the new
+TUI does not open.
 
 On Windows, use **Installed apps → Daedalus → Uninstall**. The uninstaller verifies
 the installation receipt, requests a graceful shutdown of the managed Telegram

@@ -157,7 +157,7 @@ fn expand_one(
         .map_err(|_| "Invalid hook event scope")?;
     if scope != registration.scope
         || event.payload["registration_id"].as_str() != Some(registration.id.as_str())
-        || event.payload["transcript"] != json!(registration.transcript)
+        || !same_transcript(&registration.transcript, &event.payload["transcript"])
     {
         return Err("Hook event binding changed".into());
     }
@@ -246,6 +246,15 @@ fn expand_one(
     Ok(output)
 }
 
+fn same_transcript(registered: &Option<std::path::PathBuf>, value: &Value) -> bool {
+    match (registered, value) {
+        (None, Value::Null) => true,
+        (Some(path), Value::String(text)) => {
+            super::hook_runtime::same_local_path(path, std::path::Path::new(text))
+        }
+        _ => false,
+    }
+}
 fn recipient_key(registration: &Registration, binding: &Binding, event: &Event) -> Result<String> {
     let recipient =
         serde_json::to_vec(&binding.route_scope).map_err(|_| "Invalid recipient scope")?;

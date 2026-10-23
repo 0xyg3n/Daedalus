@@ -90,6 +90,9 @@ pub struct Reviewed {
     selection: Selection,
     plan: Value,
     digest: String,
+    /// Identity of `daedalus_binary` at review time. Empty reviews cannot launch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    daemon_identity: String,
 }
 impl Reviewed {
     fn decode(&self) -> Result<super::pane_launch::Plan> {
@@ -155,12 +158,14 @@ pub fn prepare(
         now,
     )?;
     parent.verify(&plan.request.parent)?;
+    let daemon_identity = daemon_identity_of(&plan.hook.spec.daedalus_binary)?;
     let digest = plan.fingerprint()?;
     Ok(Reviewed {
         parent,
         selection: selection.clone(),
         plan: serde_json::to_value(plan).map_err(|_| "Cannot save launch review")?,
         digest,
+        daemon_identity,
     })
 }
 pub fn apply(
@@ -170,14 +175,84 @@ pub fn apply(
     terminals: &terminals::Terminals,
     now: u64,
 ) -> Result<crate::adapters::terminal_actions::Receipt> {
+    let plan = reviewed.decode()?;
+    ensure_daemon(&reviewed.daemon_identity, &plan.hook.spec.daedalus_binary)?;
     reviewed.verify_parent(fresh)?;
-    super::pane_launch::apply(
-        &reviewed.decode()?,
-        config,
-        terminals,
-        &reviewed.digest,
-        now,
-    )
+    super::pane_launch::apply(&plan, config, terminals, &reviewed.digest, now)
+}
+
+fn ensure_daemon(expected: &str, path: &std::path::Path) -> Result<()> {
+    if expected.is_empty() {
+        return Err(
+            "Launch review has no Daedalus executable identity; review the launch again".into(),
+        );
+    }
+    let current = daemon_identity_of(path).map_err(|_| {
+        "Daedalus executable changed since this launch was reviewed; review the launch again"
+            .to_owned()
+    })?;
+    if current != expected {
+        return Err(
+            "Daedalus executable changed since this launch was reviewed; review the launch again"
+                .into(),
+        );
+    }
+    let running = std::env::current_exe().map_err(|_| "Cannot locate Daedalus")?;
+    let stable = super::hook_install::installed_launcher(running);
+    if !same_executable(path, &stable) {
+        return Err(
+            "Launch points at a replaced Daedalus executable; review the launch again".into(),
+        );
+    }
+    Ok(())
+}
+
+fn daemon_identity_of(path: &std::path::Path) -> Result<String> {
+    let metadata = std::fs::metadata(path).map_err(|_| "Cannot inspect launch executable")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok(format!(
+            "{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec()
+        ));
+    }
+    #[cfg(windows)]
+    {
+        let file = crate::platform::open_regular(path).map_err(|_| "Cannot inspect launch executable")?;
+        let (volume, index) = crate::platform::file_identity(&file)
+            .map_err(|_| "Cannot identify launch executable")?;
+        let modified = metadata
+            .modified()
+            .map_err(|_| "Cannot inspect launch executable")?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "Invalid executable time")?
+            .as_nanos();
+        Ok(format!("{volume}:{index}:{}:{modified}", metadata.len()))
+    }
+}
+
+fn same_executable(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+        false
+    }
+    #[cfg(windows)]
+    {
+        let identity = |path: &std::path::Path| {
+            let file = crate::platform::open_regular(path).ok()?;
+            crate::platform::file_identity(&file).ok()
+        };
+        identity(left).is_some() && identity(left) == identity(right)
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +284,7 @@ pub(crate) fn fixture(pane: Value) -> Reviewed {
         },
         digest: plan.fingerprint().unwrap(),
         plan: serde_json::to_value(plan).unwrap(),
+        daemon_identity: String::new(),
     }
 }
 
@@ -320,5 +396,43 @@ mod tests {
         changed = original;
         changed["cwd"] = "../relative".into();
         assert!(Parent::observe(&changed).is_err());
+    }
+    #[test]
+    fn daemon_identity_changes_when_the_executable_is_replaced() {
+        let file = std::env::temp_dir().join(format!(
+            "daedalus-launch-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file, b"v1").unwrap();
+        let first = daemon_identity_of(&file).unwrap();
+        std::fs::write(&file, b"v2-replaced-executable").unwrap();
+        let second = daemon_identity_of(&file).unwrap();
+        assert_ne!(first, second);
+        assert!(!first.contains("v1") && !second.contains("v2-replaced"));
+        let _ = std::fs::remove_file(&file);
+    }
+    #[test]
+    fn apply_rejects_a_review_without_daemon_identity_before_spawn() {
+        let reviewed = fixture(pane());
+        let config = crate::app::config::ControlConfig::fresh(std::path::Path::new(
+            crate::test_support::path("/tmp/project"),
+        ))
+        .unwrap();
+        let error = apply(
+            &reviewed,
+            &pane(),
+            &config,
+            &crate::adapters::terminals::Terminals::default(),
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("review the launch again"),
+            "{error}"
+        );
     }
 }

@@ -174,6 +174,10 @@ impl Plan {
         let directory = &self.removal.directory;
         let _active = hook_runtime::active_guard(directory).map_err(|e| e.to_string())?;
         let _lock = hook_install::lock(directory)?;
+        let binary = hook_install::installed_launcher(
+            std::env::current_exe().map_err(|_| "Cannot locate hook executable")?,
+        );
+        hook_install::ensure_service_allows_hook_change(directory, Some(&binary))?;
         let parent = self
             .removal
             .profile
@@ -236,6 +240,10 @@ pub fn rollback(path: &Path) -> Result<()> {
     }
     let _active = hook_runtime::active_guard(&removal.directory).map_err(|e| e.to_string())?;
     let _lock = hook_install::lock(&removal.directory)?;
+    let binary = hook_install::installed_launcher(
+        std::env::current_exe().map_err(|_| "Cannot locate hook executable")?,
+    );
+    hook_install::ensure_service_allows_hook_change(&removal.directory, Some(&binary))?;
     let parent = removal.profile.parent().ok_or("Profile has no parent")?;
     let _profile_lock = if parent != removal.directory {
         Some(hook_install::lock_profile(parent)?)

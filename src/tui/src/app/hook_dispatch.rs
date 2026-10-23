@@ -43,7 +43,10 @@ impl Progress {
             self.after = 0;
             return Ok(());
         }
-        self.after = events.last().map_or(self.after, |event| event.id);
+        // Advance only past work that settled. An anchor still in intent/pending
+        // must be retried: later admitted non-progress plans would otherwise
+        // keep the cursor ahead of it for the life of the service.
+        let page_last = events.last().map(|event| event.id).unwrap_or(self.after);
         let mut selected = std::collections::BTreeMap::new();
         for event in events {
             let operation = event.payload["operation"].as_str().unwrap_or_default();
@@ -65,13 +68,28 @@ impl Progress {
                     .map_err(|e| e.to_string())?;
             }
         }
+        let mut retry = None;
         for event in selected.into_values() {
             if let Err(error) = stage(journal, routes, config, registrations, &event, now) {
                 journal
                     .event_state(event.id, "failed", Some(&error))
                     .map_err(|e| e.to_string())?;
+                continue;
+            }
+            let pending = journal
+                .events_page(
+                    "hook-effects",
+                    &config.instance,
+                    &["admitted"],
+                    event.id.saturating_sub(1),
+                    1,
+                )
+                .map_err(|e| e.to_string())?;
+            if pending.first().is_some_and(|row| row.id == event.id) {
+                retry = Some(retry.map_or(event.id, |id: i64| id.min(event.id)));
             }
         }
+        self.after = retry.map_or(page_last, |id| id.saturating_sub(1));
         Ok(())
     }
 }
@@ -459,6 +477,59 @@ mod tests {
                 .events_page("hook-effects", "fixture", &["admitted"], 0, 100)
                 .unwrap()
                 .is_empty()
+        );
+    }
+    #[test]
+    fn in_flight_anchor_is_retried_after_later_non_progress_plans() {
+        let mut f = Fixture::new();
+        let first = f.admit("start", "start_progress", 1.0);
+        f.stage(&first, 1.0).unwrap();
+        f.admit("working", "update_progress", 2.0);
+        f.journal
+            .admit(
+                "hook-effects",
+                "fixture",
+                "memory",
+                &json!({"operation":"persist_memory","binding":f.binding}),
+                2.5,
+            )
+            .unwrap();
+        let mut progress = Progress::default();
+        progress
+            .tick(
+                &mut f.journal,
+                &f.routes,
+                &f.config,
+                &[("/unused".into(), f.registration.clone())],
+                3.0,
+            )
+            .unwrap();
+        assert_eq!(f.journal.rows().unwrap().len(), 1);
+        assert!(
+            f.journal
+                .events_page("hook-effects", "fixture", &["admitted"], 0, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event.event_id == "working")
+        );
+        f.complete_first(4.0);
+        progress
+            .tick(
+                &mut f.journal,
+                &f.routes,
+                &f.config,
+                &[("/unused".into(), f.registration.clone())],
+                6.0,
+            )
+            .unwrap();
+        let rows = f.journal.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].payload["edit_message_id"], 9);
+        assert!(
+            rows[1].payload["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Agent activity observed")
         );
     }
 }

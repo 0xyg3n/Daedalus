@@ -492,6 +492,10 @@ pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
 }
 /// Refuse removal while any process still uses this executable. Names only
 /// narrow the snapshot; file identity establishes which installation is in use.
+fn exited_during_scan(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
+        || error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32)
+}
 pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
     let target = file_identity(&open_regular(executable)?)?;
     let name = executable
@@ -501,8 +505,19 @@ pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
         if !observed.eq_ignore_ascii_case(&name.to_string_lossy()) {
             continue;
         }
-        let process = process_identity_with_parent(pid, Some(parent))?;
-        if file_identity(&open_regular(&process.executable)?)? == target {
+        // A service that exits between the snapshot and the open is not a mapping.
+        // Permission failures still fail closed so a live image is not replaced.
+        let process = match process_identity_with_parent(pid, Some(parent)) {
+            Ok(process) => process,
+            Err(error) if exited_during_scan(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let opened = match open_regular(&process.executable) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if file_identity(&opened)? == target {
             return Err(io::Error::other("Installed executable is still running"));
         }
     }
@@ -1371,6 +1386,17 @@ mod tests {
                 .iter()
                 .any(|entry| entry.pid == pid)
         );
+    }
+    #[test]
+    fn exited_process_is_not_a_live_executable_mapping() {
+        assert!(exited_during_scan(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Process no longer active",
+        )));
+        assert!(exited_during_scan(&std::io::Error::from_raw_os_error(
+            ERROR_INVALID_PARAMETER as i32,
+        )));
+        assert!(!exited_during_scan(&denied("Private state is in use")));
     }
     #[test]
     fn process_identity_matches_current_user_and_is_stable() {

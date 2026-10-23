@@ -141,6 +141,8 @@ impl SetupPlan {
         &self.config
     }
 
+    /// Writes `control.json` only. `telegram serve` stays an explicit command;
+    /// applying setup does not start or stop the service.
     pub fn apply(self) -> Result<SetupResult, String> {
         let destination = &self.destination;
         let directory = destination

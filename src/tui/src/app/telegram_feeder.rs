@@ -153,7 +153,7 @@ impl Feeder for NativeFeeder {
         // From reservation onward, preserve Busy even if verification fails.
         // No cancellation path can accidentally permit an uncertain replay.
         if hook_runtime::verify_live_session(r, &self.terminals).is_err() {
-            return Ok(Submission::Unavailable);
+            return Ok(Submission::Busy);
         }
         match self.terminals.action(actual, Action::Send(text)) {
             Ok(receipt)

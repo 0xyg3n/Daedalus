@@ -166,8 +166,12 @@ impl ServiceConfig {
     }
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = read_private(path, LIMIT)?.ok_or("Service configuration is missing")?;
+        // PowerShell 5.1 and some Windows editors write a UTF-8 BOM. The
+        // service reloads this file while it is running; rejecting the BOM
+        // after an update makes that reload fail closed and drop the process.
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
         let config: Self =
-            serde_json::from_slice(&bytes).map_err(|_| "Invalid service configuration JSON")?;
+            serde_json::from_slice(bytes).map_err(|_| "Invalid service configuration JSON")?;
         config.validate()?;
         Ok(config)
     }
@@ -283,6 +287,15 @@ impl ServicePlan {
     }
     pub(crate) fn prepare(path: &Path, config: ServiceConfig) -> Result<Self> {
         valid_path(path)?;
+        if in_install_tree(path)
+            || in_install_tree(&config.token_file)
+            || config
+                .registrations
+                .iter()
+                .any(|path| in_install_tree(path))
+        {
+            return Err("Telegram configuration cannot be stored under %LOCALAPPDATA%\\Daedalus. That directory is the install tree an update replaces. Use the config directory (%APPDATA%\\Daedalus or an explicit --config-dir outside the install tree).".into());
+        }
         config.validate()?;
         let before = read_private(path, LIMIT)?;
         let after = serde_json::to_vec_pretty(&config)
@@ -493,10 +506,218 @@ pub fn run(args: &[String], writer: &mut impl Write) -> Result<()> {
         .map_err(|_| "Cannot write service plan")?;
     if apply {
         let changed = plan.apply(&plan.approval_token())?;
-        writeln!(writer, "\nApplied: {changed}; service remains stopped.")
+        let note = service_apply_note(path.parent());
+        writeln!(writer, "\nApplied: {changed}; {note}.")
             .map_err(|_| "Cannot write service outcome")?
     }
     Ok(())
+}
+
+fn service_apply_note(directory: Option<&Path>) -> String {
+    let Some(directory) = directory else {
+        return "service was not started".into();
+    };
+    if let Some(record) = running_service(directory) {
+        if service_matches_current(&record) {
+            return "the Telegram service is still running and was not restarted".into();
+        }
+        return "a pre-update Telegram service is still running and was not restarted".into();
+    }
+    match super::telegram_supervisor::inspect(directory) {
+        Ok(observation) if observation.state == "stopped" => "service remains stopped".into(),
+        Ok(observation) => {
+            format!("service state is {} and was not changed", observation.state)
+        }
+        Err(_) => "service state could not be confirmed; it was not started".into(),
+    }
+}
+
+/// `%LOCALAPPDATA%\Daedalus` is the Windows install and update tree.
+/// Configuration belongs in `%APPDATA%\Daedalus` (or another directory outside that tree).
+pub(crate) fn in_install_tree(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let Ok(root) = crate::platform::user_local_data_directory() else {
+            return false;
+        };
+        return windows_path_within(&root.join("Daedalus"), path);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Prefix(prefix) => {
+                let text = prefix.as_os_str().to_string_lossy();
+                let text = text
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(text.as_ref())
+                    .trim_end_matches('\\');
+                Some(text.to_ascii_lowercase())
+            }
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_path_within(root: &Path, path: &Path) -> bool {
+    let root = windows_components(root);
+    let path = windows_components(path);
+    path.len() >= root.len() && path.iter().zip(&root).all(|(path, root)| path == root)
+}
+
+#[cfg(windows)]
+pub(crate) fn same_directory(left: &Path, right: &Path) -> bool {
+    if let (Ok(left), Ok(right)) = (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        return directory_components_equal(&left, &right);
+    }
+    directory_components_equal(left, right)
+}
+
+#[cfg(windows)]
+fn directory_components_equal(left: &Path, right: &Path) -> bool {
+    windows_components(left) == windows_components(right)
+}
+
+/// Live owner for this instance, proven by pid and creation time.
+/// Missing or unverified records are not treated as a running service.
+#[cfg(windows)]
+pub(crate) fn running_service(directory: &Path) -> Option<super::telegram_supervisor::Record> {
+    let bytes = read_private(&directory.join("telegram-runtime.json"), 8192).ok()??;
+    let record: super::telegram_supervisor::Record = serde_json::from_slice(&bytes).ok()?;
+    if record.version != 1 || !same_directory(&record.directory, directory) {
+        return None;
+    }
+    let config = ServiceConfig::load(&directory.join("telegram-service.json")).ok()?;
+    if record.instance != config.instance || record.bot_id != config.bot_id {
+        return None;
+    }
+    let process = crate::platform::process_identity(record.pid).ok()?;
+    let owner = crate::platform::current_identity().ok()?;
+    if process.creation_time != record.start_ticks || process.owner != owner {
+        return None;
+    }
+    daedalus_image(&process.executable).then_some(record)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn running_service(_directory: &Path) -> Option<super::telegram_supervisor::Record> {
+    None
+}
+
+#[cfg(windows)]
+fn daedalus_image(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    // Installers rename a running image to daedalus.exe.old before writing the new file.
+    lower == "daedalus"
+        || lower == "daedalus.exe"
+        || lower == "daedalus-tui"
+        || lower == "daedalus-tui.exe"
+        || lower.starts_with("daedalus.exe.")
+        || lower.starts_with("daedalus-tui.exe.")
+}
+
+/// True only when the live image is this process's executable and that file
+/// was not created after the service started. Opening the recorded path is not
+/// enough: Windows can replace the path while the old image keeps running.
+#[cfg(windows)]
+pub(crate) fn service_matches_current(record: &super::telegram_supervisor::Record) -> bool {
+    let Ok(process) = crate::platform::process_identity(record.pid) else {
+        return false;
+    };
+    if process.creation_time != record.start_ticks {
+        return false;
+    }
+    let Ok(current) = std::env::current_exe() else {
+        return false;
+    };
+    same_file(&process.executable, &current)
+        && !file_replaced_after(&process.executable, process.creation_time)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn service_matches_current(_record: &super::telegram_supervisor::Record) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn same_file(left: &Path, right: &Path) -> bool {
+    let identity = |path: &Path| {
+        let file = crate::platform::open_regular(path).ok()?;
+        crate::platform::file_identity(&file).ok()
+    };
+    identity(left).is_some() && identity(left) == identity(right)
+}
+
+#[cfg(windows)]
+fn file_replaced_after(path: &Path, start_filetime: u64) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return true;
+    };
+    let Some(started) = filetime_to_system(start_filetime) else {
+        return true;
+    };
+    let newer = |stamp: std::io::Result<std::time::SystemTime>| match stamp {
+        Ok(stamp) => stamp
+            .duration_since(started)
+            .is_ok_and(|elapsed| elapsed > std::time::Duration::from_secs(2)),
+        Err(_) => true,
+    };
+    // In-place replacement can keep the original creation time. A newer
+    // modification time still means this path is not the image that started.
+    newer(metadata.created()) || newer(metadata.modified())
+}
+
+#[cfg(windows)]
+fn filetime_to_system(filetime: u64) -> Option<std::time::SystemTime> {
+    const UNIX_OFFSET: u64 = 11_644_473_600 * 10_000_000;
+    let ticks = filetime.checked_sub(UNIX_OFFSET)?;
+    let seconds = ticks / 10_000_000;
+    let sub = ticks % 10_000_000;
+    Some(
+        std::time::UNIX_EPOCH
+            + std::time::Duration::new(seconds, u32::try_from(sub * 100).ok()?),
+    )
+}
+
+pub(crate) fn preupdate_stop_digest(record: &super::telegram_supervisor::Record) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(
+                record.pid,
+                record.start_ticks,
+                &record.instance,
+                &record.directory,
+                record.bot_id
+            ))
+            .expect("serializable stop identity")
+        )
+    )
+}
+
+/// Ask the running service to exit. The service accepts this only when pid,
+/// creation time, directory and instance still match, so a recycled pid is inert.
+pub(crate) fn write_cooperative_stop(record: &super::telegram_supervisor::Record) -> Result<()> {
+    let payload = serde_json::to_vec(&json!({
+        "pid": record.pid,
+        "start_ticks": record.start_ticks,
+        "instance": record.instance,
+        "directory": record.directory
+    }))
+    .map_err(|_| "Cannot encode stop request")?;
+    layouts::write_private(&record.directory.join("telegram-stop.json"), &payload)
 }
 
 /// Open only an owned private database under an owned private directory.
@@ -915,6 +1136,23 @@ mod tests {
         std::os::unix::fs::symlink(&target, &sidecar).unwrap();
         assert!(private_connection(&separate).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"123:fixture");
+    }
+    #[test]
+    fn load_accepts_a_utf8_bom_without_exposing_the_token_file() {
+        let temp = Temp::new();
+        let path = temp.0.join("service.json");
+        let config = config(&temp.0);
+        let plan = ServicePlan::fresh(&path, config).unwrap();
+        plan.apply(&plan.approval_token()).unwrap();
+        let mut bytes = vec![0xef, 0xbb, 0xbf];
+        bytes.extend(fs::read(&path).unwrap());
+        layouts::write_private(&path, &bytes).unwrap();
+        let loaded = ServiceConfig::load(&path).unwrap();
+        assert_eq!(loaded.bot_id, 123);
+        assert_eq!(loaded.instance, "example");
+        assert!(!in_install_tree(&path));
+        let rendered = serde_json::to_string(&loaded.preview()).unwrap();
+        assert!(!rendered.contains("token_file"));
     }
     #[test]
     fn stale_review_rejected_without_overwriting_configuration() {

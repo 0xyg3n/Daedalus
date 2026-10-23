@@ -58,7 +58,12 @@ Changing a chat name does not change access or its destination.
 
 Telegram runs as a separate process of the Daedalus binary. No separate daemon
 package or systemd unit is required. Closing the TUI leaves a started connection
-running; stop it explicitly through the Telegram menu when needed.
+running; stop it explicitly through the Telegram menu when needed. Setup and
+Windows TUI startup do not start `telegram serve`. A Windows install or uninstall
+can ask a saved instance to stop so `daedalus.exe` can be replaced; install does
+not start it afterwards. Start the connection again from Telegram settings after
+the new version opens. `telegram serve` itself refuses a temporary updater image
+when that image is not the installed file.
 
 ```sh
 daedalus telegram status --config-dir /absolute/private/instance

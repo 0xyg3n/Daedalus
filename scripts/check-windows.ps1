@@ -31,6 +31,7 @@ if (-not $SkipInstallerFixtures) {
     try {
         $binary = Join-Path $fixture 'fixture.exe'
         # Header-only fixture: installer verifies bytes/architecture, never executes it.
+        # This prefix is not %LOCALAPPDATA%\Daedalus, so uninstall --prepare is not run.
         $bytes = New-Object byte[] 256
         $bytes[0] = 0x4d; $bytes[1] = 0x5a; $bytes[0x3c] = 0x80
         $bytes[0x80] = 0x50; $bytes[0x81] = 0x45
@@ -58,6 +59,14 @@ if (-not $SkipInstallerFixtures) {
         if ($receipt[0] -ne [byte][char]'{') { throw 'Installer receipt must be UTF-8 JSON without a BOM.' }
         # A repeat install exercises receipt validation and private atomic replacement.
         & $installer -Binary $binary -Sha256 $hash -Prefix $prefix -Confirm:$false
+        # Share the file for readers so receipt hashing works, but not for replacement.
+        $locked = [IO.File]::Open($installed, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $rejected = $false
+            try { & $installer -Binary $binary -Sha256 $hash -Prefix $prefix -Confirm:$false } catch { $rejected = $true }
+            if (-not $rejected) { throw 'Installer replaced an in-use executable.' }
+            if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $hash) { throw 'In-use executable was removed or changed.' }
+        } finally { $locked.Dispose() }
         $rejected = $false
         try { & $installer -Binary $binary -Sha256 ('0' * 64) -Prefix $prefix -Confirm:$false } catch { $rejected = $true }
         if (-not $rejected) { throw 'Installer accepted a mismatched checksum.' }

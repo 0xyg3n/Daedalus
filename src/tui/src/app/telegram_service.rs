@@ -561,10 +561,21 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     )?;
     let token = config.read_token()?;
     let global = global_directory()?;
-    let _owner = Owner::acquire(&directory, &global, config.bot_id)?;
+    let owner = Owner::acquire(&directory, &global, config.bot_id)?;
     // Revalidate under ownership: a concurrent cutover may have retired this
     // source after the early read-only check.
     super::cutover::activation_check(&directory)?;
+    #[cfg(windows)]
+    let running_image = super::telegram_supervisor::capture_running_image()?;
+    #[cfg(windows)]
+    if let Some(executable) = super::telegram_supervisor::replacement_for(&running_image)? {
+        // Drop ownership before the installed image starts, or it cannot lock.
+        drop(owner);
+        super::telegram_supervisor::spawn_installed_service(&directory, &executable)?;
+        writeln!(out, "{{\"service\":\"telegram\",\"state\":\"stopped\"}}")
+            .map_err(|_| "Cannot write service state")?;
+        return Ok(());
+    }
     super::telegram_supervisor::record(
         &directory,
         &config,
@@ -643,6 +654,8 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();
     let mut checked = 0.0;
+    #[cfg(windows)]
+    let mut handoff: Option<std::path::PathBuf> = None;
     let result = (|| -> Result<()> {
         super::telegram_supervisor::record(
             &directory,
@@ -657,6 +670,13 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
             }
             let now = clock();
             if now - checked >= 1.0 {
+                #[cfg(windows)]
+                if let Some(executable) =
+                    super::telegram_supervisor::replacement_for(&running_image)?
+                {
+                    handoff = Some(executable);
+                    break;
+                }
                 let next = ServiceConfig::load(&path)?;
                 registrations =
                     refresh_policy(&config, &next, &directory, &mut engine, &mut feeder)?;
@@ -717,6 +737,20 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         &config,
         super::telegram_supervisor::Phase::Stopped,
     );
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    let restart = result.is_ok()
+        && poll_result.is_ok()
+        && send_result.is_ok()
+        && stopping_result.is_ok()
+        && stopped_result.is_ok();
+    // Release the image and the owner lock before any replacement process starts.
+    drop(owner);
+    #[cfg(windows)]
+    if restart {
+        if let Some(executable) = handoff {
+            super::telegram_supervisor::spawn_installed_service(&directory, &executable)?;
+        }
+    }
     result?;
     poll_result?;
     send_result?;
@@ -728,24 +762,139 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
 }
 
 #[cfg(windows)]
+fn wide_path(path: &std::path::Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if value.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Path contains NUL",
+        ));
+    }
+    value.push(0);
+    Ok(value)
+}
+/// Owner mutex for one service lock file.
+/// Share mode omits `FILE_SHARE_DELETE`: with delete sharing, a second process
+/// can replace the directory entry and lock the new file while this handle
+/// still "owns" the deleted one. The byte lock is one byte, not `u32::MAX` —
+/// a 2^64-1 range overflows and Windows does not treat it as exclusive.
+#[cfg(windows)]
+fn open_service_lock(path: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+        },
+    };
+    if create && !path.exists() {
+        // Seed the owner-only ACL, then reopen without delete sharing.
+        drop(crate::platform::open_private(path, true, true)?);
+    }
+    let handle = unsafe {
+        CreateFileW(
+            wide_path(path)?.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
+    crate::platform::validate_private_file(&file)?;
+    Ok(file)
+}
+#[cfg(windows)]
+fn lock_owner_byte(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
+        System::IO::OVERLAPPED,
+    };
+    unsafe {
+        let mut overlap: OVERLAPPED = std::mem::zeroed();
+        if LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlap,
+        ) == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+#[cfg(windows)]
+fn unlock_owner_byte(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Storage::FileSystem::UnlockFileEx, System::IO::OVERLAPPED};
+    unsafe {
+        let mut overlap: OVERLAPPED = std::mem::zeroed();
+        if UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlap) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+/// `Ok(true)` when another owner holds this lock. Does not create the file.
+#[cfg(windows)]
+pub(crate) fn probe_owner(path: &std::path::Path) -> std::io::Result<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+    let file = match open_service_lock(path, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
+            return Ok(true);
+        }
+        Err(error) => return Err(error),
+    };
+    match lock_owner_byte(&file) {
+        Ok(()) => {
+            unlock_owner_byte(&file)?;
+            Ok(false)
+        }
+        Err(error) if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+#[cfg(windows)]
 impl Drop for OwnerLock {
     fn drop(&mut self) {
-        let _ = crate::platform::unlock(&self.0);
+        // Release the byte even if a duplicated handle outlives this guard.
+        // Never delete the lock file; a replacement inode admits a second owner.
+        let _ = unlock_owner_byte(&self.0);
     }
 }
 #[cfg(windows)]
 fn lock(path: &std::path::Path) -> Result<OwnerLock> {
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
     crate::core::layouts::check_path(path)?;
     let parent = path.parent().ok_or("Missing service lock directory")?;
     crate::platform::ensure_private_dir(parent)
         .map_err(|_| "Cannot create private service lock directory")?;
     crate::platform::validate_private_dir(parent)
         .map_err(|_| "Service lock directory is not private and owned")?;
-    let file = crate::platform::open_private(path, true, true)
-        .map_err(|_| "Cannot open service owner lock")?;
-    crate::platform::validate_private_file(&file).map_err(|_| "Service owner lock is unsafe")?;
-    crate::platform::lock_exclusive(&file, true)
-        .map_err(|_| "Another service already owns this bot or instance")?;
+    let owned = |error: std::io::Error| -> String {
+        if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+            || error.raw_os_error() == Some(33)
+        {
+            "Another service already owns this bot or instance".into()
+        } else {
+            "Cannot open service owner lock".into()
+        }
+    };
+    let file = open_service_lock(path, true).map_err(owned)?;
+    lock_owner_byte(&file).map_err(|_| "Another service already owns this bot or instance")?;
     Ok(OwnerLock(file))
 }
 #[cfg(unix)]
@@ -790,8 +939,15 @@ impl Drop for ServiceSignals {
 }
 #[cfg(windows)]
 unsafe extern "system" fn console_stop(event: u32) -> windows_sys::core::BOOL {
-    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
-    if matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+    // Logoff and shutdown are how Windows updates ask a detached console
+    // process to leave. Cooperative stop only; this handler never terminates.
+    if matches!(
+        event,
+        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+    ) {
         STOP.store(true, Ordering::Release);
         1
     } else {
@@ -803,14 +959,16 @@ struct ServiceSignals(bool);
 #[cfg(windows)]
 impl ServiceSignals {
     fn install() -> Result<Self> {
-        if unsafe { windows_sys::Win32::System::Console::GetConsoleCP() } == 0 {
-            // Detached managed service uses its exact private cooperative request.
-            return Ok(Self(false));
-        }
+        // A detached service has no console code page, but shutdown events are
+        // still delivered when a handler is registered. Failure there is not
+        // fatal: the private stop file remains the installer's signal.
         if unsafe {
             windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_stop), 1)
         } == 0
         {
+            if unsafe { windows_sys::Win32::System::Console::GetConsoleCP() } == 0 {
+                return Ok(Self(false));
+            }
             return Err("Cannot install service console handler".into());
         }
         Ok(Self(true))

@@ -1,10 +1,12 @@
 //! Native harness runtime bridges. Generated code contains explicit selected
 //! paths/identities only; model text is stdin JSON, never shell command source.
 use super::hook_runtime::Registration;
+use super::hooks::{self};
 use std::path::Path;
 /// OpenCode v2 local server plugin. Native SDK methods supply canonical context;
 /// raw terminal output and volatile idle notifications never authorize readiness.
 pub fn opencode(registration: &Registration, binary: &Path) -> Result<Vec<u8>, String> {
+    let binary = hooks::windows_native_path(&hooks::stable_hook_binary(binary));
     let config = serde_json::json!({"binary":binary,"registration":registration.path(),"session":registration.scope.conversation,"id":format!("daedalus.session-hooks.{}",registration.id)});
     let mut text = format!(
         "// Daedalus managed OpenCode bridge v2: {}\n",
@@ -73,6 +75,7 @@ export default Plugin.define({id:config.id,async setup(ctx) {
     Ok(text.into_bytes())
 }
 pub fn pi(registration: &Registration, binary: &Path) -> Result<Vec<u8>, String> {
+    let binary = hooks::windows_native_path(&hooks::stable_hook_binary(binary));
     let config = serde_json::json!({"binary":binary,"registration":registration.path(),"session":registration.scope.conversation,"transcript":registration.transcript});
     let mut text = format!("// Daedalus managed Pi bridge v1: {}\n", registration.id);
     text.push_str("import { spawnSync } from 'node:child_process';\nimport { randomUUID } from 'node:crypto';\nconst config = ");
@@ -82,12 +85,19 @@ pub fn pi(registration: &Registration, binary: &Path) -> Result<Vec<u8>, String>
     text.push_str(r#";
 export default function (pi) {
   const boot = randomUUID(); let sequence = 0, turn = null, memory = null;
+  function sameFile(left, right) {
+    if (typeof left !== 'string' || typeof right !== 'string') return false;
+    const norm = (value) => value.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+    return norm(left) === norm(right);
+  }
   function emit(kind, ctx, fields = {}) {
     const session = ctx.sessionManager.getSessionId();
     if (session !== config.session) return {};
+    const reported = ctx.sessionManager.getSessionFile() ?? null;
+    const transcript = config.transcript && sameFile(reported, config.transcript) ? config.transcript : reported;
     const payload = JSON.stringify({bridge_version:'daedalus.pi.v1',session_id:session,
       hook_event_name:kind,event_id:`${boot}-${++sequence}`,turn_id:turn,
-      transcript_path:config.transcript===null?null:(ctx.sessionManager.getSessionFile() ?? null),...fields});
+      transcript_path:transcript,...fields});
     if (Buffer.byteLength(payload) > 1048576) throw new Error('Daedalus hook payload exceeds limit');
     const result = spawnSync(config.binary,['hook','run','--registration',config.registration,'--event-kind',kind],
       {input:payload,encoding:'utf8',timeout:15000,maxBuffer:1048576,windowsHide:true,stdio:['pipe','pipe','pipe']});
@@ -210,4 +220,33 @@ if(!rejected)throw new Error('Hook failure was hidden');
         fs::remove_dir_all(root).unwrap();
     }
     use std::fs;
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn pi_bridge_reuses_registered_transcript_spelling() {
+        let registration: Registration = serde_json::from_value(serde_json::json!({
+            "version":1,"id":"fixture","directory":"/tmp/hooks",
+            "scope":{"instance":"fixture","harness":"pi","conversation":"session",
+                "terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"}},
+            "goal_id":null,"harness_process":null,"transcript":"C:/Sessions/updates.jsonl",
+            "events":["Stop"],
+            "options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},
+            "activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000
+        }))
+        .unwrap();
+        let source = String::from_utf8(
+            pi(&registration, std::path::Path::new("/tmp/daedalus-bridge")).unwrap(),
+        )
+        .unwrap();
+        assert!(source.contains("function sameFile"));
+        assert!(source.contains(
+            "config.transcript && sameFile(reported, config.transcript) ? config.transcript"
+        ));
+        assert!(source.contains("C:/Sessions/updates.jsonl"));
+        assert!(!source.contains("shell:true"));
+    }
 }

@@ -80,6 +80,11 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
     {
         return Err("Bindings need an exact registration; bind also needs a nonzero chat and positive actor".into());
     }
+    // Status and stop must still see a service whose config was saved in the
+    // install tree. Starting or writing there would be wiped by the next update.
+    if !matches!(verb, "status" | "stop") && super::telegram_config::in_install_tree(&directory) {
+        return Err("Telegram configuration cannot be stored under %LOCALAPPDATA%\\Daedalus. That directory is the install tree an update replaces. Use the config directory (%APPDATA%\\Daedalus or an explicit --config-dir outside the install tree).".into());
+    }
     let approval = flags.remove("--approve");
     if approval
         .as_ref()
@@ -114,19 +119,37 @@ pub fn run_with(
             start: command.verb == "start",
         },
         "bindings" => Request::Bindings {
-            registration: command.registration.ok_or("Registration missing")?,
+            registration: command
+                .registration
+                .clone()
+                .ok_or("Registration missing")?,
         },
         "bind" => Request::Bind {
-            registration: command.registration.ok_or("Registration missing")?,
-            chat: command.chat.ok_or("Chat missing")?,
-            actor: command.actor.ok_or("Actor missing")?,
+            registration: command
+                .registration
+                .clone()
+                .ok_or("Registration missing")?,
+            chat: command.chat.clone().ok_or("Chat missing")?,
+            actor: command.actor.clone().ok_or("Actor missing")?,
         },
         _ => return Err("Unknown Telegram operation".into()),
     };
     let mutation = ["start", "stop", "bind"].contains(&command.verb.as_str());
-    let value = match execute(&command.directory, request)? {
+    let executed = execute(&command.directory, request);
+    if let Err(error) = &executed
+        && command.verb == "stop"
+        && error == "No verified service process to stop"
+    {
+        return stop_unverified(&command, out);
+    }
+    let mut value = match executed? {
         Reply::Data(value) if !mutation => value,
         Reply::Plan(plan) if mutation => {
+            if command.verb == "start"
+                && super::telegram_config::running_service(&command.directory).is_some()
+            {
+                return Err("Service already owns this instance. Stop the running Telegram process before starting another.".into());
+            }
             if let Some(approval) = command.approval {
                 if approval != plan.approval() {
                     return Err(
@@ -144,8 +167,71 @@ pub fn run_with(
         }
         _ => return Err("Unexpected Telegram administration response".into()),
     };
+    if command.verb == "status" {
+        annotate_status(&command.directory, &mut value);
+    }
     serde_json::to_writer_pretty(&mut *out, &value).map_err(|_| "Cannot write Telegram output")?;
     writeln!(out).map_err(|_| "Cannot write Telegram output".into())
+}
+
+fn annotate_status(directory: &Path, value: &mut serde_json::Value) {
+    let Some(record) = super::telegram_config::running_service(directory) else {
+        return;
+    };
+    if super::telegram_config::service_matches_current(&record) {
+        return;
+    }
+    if let Some(service) = value.get_mut("service") {
+        service["state"] = serde_json::json!("stale");
+        service["healthy"] = serde_json::json!(false);
+        service["current_executable"] = serde_json::json!(false);
+        service["message"] = serde_json::json!(
+            "Telegram is still running as a pre-update process. It is not healthy for this Daedalus version. Stop it, then start it again."
+        );
+    }
+}
+
+fn stop_unverified(command: &Command, out: &mut impl Write) -> Result<()> {
+    let Some(record) = super::telegram_config::running_service(&command.directory) else {
+        return Err("No verified service process to stop".into());
+    };
+    let approval = super::telegram_config::preupdate_stop_digest(&record);
+    let value = if let Some(given) = &command.approval {
+        if given != &approval {
+            return Err(
+                "Telegram state changed since preview; review the new plan before applying".into(),
+            );
+        }
+        let Some(again) = super::telegram_config::running_service(&command.directory) else {
+            return Err(
+                "Telegram state changed since preview; review the new plan before applying".into(),
+            );
+        };
+        if super::telegram_config::preupdate_stop_digest(&again) != approval {
+            return Err(
+                "Telegram state changed since preview; review the new plan before applying".into(),
+            );
+        }
+        super::telegram_config::write_cooperative_stop(&again)?;
+        serde_json::json!({
+            "state": "submitted",
+            "operation": "stop",
+            "current_executable": false,
+            "healthy": false,
+            "message": "Cooperative stop requested for the pre-update Telegram service. It is not healthy for this Daedalus version. Refresh status after it exits."
+        })
+    } else {
+        serde_json::json!({
+            "operation": "stop",
+            "approval": approval,
+            "current_executable": false,
+            "healthy": false,
+            "effect": "Requests cooperative stop of the pre-update Telegram service. It is not healthy for this Daedalus version. Refresh status to observe the result."
+        })
+    };
+    serde_json::to_writer_pretty(&mut *out, &value).map_err(|_| "Cannot write Telegram output")?;
+    writeln!(out).map_err(|_| "Cannot write Telegram output")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -336,6 +422,38 @@ mod tests {
             &mut Vec::new(),
         );
         assert_eq!(result.unwrap_err(), "fixture: no verified process");
+    }
+    #[test]
+    fn stop_without_a_live_preupdate_process_stays_unverified() {
+        let fixture = Fixture::new();
+        let result = run_with(
+            fixture.command("stop", &[]),
+            |_, request| {
+                assert!(matches!(request, Request::Service { start: false }));
+                Err("No verified service process to stop".into())
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(result.unwrap_err(), "No verified service process to stop");
+        assert!(!fixture.0.join("telegram-stop.json").exists());
+    }
+    #[test]
+    fn status_does_not_invent_healthy_without_a_live_service_record() {
+        let fixture = Fixture::new();
+        let mut output = Vec::new();
+        run_with(
+            fixture.command("status", &[]),
+            |_, request| {
+                assert!(matches!(request, Request::Inspect));
+                Ok(Reply::Data(json!({"service":{"state":"running"}})))
+            },
+            &mut output,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["service"]["state"], "running");
+        assert!(value["service"].get("healthy").is_none());
+        assert!(!String::from_utf8(output).unwrap().contains("offline_fixture"));
     }
     #[test]
     fn parser_rejects_unreviewed_or_mismatched_options() {

@@ -1,5 +1,6 @@
 //! Local hook/goal CLI. Hook stdout is reserved for the harness response.
 use super::{hook_install, hook_runtime, hooks};
+use std::path::Path;
 use crate::core::{goal_store::Control, layouts};
 use crate::{
     adapters::terminals::Terminals,
@@ -170,7 +171,7 @@ pub fn run(
     if source.is_some() {
         return Err("--from is only valid for hook install or launch".into());
     }
-    let path = registration.ok_or("Missing --registration")?;
+    let path = resolve_registration(registration.ok_or("Missing --registration")?)?;
     layouts::check_path(&path)?;
     if family == "hook" && command == "run" {
         let result = hook_runtime::run_expected(reader, writer, &path, event_id, event_kind);
@@ -324,7 +325,7 @@ pub(crate) fn profile(
                         .parse()
                         .map_err(|_| "Invalid server generation")?,
                 },
-                &PathBuf::from(take(&mut fields, "--server-binary")?),
+                &native_path(&take(&mut fields, "--server-binary")?),
                 &terminals.proc_root,
             )
             .map_err(|e| e.to_string())?,
@@ -351,10 +352,14 @@ pub(crate) fn profile(
                 .map_err(|_| "Invalid process generation")?,
         },
         server_emitter,
-        directory: take(&mut fields, "--directory")?.into(),
-        profile: take(&mut fields, "--profile")?.into(),
-        binary: take(&mut fields, "--binary")?.into(),
-        transcript: fields.remove("--transcript").map(PathBuf::from),
+        directory: native_path(&take(&mut fields, "--directory")?),
+        profile: native_path(&take(&mut fields, "--profile")?),
+        binary: hooks::stable_hook_binary(&hook_install::installed_launcher(native_path(&take(
+            &mut fields, "--binary",
+        )?))),
+        transcript: fields
+            .remove("--transcript")
+            .map(|path| native_path(path)),
         registration_id: take(&mut fields, "--registration-id")?,
         harness_version: take(&mut fields, "--version")?,
         goal_id: fields.remove("--goal-id").map(str::to_owned),
@@ -389,6 +394,36 @@ pub(crate) fn profile(
             &serde_json::to_value(preview).map_err(|_| "Cannot encode preview")?,
         )
     }
+}
+
+fn native_path(value: &str) -> PathBuf {
+    hooks::windows_native_path(Path::new(value))
+}
+
+/// Hook argv can spell the same registration with different Windows separators
+/// or a verbatim prefix. Identity checks require `Registration::path()` bytes.
+fn resolve_registration(path: PathBuf) -> Result<PathBuf> {
+    let normalized = path
+        .to_str()
+        .map(native_path)
+        .unwrap_or_else(|| path.clone());
+    for candidate in [path.clone(), normalized] {
+        if hook_runtime::inspect(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+        let Some(bytes) = layouts::read_private(&candidate)? else {
+            continue;
+        };
+        let Ok(registration) = serde_json::from_slice::<hook_runtime::Registration>(&bytes) else {
+            continue;
+        };
+        if hooks::paths_equivalent(&registration.path(), &candidate)
+            || hooks::paths_equivalent(&registration.path(), &path)
+        {
+            return Ok(registration.path());
+        }
+    }
+    Ok(path)
 }
 
 fn write_json(writer: &mut impl Write, value: &serde_json::Value) -> Result<()> {

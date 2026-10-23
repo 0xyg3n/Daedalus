@@ -61,6 +61,29 @@ fn prepare_uninstall_at(
         .map_err(|_| "Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved.".into())
 }
 
+/// The NSIS update waits for the parent TUI only. A Telegram service keeps the
+/// installed image mapped, so replace either fails or swaps the file under a
+/// live mapping. Receipt is checked first. This never force-kills.
+#[cfg(test)]
+fn release_mapped_installation(
+    destination: &Path,
+    preferences: &Path,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    verify_installed(destination)?;
+    let deadline = std::time::Instant::now() + timeout;
+    for directory in super::instances::saved_directories(preferences)? {
+        super::telegram_supervisor::stop_for_uninstall(
+            &directory,
+            destination,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        )?;
+    }
+    platform::check_executable_not_running(destination).map_err(|_| {
+        "Close other Daedalus windows before updating. Telegram was stopped gracefully; your configuration is preserved.".into()
+    })
+}
+
 fn verify_installed(destination: &Path) -> Result<(), String> {
     let base = destination
         .parent()
@@ -155,6 +178,20 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
     } else {
         false
     };
+    let mut restart_telegram = Vec::new();
+    if destination.exists() && !same_file {
+        let cwd = std::env::current_dir().map_err(|_| "Cannot resolve configuration directory")?;
+        let preferences =
+            super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+        restart_telegram = super::telegram_supervisor::stop_running_services_for_install(
+            &preferences,
+            &destination,
+            std::time::Duration::from_secs(150),
+        )?;
+        platform::check_executable_not_running(&destination).map_err(|_| {
+            "Close other Daedalus windows before updating. Telegram was stopped gracefully; your configuration is preserved.".to_string()
+        })?;
+    }
     if destination.exists() {
         platform::secure_owned_file(&destination)
             .map_err(|e| format!("Cannot secure installed executable: {e}"))?;
@@ -171,14 +208,29 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
             output.write_all(&bytes).map_err(|e| e.to_string())?;
             output.sync_all().map_err(|e| e.to_string())?;
             drop(output);
+            if destination.exists() {
+                platform::check_executable_not_running(&destination).map_err(|_| {
+                    "Cannot replace installed Daedalus; close the running app and retry".to_string()
+                })?;
+            }
             platform::replace_private(&temporary, &destination).map_err(|e| {
                 format!("Cannot replace installed Daedalus; close the running app and retry: {e}")
             })
         })();
-        if result.is_err() {
+        if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
+            if !restart_telegram.is_empty() {
+                if let Err(restart) = super::telegram_supervisor::restart_services_after_install(
+                    &destination,
+                    &restart_telegram,
+                ) {
+                    return Err(format!(
+                        "{error}. Telegram was not started again: {restart}"
+                    ));
+                }
+            }
+            return Err(error);
         }
-        result?;
     }
     let installed = platform::open_native_profile(&destination, false, false)
         .map_err(|e| format!("Installed executable permissions are unsafe: {e}"))?;
@@ -204,6 +256,12 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
         &receipt,
         &serde_json::to_vec(&record).map_err(|e| e.to_string())?,
     )?;
+    if !restart_telegram.is_empty() {
+        super::telegram_supervisor::restart_services_after_install(
+            &destination,
+            &restart_telegram,
+        )?;
+    }
     Ok(destination)
 }
 
@@ -294,6 +352,21 @@ mod tests {
             }
             child
         }
+        fn sleeper(&self) -> std::process::Child {
+            std::process::Command::new(&self.executable)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "app::windows_install::tests::installed_image_sleeper",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        }
         fn assert_preserved(&self) {
             assert!(self.executable.exists());
             assert!(self.root.join("install/install.json").exists());
@@ -343,6 +416,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         drop(owner);
+    }
+    #[test]
+    #[ignore = "Child process fixture; invoked only by the install image test"]
+    fn installed_image_sleeper() {
+        std::thread::sleep(Duration::from_secs(30));
     }
     #[test]
     fn uninstall_waits_for_default_and_saved_service_exit_and_preserves_data() {
@@ -398,5 +476,88 @@ mod tests {
             receipt_record(&legacy).unwrap()
         );
         assert!(receipt_record(b"\xef\xbb\xbfnot-json").is_err());
+    }
+    #[test]
+    fn update_stops_mapped_service_then_replaces_without_touching_config() {
+        let f = Fixture::new(true);
+        let mut child = f.child(false);
+        let receipt = fs::read(f.root.join("install/install.json")).unwrap();
+        let result =
+            release_mapped_installation(&f.executable, &f.preferences, Duration::from_secs(10));
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait().unwrap();
+        result.unwrap();
+        assert!(status.success());
+        let next = f.root.join("install/bin/next.exe");
+        let mut output = platform::create_private_new(&next).unwrap();
+        output.write_all(b"replacement-image").unwrap();
+        drop(output);
+        platform::check_executable_not_running(&f.executable).unwrap();
+        platform::replace_private(&next, &f.executable).unwrap();
+        assert_eq!(fs::read(&f.executable).unwrap(), b"replacement-image");
+        assert_eq!(fs::read(f.root.join("install/install.json")).unwrap(), receipt);
+        f.assert_preserved();
+    }
+    #[test]
+    fn update_timeout_keeps_executable_and_does_not_force_kill() {
+        let f = Fixture::new(false);
+        let mut child = f.child(true);
+        let before = fs::read(&f.executable).unwrap();
+        let result = release_mapped_installation(
+            &f.executable,
+            &f.preferences,
+            Duration::from_millis(50),
+        );
+        let remained_running = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(result.unwrap_err().contains("not finished shutting down"));
+        assert!(remained_running);
+        assert_eq!(fs::read(&f.executable).unwrap(), before);
+        f.assert_preserved();
+    }
+    #[test]
+    fn update_rejects_receipt_tampering_before_stopping_service() {
+        let f = Fixture::new(false);
+        layouts::write_private(&f.root.join("install/install.json"), br#"{"version":1,"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#).unwrap();
+        assert!(
+            release_mapped_installation(&f.executable, &f.preferences, Duration::from_millis(50))
+                .is_err()
+        );
+        assert!(!f.directory.join("telegram-stop.json").exists());
+        f.assert_preserved();
+    }
+    #[test]
+    fn update_refuses_unrelated_image_holder_without_force_kill() {
+        let f = Fixture::new(false);
+        let mut child = f.sleeper();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match platform::check_executable_not_running(&f.executable) {
+                Err(error) if error.to_string().contains("still running") => break,
+                Ok(()) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => panic!("Mapped image was not observed: {other:?}"),
+            }
+        }
+        let result = release_mapped_installation(
+            &f.executable,
+            &f.preferences,
+            Duration::from_millis(50),
+        );
+        let remained_running = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Close other Daedalus windows before updating")
+        );
+        assert!(remained_running);
+        assert!(!f.directory.join("telegram-stop.json").exists());
+        f.assert_preserved();
     }
 }

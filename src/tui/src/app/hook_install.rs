@@ -63,7 +63,9 @@ pub struct LiveRequest {
 
 /// Prefer the updater's stable launcher for installed hooks. Codex keeps hook
 /// commands in memory for the lifetime of a session; a content-addressed
-/// release path makes those commands stale after an update.
+/// release path makes those commands stale after an update. Windows installs
+/// the same bytes at `%LOCALAPPDATA%\Daedalus\bin\daedalus.exe`; NSIS plugin
+/// directories and `.daedalus-updates` copies are not that command.
 pub fn installed_launcher(current: PathBuf) -> PathBuf {
     #[cfg(unix)]
     {
@@ -72,7 +74,14 @@ pub fn installed_launcher(current: PathBuf) -> PathBuf {
         };
         installed_launcher_in(current, &PathBuf::from(home))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let Ok(base) = crate::platform::user_local_data_directory() else {
+            return current;
+        };
+        installed_windows_launcher_in(current, &base)
+    }
+    #[cfg(not(any(unix, windows)))]
     current
 }
 
@@ -91,6 +100,193 @@ fn installed_launcher_in(current: PathBuf, home: &Path) -> PathBuf {
         current
     }
 }
+
+#[cfg(windows)]
+fn installed_windows_launcher_in(current: PathBuf, local_app_data: &Path) -> PathBuf {
+    let launcher = local_app_data.join("Daedalus").join("bin").join("daedalus.exe");
+    if windows_same_release(&current, &launcher) {
+        launcher
+    } else {
+        current
+    }
+}
+
+/// Updater extracts and retained rollback copies. None of these paths survive as
+/// the command an installed hook should run after `daedalus.exe` is replaced.
+#[cfg(windows)]
+fn ephemeral_updater_binary(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name_lower = name.to_ascii_lowercase();
+    if name_lower == "daedalus-setup.exe"
+        || (name_lower.starts_with(".daedalus-install-") && name_lower.ends_with(".tmp"))
+        || (name_lower.starts_with("daedalus-") && name_lower.ends_with(".tmp"))
+        || name_lower.ends_with(".exe.old")
+    {
+        return true;
+    }
+    path.components().any(|component| {
+        let std::path::Component::Normal(part) = component else {
+            return false;
+        };
+        let lower = part.to_string_lossy().to_ascii_lowercase();
+        lower == ".daedalus-updates"
+            || (lower.starts_with("ns") && lower.ends_with(".tmp") && lower.len() > 6)
+    })
+}
+
+#[cfg(windows)]
+fn windows_same_release(current: &Path, launcher: &Path) -> bool {
+    if ephemeral_updater_binary(launcher)
+        || crate::platform::check_path(current).is_err()
+        || crate::platform::check_path(launcher).is_err()
+    {
+        return false;
+    }
+    let Ok(mut current_file) = crate::platform::open_regular(current) else {
+        return false;
+    };
+    let Ok(mut launcher_file) = crate::platform::open_regular(launcher) else {
+        return false;
+    };
+    let Ok(current_id) = crate::platform::file_identity(&current_file) else {
+        return false;
+    };
+    let Ok(launcher_id) = crate::platform::file_identity(&launcher_file) else {
+        return false;
+    };
+    if current_id == launcher_id {
+        return true;
+    }
+    same_installed_exe(&mut current_file, &mut launcher_file)
+}
+
+#[cfg(windows)]
+fn same_installed_exe(left: &mut std::fs::File, right: &mut std::fs::File) -> bool {
+    const MAX: u64 = 256 * 1024 * 1024;
+    let Ok(left_len) = left.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    let Ok(right_len) = right.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    if left_len != right_len || left_len < 2 || left_len > MAX {
+        return false;
+    }
+    let Some(left_hash) = hash_mz(left) else {
+        return false;
+    };
+    hash_mz(right) == Some(left_hash)
+}
+
+#[cfg(windows)]
+fn hash_mz(file: &mut std::fs::File) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut header = [0u8; 2];
+    file.read_exact(&mut header).ok()?;
+    if &header != b"MZ" {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(header);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// A running Telegram service keeps its mapped image even after the installer
+/// replaces `daedalus.exe`. Hook mutations must not proceed against that old
+/// image, and must not record an updater path the installer is about to delete.
+pub(crate) fn ensure_service_allows_hook_change(
+    directory: &Path,
+    binary: Option<&Path>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        ensure_service_allows_hook_change_windows(directory, binary)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (directory, binary);
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn ensure_service_allows_hook_change_windows(directory: &Path, binary: Option<&Path>) -> Result<()> {
+    if let Some(binary) = binary {
+        if ephemeral_updater_binary(binary) {
+            return Err("Hook commands cannot use an updater temporary or previous-release copy. Restart the installed Daedalus and stop Telegram if it is still running the old image.".into());
+        }
+    }
+    let lock_path = directory.join(".telegram-service.lock");
+    let held = match crate::platform::open_private(&lock_path, true, false) {
+        Ok(file) => match crate::platform::lock_exclusive(&file, true) {
+            Ok(()) => {
+                crate::platform::unlock(&file)
+                    .map_err(|_| "Cannot release Telegram service probe")?;
+                false
+            }
+            // ERROR_LOCK_VIOLATION: the service owner still holds this lock.
+            Err(error) if error.raw_os_error() == Some(33) => true,
+            Err(_) => return Err("Cannot determine whether Telegram is running".into()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err("Cannot inspect Telegram service ownership".into()),
+    };
+    if !held {
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    struct ServiceImage {
+        version: u32,
+        pid: u32,
+        start_ticks: u64,
+        directory: PathBuf,
+        executable: PathBuf,
+    }
+    let bytes = layouts::read_private(&directory.join("telegram-runtime.json"))?
+        .ok_or("Telegram is starting from an unverified executable. Stop it before changing hooks.")?;
+    let record: ServiceImage = serde_json::from_slice(&bytes)
+        .map_err(|_| "Invalid Telegram service record. Stop Telegram before changing hooks.")?;
+    if record.version != 1 || record.directory != directory || record.pid == 0 {
+        return Err(
+            "Telegram service identity is unreadable. Stop it before changing hooks.".into(),
+        );
+    }
+    let process = crate::platform::process_identity(record.pid).map_err(|_| {
+        "Telegram is running a Daedalus image that is no longer installed. Stop it before changing hooks."
+    })?;
+    if process.creation_time != record.start_ticks || record.executable.as_os_str().is_empty() {
+        return Err("Telegram service identity changed. Stop it before changing hooks.".into());
+    }
+    if ephemeral_updater_binary(&process.executable) || ephemeral_updater_binary(&record.executable)
+    {
+        return Err("Telegram is still running from an updater temporary executable. Stop it before changing hooks so they are not bound to a file the update deletes.".into());
+    }
+    let service = crate::platform::open_regular(&process.executable).map_err(|_| {
+        "Telegram is running a Daedalus image that is no longer installed. Stop it before changing hooks."
+    })?;
+    if let Some(binary) = binary {
+        let hook = crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
+        if crate::platform::file_identity(&service)
+            .map_err(|_| "Cannot identify Telegram executable")?
+            != crate::platform::file_identity(&hook).map_err(|_| "Cannot identify hook executable")?
+        {
+            return Err("Telegram is still running a different Daedalus image. Stop the service before changing hooks so they are not left half-installed against the old executable.".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn preview_live(
     request: &LiveRequest,
     pane: &Value,
@@ -356,6 +552,10 @@ fn reconnect_opencode_server(
 }
 
 pub(crate) fn check_binary_path(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if ephemeral_updater_binary(path) {
+        return Err("Hook commands cannot use an updater temporary or previous-release copy. Restart the installed Daedalus and stop Telegram if it is still running the old image.".into());
+    }
     if let Err(error) = layouts::check_path(path) {
         // The installer owns this one update-stable launcher. State/profile symlinks
         // remain forbidden, and the launcher must resolve to this running binary.
@@ -546,16 +746,17 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     for path in [&request.directory, &request.profile] {
         layouts::check_path(path)?;
     }
-    check_binary_path(&request.binary)?;
+    let binary = installed_launcher(request.binary.clone());
+    check_binary_path(&binary)?;
     if let Some(path) = &request.transcript {
         layouts::check_path(path)?;
     }
-    if request.profile == request.binary || request.transcript.as_ref() == Some(&request.profile) {
+    if request.profile == binary || request.transcript.as_ref() == Some(&request.profile) {
         return Err("Profile path conflicts with a runtime input".into());
     }
     #[cfg(unix)]
     {
-        let meta = fs::metadata(&request.binary).map_err(|_| "Native binary does not exist")?;
+        let meta = fs::metadata(&binary).map_err(|_| "Native binary does not exist")?;
         if !meta.is_file() || meta.mode() & 0o111 == 0 || meta.mode() & 0o022 != 0 {
             return Err("Native binary must be a non-writable executable".into());
         }
@@ -563,14 +764,13 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     #[cfg(windows)]
     {
         use std::io::Read;
-        let mut file = crate::platform::open_regular(&request.binary)
+        let mut file = crate::platform::open_regular(&binary)
             .map_err(|_| "Native binary does not exist or has an unsafe path")?;
         let mut magic = [0; 2];
         file.read_exact(&mut magic)
             .map_err(|_| "Cannot read native binary")?;
         if magic != *b"MZ"
-            || !request
-                .binary
+            || !binary
                 .extension()
                 .is_some_and(|s| s.eq_ignore_ascii_case("exe"))
         {
@@ -650,8 +850,9 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     #[cfg(windows)]
     crate::platform::validate_native_profile_dir(parent)
         .map_err(|_| "Profile directory must be private and owned")?;
+    ensure_service_allows_hook_change(&request.directory, Some(&binary))?;
     let before = read_profile(&request.profile)?;
-    let after = merge(before.as_deref(), &registration, &request.binary)?;
+    let after = merge(before.as_deref(), &registration, &binary)?;
     let previous_registration = if registration.path().exists() {
         Some(hook_runtime::inspect(&registration.path()).map_err(|e| e.to_string())?)
     } else {
@@ -660,7 +861,7 @@ pub fn preview(request: &Request, terminals: &Terminals) -> Result<Preview> {
     Ok(Preview {
         previous_registration,
         profile: request.profile.clone(),
-        executable: request.binary.clone(),
+        executable: binary,
         registration,
         before_sha: before.as_deref().map(hash),
         after_sha: hash(&after),
@@ -1134,6 +1335,7 @@ pub fn apply(plan: &Preview, terminals: &Terminals) -> Result<Receipt> {
     let _active =
         hook_runtime::active_guard(&plan.registration.directory).map_err(|e| e.to_string())?;
     let _lock = lock(&plan.registration.directory)?;
+    ensure_service_allows_hook_change(&plan.registration.directory, Some(&plan.executable))?;
     hook_runtime::verify_live_session(&plan.registration, terminals)
         .map_err(|_| "Session changed since preview")?;
     let parent = plan.profile.parent().ok_or("Profile has no parent")?;
@@ -2712,5 +2914,177 @@ mod windows_server_tests {
         );
         drop(child);
         assert!(hook_runtime::verify_server_emitter(&pin, proc).is_err());
+    }
+    #[test]
+    fn stable_launcher_replaces_matching_copies_and_refuses_updater_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-win-launcher-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let local = root.join("local");
+        let launcher = local.join("Daedalus/bin/daedalus.exe");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        let bytes = b"MZ-stable-release-bytes";
+        std::fs::write(&launcher, bytes).unwrap();
+        let versioned = local.join("Daedalus/share/daedalus/native/abc/daedalus.exe");
+        std::fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        std::fs::write(&versioned, bytes).unwrap();
+        let updater = local.join("Daedalus/.daedalus-updates/abc/daedalus.exe");
+        std::fs::create_dir_all(updater.parent().unwrap()).unwrap();
+        std::fs::write(&updater, bytes).unwrap();
+        let nsis = root.join("Temp/nsa1b2.tmp/daedalus.exe");
+        std::fs::create_dir_all(nsis.parent().unwrap()).unwrap();
+        std::fs::write(&nsis, bytes).unwrap();
+        assert_eq!(
+            super::installed_windows_launcher_in(versioned, &local),
+            launcher
+        );
+        assert_eq!(
+            super::installed_windows_launcher_in(updater.clone(), &local),
+            launcher
+        );
+        assert_eq!(super::installed_windows_launcher_in(nsis, &local), launcher);
+        assert_eq!(
+            super::installed_windows_launcher_in(launcher.clone(), &local),
+            launcher
+        );
+        let stale = local.join("Daedalus/.daedalus-updates/old/daedalus.exe");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, b"MZ-old-image").unwrap();
+        assert_eq!(
+            super::installed_windows_launcher_in(stale.clone(), &local),
+            stale
+        );
+        let setup = local.join("Daedalus/.daedalus-updates/abc/Daedalus-setup.exe");
+        std::fs::write(&setup, bytes).unwrap();
+        let staged = local.join("Daedalus/bin/.daedalus-install-0123.tmp");
+        std::fs::write(&staged, bytes).unwrap();
+        for path in [&updater, &stale, &setup, &staged] {
+            let error = super::check_binary_path(path).unwrap_err();
+            assert!(error.contains("updater"), "{path:?}: {error}");
+        }
+        assert!(super::check_binary_path(&launcher).is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    #[ignore = "Child holds the Telegram service lock"]
+    fn service_lock_child() {
+        use std::io::Read;
+        let directory = std::env::var("DAEDALUS_LOCK_DIR").unwrap();
+        let file = crate::platform::open_private(
+            &std::path::PathBuf::from(directory).join(".telegram-service.lock"),
+            true,
+            true,
+        )
+        .unwrap();
+        crate::platform::lock_exclusive(&file, true).unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0u8; 1]);
+    }
+    #[test]
+    fn running_service_blocks_a_different_image_before_hooks_change() {
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-hook-service-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::platform::ensure_private_dir(&directory).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("DAEDALUS_LOCK_DIR", &directory)
+            .args([
+                "--exact",
+                "app::hook_install::windows_server_tests::service_lock_child",
+                "--ignored",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let started = std::time::Instant::now();
+        let process = loop {
+            if let Ok(process) = crate::platform::process_identity(child.id()) {
+                if service_lock_held(&directory) {
+                    break process;
+                }
+            }
+            if started.elapsed() > std::time::Duration::from_secs(5) {
+                let _ = child.kill();
+                panic!("service lock child did not start");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        crate::core::layouts::write_private(
+            &directory.join("telegram-runtime.json"),
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "pid": process.pid,
+                "start_ticks": process.creation_time,
+                "boot_id": "fixture",
+                "executable": process.executable,
+                "directory": directory,
+                "instance": "fixture",
+                "bot_id": 1,
+                "phase": "running"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let current = std::env::current_exe().unwrap();
+        assert!(
+            super::ensure_service_allows_hook_change(&directory, Some(&current)).is_ok()
+        );
+        let other = directory.join("other.exe");
+        std::fs::write(&other, b"MZ-other-image").unwrap();
+        let error =
+            super::ensure_service_allows_hook_change(&directory, Some(&other)).unwrap_err();
+        assert!(error.contains("different Daedalus image"), "{error}");
+        crate::core::layouts::write_private(
+            &directory.join("telegram-runtime.json"),
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "pid": process.pid,
+                "start_ticks": 1,
+                "boot_id": "fixture",
+                "executable": process.executable,
+                "directory": directory,
+                "instance": "fixture",
+                "bot_id": 1,
+                "phase": "running"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error =
+            super::ensure_service_allows_hook_change(&directory, Some(&current)).unwrap_err();
+        assert!(error.contains("identity changed"), "{error}");
+        drop(stdin);
+        let _ = child.wait();
+        assert!(super::ensure_service_allows_hook_change(&directory, Some(&other)).is_ok());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+    fn service_lock_held(directory: &Path) -> bool {
+        let Ok(file) = crate::platform::open_private(
+            &directory.join(".telegram-service.lock"),
+            true,
+            false,
+        ) else {
+            return false;
+        };
+        match crate::platform::lock_exclusive(&file, true) {
+            Ok(()) => {
+                let _ = crate::platform::unlock(&file);
+                false
+            }
+            Err(error) if error.raw_os_error() == Some(33) => true,
+            Err(_) => false,
+        }
     }
 }

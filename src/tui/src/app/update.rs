@@ -447,6 +447,22 @@ fn review_at(client: &Client, current: &str, executable: &Path) -> Result<Update
 pub fn check() -> Result<UpdateStatus, String> {
     review_at(&client()?, env!("CARGO_PKG_VERSION"), &target()?)
 }
+fn windows_setup_stub(bytes: &[u8]) -> bool {
+    // Shipped NSIS Unicode setup.exe is an x86 stub (machine 0x014C, e_lfanew
+    // after the DOS header) with an embedded AMD64 payload. Requiring 0x8664
+    // rejects that installer. A raw x64 daedalus.exe is not a setup stub.
+    if bytes.len() < 64 || bytes.get(..2) != Some(b"MZ") {
+        return false;
+    }
+    let offset = u32::from_le_bytes([bytes[60], bytes[61], bytes[62], bytes[63]]) as usize;
+    if offset < 64 {
+        return false;
+    }
+    let Some(end) = offset.checked_add(6) else {
+        return false;
+    };
+    bytes.get(offset..end) == Some(&[b'P', b'E', 0, 0, 0x4c, 0x01])
+}
 fn executable_format(bytes: &[u8], platform: &str) -> Result<(), String> {
     let valid = if platform.ends_with("linux") {
         bytes.len() >= 20
@@ -458,11 +474,7 @@ fn executable_format(bytes: &[u8], platform: &str) -> Result<(), String> {
                     62
                 }
     } else if platform == "x86_64-windows" {
-        bytes.get(..2) == Some(b"MZ")
-            && bytes.get(60..64).is_some_and(|value| {
-                let offset = u32::from_le_bytes(value.try_into().unwrap()) as usize;
-                bytes.get(offset..offset.saturating_add(6)) == Some(&[b'P', b'E', 0, 0, 0x4c, 0x01])
-            })
+        windows_setup_stub(bytes)
     } else {
         false
     };
@@ -643,10 +655,22 @@ fn stage_windows(
         }
     } else {
         crate::core::layouts::write_private_limit(&installer, bytes, BINARY_LIMIT)?;
+        if checked_file(&installer)? != bytes {
+            return Err("Staged installer does not match the verified download".into());
+        }
+    }
+    if hash(&checked_file(&installer)?) != review.sha256 {
+        return Err("Staged installer does not match the verified download".into());
     }
     if hash(&target_bytes(target)?) != review.current_sha256 {
         return Err("Running executable changed while staging update".into());
     }
+    if installer.file_name().and_then(|name| name.to_str()) != Some("Daedalus-setup.exe") {
+        return Err("Staged installer path is not Daedalus-setup.exe".into());
+    }
+    // installer_ready is not activation. The NSIS setup waits for /PARENT_PID,
+    // asks the managed Telegram service to stop, then replaces the image.
+    // Staging must not do that stop, and must not claim the old image is gone.
     Ok(InstallReceipt {
         version: review.version.clone(),
         installed_path: installer.display().to_string(),
@@ -654,8 +678,15 @@ fn stage_windows(
         restart_required: true,
         activated: false,
         installer_ready: true,
-        message: "Verified installer ready. The TUI closes and runs it; command-line users can run the returned installer path after closing Daedalus. Existing terminals stay open.".into(),
+        message: "Verified installer staged. The running executable was not replaced. The TUI closes and starts this installer with /PARENT_PID. The installer waits for this process to exit, asks the managed Telegram service to stop, then replaces the installation. Command-line users must close Daedalus and run the installer path. Other Daedalus windows are not force-closed. Existing terminals stay open.".into(),
     })
+}
+fn install_text(receipt: &InstallReceipt) -> String {
+    if receipt.installer_ready {
+        format!("{}\nInstaller: {}", receipt.message, receipt.installed_path)
+    } else {
+        receipt.message.clone()
+    }
 }
 pub fn install(version: &str, approved: &str) -> Result<InstallReceipt, String> {
     digest(approved)?;
@@ -701,7 +732,8 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
             serde_json::to_writer_pretty(&mut *output, &result)
                 .map_err(|_| "Cannot write install receipt")?;
         } else {
-            write!(output, "{}", result.message).map_err(|_| "Cannot write install receipt")?;
+            write!(output, "{}", install_text(&result))
+                .map_err(|_| "Cannot write install receipt")?;
         }
     } else {
         return Err(HELP.into());
@@ -791,6 +823,26 @@ mod tests {
         assert_eq!(selected.2.name, name);
         assert!(executable_format(&windows_installer(), "x86_64-windows").is_ok());
         assert!(executable_format(&elf(), "x86_64-windows").is_err());
+        let mut shipped = vec![0; 160];
+        shipped[..2].copy_from_slice(b"MZ");
+        shipped[60..64].copy_from_slice(&128u32.to_le_bytes());
+        shipped[128..134].copy_from_slice(&[b'P', b'E', 0, 0, 0x4c, 0x01]);
+        assert!(
+            windows_setup_stub(&shipped),
+            "NSIS x86 stub at e_lfanew 128 must stay accepted"
+        );
+        let mut raw_x64 = shipped.clone();
+        raw_x64[132] = 0x64;
+        raw_x64[133] = 0x86;
+        assert!(
+            !windows_setup_stub(&raw_x64),
+            "AMD64 machine 0x8664 is the payload, not the setup stub"
+        );
+        let mut inside_dos = windows_installer();
+        inside_dos[60] = 2;
+        inside_dos[2..8].copy_from_slice(&[b'P', b'E', 0, 0, 0x4c, 0x01]);
+        assert!(!windows_setup_stub(&inside_dos));
+        assert!(!windows_setup_stub(&shipped[..80]));
     }
     #[test]
     fn rejects_untrusted_ambiguous_and_undigested_assets() {
@@ -846,6 +898,32 @@ mod tests {
         assert!(executable_format(&elf(), "x86_64-linux").is_ok());
         assert!(executable_format(&elf(), "aarch64-linux").is_err());
         assert!(executable_format(b"#!/bin/sh\n", "x86_64-linux").is_err());
+    }
+    #[test]
+    fn cli_install_text_returns_the_staged_installer_without_claiming_replacement() {
+        let text = install_text(&InstallReceipt {
+            version: "1.2.3".into(),
+            installed_path: "C:/Users/example/AppData/Local/Daedalus/.daedalus-updates/ab/Daedalus-setup.exe".into(),
+            previous_path: "old".into(),
+            restart_required: true,
+            activated: false,
+            installer_ready: true,
+            message: "Verified installer staged. The running executable was not replaced.".into(),
+        });
+        assert!(text.contains("was not replaced"));
+        assert!(text.contains("Installer: C:/Users/example/AppData/Local/Daedalus/.daedalus-updates/ab/Daedalus-setup.exe"));
+        assert!(!text.contains("Updated to"));
+        let unix = install_text(&InstallReceipt {
+            version: "1.2.3".into(),
+            installed_path: "/opt/daedalus".into(),
+            previous_path: "old".into(),
+            restart_required: true,
+            activated: true,
+            installer_ready: false,
+            message: "Update installed. Restart Daedalus when ready. Existing sessions and services were not restarted; the previous executable is retained.".into(),
+        });
+        assert!(unix.contains("were not restarted"));
+        assert!(!unix.contains("Installer:"));
     }
     #[test]
     fn http_fixture_is_bounded_and_has_no_credentials() {

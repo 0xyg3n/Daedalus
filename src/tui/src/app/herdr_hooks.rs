@@ -1,28 +1,49 @@
-//! Reviewed external Herdr integration installation (Linux Claude/Codex/Grok).
+//! Reviewed external Herdr integration installation (Claude/Codex/Grok).
 //! The selected Herdr executable is trusted code, not a sandboxed installer.
 //! File snapshots catch stale review; same-user concurrent external edits cannot
 //! be serialized by Daedalus's private writer lock. No running agent is changed.
-use crate::adapters::process;
-#[cfg(unix)]
-use crate::core::layouts;
+use crate::{adapters::process, core::layouts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-#[cfg(unix)]
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::Read,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-type Result<T> = std::result::Result<T, String>;
 #[cfg(unix)]
+use std::fs::OpenOptions;
+type Result<T> = std::result::Result<T, String>;
 const LIMIT: u64 = 8 * 1024 * 1024;
+
+fn hook_script() -> &'static str {
+    if cfg!(windows) {
+        "herdr-agent-state.ps1"
+    } else {
+        "herdr-agent-state.sh"
+    }
+}
+
+fn normalized(request: &Request) -> Request {
+    #[cfg(windows)]
+    {
+        let mut request = request.clone();
+        request.binary = super::hooks::windows_native_path(&request.binary);
+        request.home = super::hooks::windows_native_path(&request.home);
+        request.profile = super::hooks::windows_native_path(&request.profile);
+        request.directory = super::hooks::windows_native_path(&request.directory);
+        return request;
+    }
+    #[cfg(not(windows))]
+    request.clone()
+}
+
+fn same_integration_path(reported: &Path, expected: &Path) -> bool {
+    super::hooks::paths_equivalent(reported, expected)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -74,12 +95,12 @@ pub struct Receipt {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-#[cfg(unix)]
 fn files(r: &Request) -> Result<Vec<PathBuf>> {
+    let script = hook_script();
     let names = match r.harness.as_str() {
-        "claude" => vec!["hooks/herdr-agent-state.sh", "settings.json"],
-        "codex" => vec!["herdr-agent-state.sh", "hooks.json", "config.toml"],
-        "grok" => vec!["hooks/herdr-agent-state.sh", "hooks/herdr.json"],
+        "claude" => vec![format!("hooks/{script}"), "settings.json".into()],
+        "codex" => vec![script.into(), "hooks.json".into(), "config.toml".into()],
+        "grok" => vec![format!("hooks/{script}"), "hooks/herdr.json".into()],
         _ => return Err("Herdr installation supports Claude, Codex and Grok profiles only".into()),
     };
     for p in [&r.binary, &r.home, &r.profile, &r.directory] {
@@ -88,13 +109,32 @@ fn files(r: &Request) -> Result<Vec<PathBuf>> {
             return Err("Invalid integration path".into());
         }
     }
-    for p in [&r.home, &r.profile] {
-        let m = fs::metadata(p).map_err(|_| "Profile and home directories must exist")?;
-        if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o022 != 0 {
-            return Err(
-                "Profile and home directories must be owned and not writable by others".into(),
-            );
+    #[cfg(unix)]
+    {
+        for p in [&r.home, &r.profile] {
+            let m = fs::metadata(p).map_err(|_| "Profile and home directories must exist")?;
+            if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o022 != 0 {
+                return Err(
+                    "Profile and home directories must be owned and not writable by others".into(),
+                );
+            }
         }
+    }
+    #[cfg(windows)]
+    {
+        for p in [&r.home, &r.profile] {
+            let meta = fs::metadata(p).map_err(|_| "Profile and home directories must exist")?;
+            if !meta.is_dir() {
+                return Err("Profile and home directories must be directories".into());
+            }
+        }
+        crate::platform::validate_native_profile_dir(&r.profile).map_err(|_| {
+            "Profile directory must stay private to the current user".to_owned()
+        })?;
+        crate::platform::validate_private_dir(&r.directory)
+            .map_err(|_| "Integration state directory must be private".to_owned())?;
+        crate::platform::open_regular(&r.binary)
+            .map_err(|_| "Herdr executable is missing or has an unsafe path".to_owned())?;
     }
     let paths: Vec<PathBuf> = names.into_iter().map(|p| r.profile.join(p)).collect();
     for path in &paths {
@@ -104,6 +144,7 @@ fn files(r: &Request) -> Result<Vec<PathBuf>> {
             if !directory.starts_with(&r.profile) {
                 break;
             }
+            #[cfg(unix)]
             match fs::metadata(directory) {
                 Ok(meta)
                     if !meta.is_dir()
@@ -116,15 +157,17 @@ fn files(r: &Request) -> Result<Vec<PathBuf>> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
                 Err(_) => return Err("Cannot inspect integration directory".into()),
             }
+            #[cfg(windows)]
+            match crate::platform::validate_native_profile_dir(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) if !directory.exists() => {}
+                Err(_) => return Err("Integration parent directory is unsafe".into()),
+            }
             parent = directory.parent();
         }
     }
     Ok(paths)
-}
-#[cfg(not(unix))]
-#[allow(unused_variables)]
-fn files(r: &Request) -> Result<Vec<PathBuf>> {
-    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
 }
 #[cfg(unix)]
 fn snapshot(path: &Path) -> Result<Snapshot> {
@@ -169,10 +212,39 @@ fn snapshot(path: &Path) -> Result<Snapshot> {
         mode: Some(m.mode() & 0o777),
     })
 }
-#[cfg(not(unix))]
-#[allow(unused_variables)]
+#[cfg(windows)]
 fn snapshot(path: &Path) -> Result<Snapshot> {
-    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
+    layouts::check_path(path)?;
+    let mut file = match crate::platform::open_native_profile(path, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Snapshot {
+                path: path.into(),
+                bytes: None,
+                mode: None,
+            });
+        }
+        Err(_) => return Err("Cannot read reviewed integration file".into()),
+    };
+    let meta = file
+        .metadata()
+        .map_err(|_| "Cannot inspect integration file")?;
+    if !meta.is_file() || meta.len() > LIMIT {
+        return Err("Unsafe or oversized integration file".into());
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read integration file")?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Integration file exceeds limit".into());
+    }
+    Ok(Snapshot {
+        path: path.into(),
+        bytes: Some(bytes),
+        mode: None,
+    })
 }
 #[cfg(unix)]
 fn binary_sha(r: &Request) -> Result<String> {
@@ -212,20 +284,68 @@ fn binary_sha(r: &Request) -> Result<String> {
     }
     Ok(format!("{:x}", h.finalize()))
 }
-#[cfg(not(unix))]
-#[allow(unused_variables)]
+#[cfg(windows)]
 fn binary_sha(r: &Request) -> Result<String> {
-    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
+    layouts::check_path(&r.binary)?;
+    let mut file = crate::platform::open_regular(&r.binary)
+        .map_err(|_| "Cannot pin Herdr executable".to_owned())?;
+    let meta = file
+        .metadata()
+        .map_err(|_| "Herdr executable is missing".to_owned())?;
+    if !meta.is_file() || meta.len() > 512 * 1024 * 1024 {
+        return Err("Herdr executable exceeds limit or is not a regular file".into());
+    }
+    let mut magic = [0; 2];
+    file.read_exact(&mut magic)
+        .map_err(|_| "Cannot pin Herdr executable".to_owned())?;
+    if &magic != b"MZ" {
+        return Err("Herdr executable is not a Windows binary".into());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(magic);
+    let mut buffer = [0; 65536];
+    let mut total = 2u64;
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|_| "Cannot hash Herdr executable".to_owned())?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > 512 * 1024 * 1024 {
+            return Err("Herdr executable exceeds limit".into());
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 fn command(r: &Request, args: &[&str], timeout: Duration) -> Result<process::Output> {
     let mut c = Command::new(&r.binary);
     c.args(args)
         .env_clear()
         .env("HOME", &r.home)
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("LANG", "C")
         .env("XDG_STATE_HOME", r.directory.join("herdr-state"))
         .current_dir(&r.profile);
+    #[cfg(unix)]
+    {
+        c.env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("LANG", "C");
+    }
+    #[cfg(windows)]
+    {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        c.env("SystemRoot", &system)
+            .env("WINDIR", &system)
+            .env("USERPROFILE", &r.home)
+            .env("PATH", format!(r"{system}\System32"))
+            .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+            .env(
+                "COMSPEC",
+                std::env::var("COMSPEC").unwrap_or_else(|_| format!(r"{system}\System32\cmd.exe")),
+            );
+        crate::platform::hide_console(&mut c);
+    }
     let key = match r.harness.as_str() {
         "claude" => "CLAUDE_CONFIG_DIR",
         "codex" => "CODEX_HOME",
@@ -268,35 +388,36 @@ fn parse(bytes: &[u8], harness: &str) -> Result<Status> {
     found.ok_or("Herdr did not report this integration".into())
 }
 pub fn status(r: &Request) -> Result<Status> {
-    let paths = files(r)?;
-    binary_sha(r)?;
-    let out = command(r, &["integration", "status"], Duration::from_secs(5))?;
+    let r = normalized(r);
+    let paths = files(&r)?;
+    binary_sha(&r)?;
+    let out = command(&r, &["integration", "status"], Duration::from_secs(5))?;
     if !out.status.success() {
         return Err("Herdr status query failed".into());
     }
     let status = parse(&out.stdout, &r.harness)?;
-    if status.path != paths[0] {
+    if !same_integration_path(&status.path, &paths[0]) {
         return Err("Herdr reports a different profile path; nothing changed".into());
     }
     Ok(status)
 }
 pub fn prepare(r: &Request) -> Result<Plan> {
-    let paths = files(r)?;
-    let binary_sha = binary_sha(r)?;
+    let r = normalized(r);
+    let paths = files(&r)?;
+    let binary_sha = binary_sha(&r)?;
     let before = paths
         .iter()
         .map(|p| snapshot(p))
         .collect::<Result<Vec<_>>>()?;
-    let status = status(r)?;
+    let status = status(&r)?;
     Ok(Plan {
-        request: r.clone(),
+        request: r,
         status,
         paths,
         binary_sha,
         before,
     })
 }
-#[cfg(unix)]
 pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
     if plan.fingerprint()? != approved {
         return Err("Integration approval does not match review".into());
@@ -315,10 +436,14 @@ pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
         .request
         .directory
         .join(format!("herdr-backup-{}-{nonce}", std::process::id()));
+    #[cfg(unix)]
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&backup)
         .map_err(|_| "Cannot create private integration backup")?;
+    #[cfg(windows)]
+    crate::platform::ensure_private_dir(&backup)
+        .map_err(|_| "Cannot create private integration backup".to_owned())?;
     layouts::write_private(
         &backup.join("before.json"),
         &serde_json::to_vec(plan).map_err(|_| "Cannot encode private backup")?,
@@ -352,11 +477,6 @@ pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
         &serde_json::to_vec(&receipt).map_err(|_| "Cannot encode installation receipt")?,
     )?;
     Ok(receipt)
-}
-#[cfg(not(unix))]
-#[allow(unused_variables)]
-pub fn apply(plan: &Plan, approved: &str) -> Result<Receipt> {
-    Err("External Herdr hook installation uses Unix shell profiles; configure native Daedalus hooks for the Windows session instead".into())
 }
 
 #[cfg(all(test, unix))]
