@@ -400,6 +400,8 @@ fn main() -> io::Result<()> {
         EnableBracketedPaste,
         EnableFocusChange
     )?;
+    // While this process owns the Herdr pane, right click stays in Daedalus.
+    let _herdr_menu = HerdrMenuGuard::engage();
     let result = (|| -> io::Result<()> {
         'ui: loop {
             loop {
@@ -714,6 +716,7 @@ fn main() -> io::Result<()> {
         DisableBracketedPaste
     );
     ratatui::restore();
+    drop(_herdr_menu);
     #[cfg(windows)]
     if result.is_ok()
         && let Some(installer) = updater.take_installer()
@@ -1497,6 +1500,49 @@ fn cube_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
     Some(Step::Continue)
 }
 
+fn herdr_right_click(target: &str) -> bool {
+    let Ok(pane) = std::env::var("HERDR_PANE_ID") else {
+        return false;
+    };
+    let Ok(session) = std::env::var("HERDR_SESSION") else {
+        return false;
+    };
+    if pane.is_empty()
+        || session.is_empty()
+        || pane.chars().any(char::is_control)
+        || session.chars().any(char::is_control)
+        || !matches!(target, "pane" | "herdr")
+    {
+        return false;
+    }
+    let program = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".into());
+    std::process::Command::new(program)
+        .args([
+            "--session",
+            &session,
+            "pane",
+            "input",
+            &pane,
+            "--right-click",
+            target,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+struct HerdrMenuGuard;
+impl HerdrMenuGuard {
+    fn engage() -> Option<Self> {
+        herdr_right_click("pane").then_some(Self)
+    }
+}
+impl Drop for HerdrMenuGuard {
+    fn drop(&mut self) {
+        let _ = herdr_right_click("herdr");
+    }
+}
 fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
     let plain = !key
         .modifiers
@@ -1544,15 +1590,25 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
             toggle_order(ui);
             return Some(Step::Continue);
         }
-        KeyCode::Char('u') if plain && ui.view.grid() => {
-            // Forget a pin whose terminal is gone; live pins toggle with p.
-            let key = ui
-                .tiles()
-                .get(ui.tile)
-                .filter(|t| t.id.is_empty())
-                .and_then(|t| t.pin)
-                .and_then(|p| ui.snapshot.workspace.pins.get(p))
-                .map(|p| p.key.clone());
+        KeyCode::Char('u') if plain => {
+            // Forget a pin whose terminal is gone. A selected missing tile wins;
+            // otherwise the first missing pin, including one only shown in the sidebar.
+            let selected = if ui.view.grid() {
+                ui.tiles()
+                    .get(ui.tile)
+                    .filter(|t| t.id.is_empty())
+                    .and_then(|t| t.pin)
+                    .and_then(|p| ui.snapshot.workspace.pins.get(p))
+                    .map(|p| p.key.clone())
+            } else {
+                ui.snapshot
+                    .workspace
+                    .pins
+                    .iter()
+                    .find(|pin| pin.id.is_empty() && !pin.key.is_empty())
+                    .map(|pin| pin.key.clone())
+            };
+            let key = selected;
             return Some(match key {
                 Some(key) => Step::Send(json!({
                     "op":"action","page":WORKSPACES,"action":format!("unpin:{key}"),
@@ -1891,6 +1947,15 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     }
 
     ui.pointer = Some((mouse.column, mouse.row));
+    // Herdr's own menu is disabled for this pane. A right click stays here.
+    if matches!(
+        mouse.kind,
+        MouseEventKind::Down(event::MouseButton::Right)
+            | MouseEventKind::Up(event::MouseButton::Right)
+            | MouseEventKind::Drag(event::MouseButton::Right)
+    ) {
+        return Step::Continue;
+    }
     if ui.options.is_some() {
         options_mouse(ui, mouse);
         return Step::Continue;
@@ -2023,6 +2088,14 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                 ui.navigate(page);
             } else if let Some((_, id)) = ui.side_hits.iter().find(|(r, _)| r.contains(p)) {
                 let id = id.clone();
+                if let Some(key) = id.strip_prefix("unpin:") {
+                    return Step::Send(json!({
+                        "op": "action",
+                        "page": WORKSPACES,
+                        "action": format!("unpin:{key}"),
+                        "view": view_state(ui),
+                    }));
+                }
                 return jump_to(ui, &id);
             } else if let Some(&(_, view)) = ui.view_hits.iter().find(|(r, _)| r.contains(p)) {
                 return switch_view(ui, view);

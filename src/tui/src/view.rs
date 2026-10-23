@@ -664,6 +664,8 @@ fn page_badge(ui: &Ui, icon: &str) -> Option<(String, Tone)> {
 struct SideTerminal {
     /// Empty when the pinned terminal is gone.
     id: String,
+    /// Stable pin key, set only for a missing pin so it can be removed.
+    key: String,
     title: String,
     tone: Tone,
     age: String,
@@ -675,6 +677,7 @@ struct SideTerminal {
 fn side_terminals(ui: &Ui) -> (Vec<SideTerminal>, Vec<SideTerminal>) {
     let entry = |node: &Node| SideTerminal {
         id: node.id.clone(),
+        key: String::new(),
         title: session_name(node),
         tone: terminal_status(node).1,
         age: ui.ago(node),
@@ -696,11 +699,12 @@ fn side_terminals(ui: &Ui) -> (Vec<SideTerminal>, Vec<SideTerminal>) {
                 Some(node) => entry(node),
                 None => SideTerminal {
                     id: String::new(),
+                    key: pin.key.clone(),
                     title: pin.label.clone(),
                     tone: Tone::Warn,
                     age: pin.status.clone(),
                     status: "missing".into(),
-                    detail: "Pinned terminal is unavailable".into(),
+                    detail: "Pinned terminal is unavailable. Click to remove the pin.".into(),
                 },
             })
             .collect()
@@ -804,6 +808,8 @@ fn side_lists(f: &mut Frame, area: Rect, ui: &mut Ui) {
             }
             if live {
                 ui.side_hits.push((rect, item.id));
+            } else if !item.key.is_empty() {
+                ui.side_hits.push((rect, format!("unpin:{}", item.key)));
             }
             y += 1;
         }
@@ -3155,9 +3161,9 @@ mod tests {
         assert!(rendered.contains("Activity 2"));
         assert!(rendered.contains("Options"));
         assert!(rendered.contains("PINNED") && rendered.contains("RECENT"));
-        // beta is pinned, alpha active recently; the missing pin cannot be clicked.
+        // beta is pinned, alpha active recently; the missing pin is a remove target.
         let ids: Vec<&str> = ui.side_hits.iter().map(|(_, id)| id.as_str()).collect();
-        assert_eq!(ids, ["b", "a"]);
+        assert_eq!(ids, ["b", "unpin:k", "a"]);
         assert!(ui.quick_hits.iter().any(|(_, a)| a == "sidebar"));
         assert!(ui.quick_hits.iter().any(|(_, a)| a == "options"));
         // Switched off in Options, the lists, counts and totals go.
