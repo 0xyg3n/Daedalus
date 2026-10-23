@@ -127,8 +127,14 @@ impl Theme {
             Some("unicode") => false,
             _ => !utf8 || term == "linux" || term == "dumb" || term.starts_with("vt"),
         };
-        let truecolor = get("COLORTERM").is_some_and(|v| v == "truecolor" || v == "24bit");
         let color = !set("NO_COLOR") && term != "dumb";
+        // Windows Terminal and the Windows console speak 24-bit color and do not
+        // set COLORTERM. Without it the blue background maps to the gray ramp
+        // and the window looks black.
+        let truecolor = color
+            && (get("COLORTERM").is_some_and(|v| v == "truecolor" || v == "24bit")
+                || get("WT_SESSION").is_some()
+                || cfg!(windows));
         Self {
             color,
             truecolor,
@@ -476,6 +482,9 @@ mod tests {
         assert!(theme(&[("DAEDALUS_ICONS", "ascii")]).ascii);
         assert!(theme(&[("DAEDALUS_REDUCED_MOTION", "1")]).reduced_motion);
         assert!(theme(&[("COLORTERM", "truecolor")]).truecolor);
+        assert!(theme(&[("WT_SESSION", "1"), ("LANG", "en_US.UTF-8")]).truecolor);
+        assert!(theme(&[("WT_SESSION", "1"), ("LANG", "en_US.UTF-8")]).backdrop);
+        assert!(!theme(&[("WT_SESSION", "1"), ("NO_COLOR", "1")]).truecolor);
         // The splash shows unless turned off or on a dumb terminal.
         assert!(theme(&[]).splash);
         assert!(theme(&[("TERM", "xterm-256color")]).splash);

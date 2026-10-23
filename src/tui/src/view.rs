@@ -832,6 +832,30 @@ fn rail(f: &mut Frame, area: Rect, ui: &mut Ui) {
     f.render_widget(Paragraph::new(line), edge);
     let room = area.width.saturating_sub(1);
     fold_button(f, Rect::new(area.x + 1, area.y, 3, 1), ui, true);
+    let plus = Rect::new(area.x, area.y + 1, room, 1);
+    if plus.bottom() <= area.bottom() {
+        let over = hovered(ui, plus);
+        let base = if over {
+            theme.selected(0.45)
+        } else {
+            theme.surface()
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {}", theme.glyph("+", "+")),
+                base.patch(theme.fg(Tone::Accent)),
+            ))
+            .style(base),
+            plus,
+        );
+        ui.quick_hits.push((plus, "terminal.new".into()));
+        if over {
+            ui.tooltip = Some((
+                Rect::new(plus.right() + 1, plus.y, 0, 1),
+                "New terminal".into(),
+            ));
+        }
+    }
     let fade = ease(since(ui.paged_at, &theme, 0.18));
     let mut y = area.y + 2;
     let mut last = String::new();
@@ -1454,6 +1478,38 @@ fn sidebar(f: &mut Frame, area: Rect, ui: &mut Ui) {
         ]);
         f.render_widget(Paragraph::new(line), rect);
         ui.nav_hits.push((rect, i));
+        y += 1;
+    }
+    if y < inner.bottom() {
+        let rect = Rect::new(inner.x, y, inner.width, 1);
+        let base = if hovered(ui, rect) {
+            theme.selected(0.45)
+        } else {
+            theme.surface()
+        };
+        let label = "New terminal";
+        let shortcut = "N";
+        let pad = (inner.width as usize).saturating_sub(5 + width(label) + width(shortcut) + 1);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", theme.glyph("+", "+")),
+                    base.patch(theme.fg(Tone::Accent)),
+                ),
+                Span::styled(label, base.patch(theme.fg(Tone::Text))),
+                Span::styled(" ".repeat(pad), base),
+                Span::styled(shortcut, base.patch(theme.fg(Tone::Faint))),
+                Span::styled(" ", base),
+            ])),
+            rect,
+        );
+        if hovered(ui, rect) {
+            ui.tooltip = Some(detail_tip(
+                rect,
+                "Open a shell in the current Herdr, tmux, or native terminal".into(),
+            ));
+        }
+        ui.quick_hits.push((rect, "terminal.new".into()));
         y += 1;
     }
     // Options, beside the sections it changes.

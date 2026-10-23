@@ -329,7 +329,8 @@ impl Terminals {
         let actual = self.verify(parent)?;
         let id = identity(&actual)?;
         if id.backend == Backend::Native {
-            let pane = super::native::start(launch, field(&actual, "workspace_id")?, "Terminal")?;
+            let workspace = field(&actual, "workspace_id").unwrap_or_else(|_| "local".into());
+            let pane = super::native::start(launch, &workspace, "Terminal")?;
             return Ok(Receipt {
                 state: ReceiptState::Accepted,
                 message: "Native terminal started".into(),
@@ -372,11 +373,18 @@ impl Terminals {
             if placement == Placement::Split {
                 args.push("-v".into());
             }
+            let shell = is_interactive_shell(launch);
+            if shell {
+                // A new tmux pane already starts the default interactive shell.
+                // Do not detach it, and do not replace that shell with a
+                // non-interactive wrapper.
+                args.retain(|arg| arg != "-d");
+            }
             // Multiple command arguments select tmux's direct executable mode.
             // Clear the server environment before installing the complete,
             // explicitly sanitized launch environment. Never inherit bot tokens.
             #[cfg(unix)]
-            {
+            if !shell {
                 args.extend(["--".into(), "/usr/bin/env".into(), "-i".into()]);
                 for (key, value) in &launch.environment {
                     args.push(format!("{key}={value}"));
@@ -385,7 +393,7 @@ impl Terminals {
                 args.extend(launch.args.clone());
             }
             #[cfg(windows)]
-            {
+            if !shell {
                 args.push("--".into());
                 args.extend(super::windows_launch::argv(launch)?);
             }
@@ -430,7 +438,6 @@ impl Terminals {
                     "down",
                     "--cwd",
                     cwd,
-                    "--no-focus",
                 ],
             ) {
                 Ok(v) => v,
@@ -450,6 +457,14 @@ impl Terminals {
             let created = identity(&pane)?;
             if created.generation == id.generation {
                 return Ok(Receipt::uncertain("Server did not create a new terminal"));
+            }
+            if is_interactive_shell(launch) {
+                // Herdr already started the login shell in the new pane.
+                return Ok(Receipt {
+                    state: ReceiptState::Accepted,
+                    message: "New terminal opened".into(),
+                    terminal: Some(pane),
+                });
             }
             self.launch_created_herdr(&pane, launch)
         }
@@ -528,6 +543,17 @@ impl Terminals {
             terminal: Some(pane.clone()),
         })
     }
+}
+pub(crate) fn is_interactive_shell(launch: &LaunchPlan) -> bool {
+    let Some(name) = launch.binary.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(
+        name,
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "pwsh" | "powershell" | "cmd"
+    )
 }
 pub(crate) fn validate_launch(launch: &LaunchPlan) -> Result<()> {
     validate_environment(&launch.environment)?;

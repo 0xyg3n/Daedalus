@@ -1574,6 +1574,9 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
             ui.last_preview = None;
             return Some(Step::Continue);
         }
+        KeyCode::Char('N') if plain => {
+            return Some(quick_action(ui, "terminal.new"));
+        }
         KeyCode::Char('L') if plain => {
             // Save from any view, so the layout records Tiles or Focus too.
             return Some(Step::Send(json!({
@@ -1891,6 +1894,16 @@ fn choose_switcher(ui: &mut Ui, rank: Option<usize>) -> Step {
 }
 
 fn quick_action(ui: &mut Ui, action: &str) -> Step {
+    if action == "terminal.new" {
+        let node = ui.selected_terminal().unwrap_or_default();
+        return Step::Send(json!({
+            "op": "action",
+            "page": WORKSPACES,
+            "action": "terminal.new",
+            "node": node,
+            "view": view_state(ui),
+        }));
+    }
     let Some(node) = ui.selected_terminal() else {
         ui.status = "Select a terminal first".into();
         ui.status_error = true;

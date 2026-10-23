@@ -325,6 +325,16 @@ pub(crate) fn reference(pane: &Value) -> Result<TerminalRef> {
         place: field(pane, "session"),
     })
 }
+fn host_pane(snapshot: &Value) -> Option<Value> {
+    let herdr = std::env::var("HERDR_PANE_ID").ok().filter(|id| !id.is_empty());
+    let tmux = std::env::var("TMUX_PANE").ok().filter(|id| !id.is_empty());
+    snapshot["panes"].as_array()?.iter().find(|pane| {
+        herdr
+            .as_ref()
+            .is_some_and(|id| pane["pane_id"] == *id)
+            || tmux.as_ref().is_some_and(|id| pane["pane_id"] == *id)
+    }).cloned()
+}
 impl SessionMenu {
     pub fn pending(&self) -> bool {
         self.pending.is_some()
@@ -752,6 +762,12 @@ impl SessionMenu {
         }
         if !available(action) {
             return Err("This action is unsupported by this operation".into());
+        }
+        if action == "terminal.new" && view.selected.is_none() {
+            if let Some(pane) = host_pane(&view.snapshot).or_else(|| self.panes().into_iter().next())
+            {
+                return self.for_pane(action, pane, source, config, seq);
+            }
         }
         if let Some(pane) = view.selected.clone() {
             self.for_pane(action, pane, source, config, seq)
