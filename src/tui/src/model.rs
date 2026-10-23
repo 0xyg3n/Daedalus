@@ -1169,6 +1169,13 @@ pub struct Ui {
     pub embed: Option<Embed>,
     /// Exact visible terminal screen accepting input in the current layout.
     pub inline_screen: Option<ratatui::layout::Rect>,
+    /// Terminal screens drawn last frame: rect, node id, and each display row's
+    /// source row and left column. Selection uses these in every view.
+    pub screens: Vec<(ratatui::layout::Rect, String, Vec<(u16, u16)>)>,
+    /// Selected source cells on one screen: id, anchor, head, as row and column.
+    pub selection: Option<(String, (u16, u16), (u16, u16))>,
+    /// Left-button drag that can become `selection`.
+    pub text_drag: Option<(String, (u16, u16))>,
     pub tile_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub quick_hits: Vec<(ratatui::layout::Rect, String)>,
     pub quick_items: Vec<(String, String, String)>,
@@ -1298,6 +1305,7 @@ impl Ui {
         self.option_panel = ratatui::layout::Rect::default();
         self.tooltip = None;
         self.preview_targets.clear();
+        self.screens.clear();
     }
     pub fn available_count(&self) -> usize {
         if self.switching {

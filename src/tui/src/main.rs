@@ -1,10 +1,10 @@
 mod backdrop;
-#[cfg(any(windows, test))]
 mod clipboard;
 mod embed;
 mod graphics;
 mod model;
 mod neon;
+mod select;
 mod options;
 mod shortcuts;
 #[cfg(test)]
@@ -1163,6 +1163,18 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
     if shortcuts::key(ui, key) {
         return Step::Continue;
     }
+    if clipboard::copy_key(key)
+        && let Some(text) = select::text(ui)
+        && !text.is_empty()
+    {
+        ui.status_error = clipboard::write(&text).is_err();
+        ui.status = if ui.status_error {
+            "Could not copy.".into()
+        } else {
+            "Copied".into()
+        };
+        return Step::Continue;
+    }
 
     if key.code == KeyCode::F(11) && ui.page == WORKSPACES {
         if let Some(embed) = ui.embed.as_mut() {
@@ -1225,6 +1237,21 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         }
         if embed.mode == Mode::Control {
             if embed.live() && ui.inline_screen.is_some() {
+                #[cfg(windows)]
+                if clipboard::paste_key(key) {
+                    match clipboard::read() {
+                        Ok(text) => {
+                            embed.paste(&text);
+                            ui.status = "Pasted".into();
+                            ui.status_error = false;
+                        }
+                        Err(message) => {
+                            ui.status = message.into();
+                            ui.status_error = true;
+                        }
+                    }
+                    return Step::Continue;
+                }
                 embed.key(key);
             } else {
                 ui.status = "Input paused until the selected terminal is visible and connected. Ctrl+] then D detaches.".into();
@@ -1965,13 +1992,37 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     }
 
     ui.pointer = Some((mouse.column, mouse.row));
-    // Herdr's own menu is disabled for this pane. A right click stays here.
+    // Herdr's own menu is disabled for this pane. A right click stays here
+    // and, on Windows, pastes into the attached terminal.
     if matches!(
         mouse.kind,
         MouseEventKind::Down(event::MouseButton::Right)
             | MouseEventKind::Up(event::MouseButton::Right)
             | MouseEventKind::Drag(event::MouseButton::Right)
     ) {
+        #[cfg(windows)]
+        if mouse.kind == MouseEventKind::Down(event::MouseButton::Right)
+            && let Some((id, _)) = select::cell_at(ui, mouse.column, mouse.row)
+            && ui.inline_screen.is_some()
+            && ui
+                .embed
+                .as_ref()
+                .is_some_and(|embed| embed.plan.node == id && embed.mode == Mode::Control && embed.live())
+        {
+            match clipboard::read() {
+                Ok(text) => {
+                    if let Some(embed) = ui.embed.as_mut() {
+                        embed.paste(&text);
+                    }
+                    ui.status = "Pasted".into();
+                    ui.status_error = false;
+                }
+                Err(message) => {
+                    ui.status = message.into();
+                    ui.status_error = true;
+                }
+            }
+        }
         return Step::Continue;
     }
     if ui.options.is_some() {
@@ -2055,6 +2106,9 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         && let Some(step) = border_mouse(ui, mouse, position)
     {
         return step;
+    }
+    if select::mouse(ui, mouse) {
+        return Step::Continue;
     }
     if ui.inline_screen.is_some()
         && let Some(embed) = ui.embed.as_mut()
@@ -2887,6 +2941,22 @@ mod cli_tests {
             ),
             Step::Quit
         ));
+    }
+    #[test]
+    fn ctrl_c_copies_selected_terminal_text_from_any_view() {
+        let mut ui = Ui::default();
+        ui.page = WORKSPACES;
+        ui.previews
+            .insert("a".into(), model::Preview::new("hello copy", ""));
+        ui.selection = Some(("a".into(), (0, 0), (0, 9)));
+        assert!(matches!(
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Step::Continue
+        ));
+        assert_eq!(ui.status, "Copied");
     }
     #[test]
     fn clicking_search_focuses_the_query_without_opening_a_terminal() {

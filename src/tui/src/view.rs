@@ -583,6 +583,7 @@ fn present(
         Look::Off => {}
         look => ui.backdrop.apply(f.buffer_mut(), area, &theme, look),
     }
+    crate::select::paint(f.buffer_mut(), ui);
     if ui.paged_at.is_some() {
         fade_in(f, content, ui);
         let seed = (ui.page as u64) << 4 | ui.view as u64;

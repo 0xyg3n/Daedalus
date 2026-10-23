@@ -392,6 +392,8 @@ pub struct Embed {
     pub origin: Option<(u16, u16, u16, u16)>,
     /// Cells hidden above/left when the terminal is larger than the view.
     pub scroll: (u16, u16),
+    /// Each drawn row's source row and left column, for text selection.
+    pub rows: Vec<(u16, u16)>,
     client: Option<Client>,
     block: Option<(bool, Vec<Vec<u8>>)>,
     pending: VecDeque<Purpose>,
@@ -475,6 +477,7 @@ impl Embed {
             viewport: (rows, cols),
             origin: None,
             scroll: (0, 0),
+            rows: Vec::new(),
             client: Some(client),
             block: None,
             pending: VecDeque::new(),
@@ -1066,6 +1069,7 @@ impl Embed {
         let shown_w = cols.saturating_sub(left).min(area.width);
         let shown_h = rows.saturating_sub(top).min(area.height);
         self.origin = Some((area.x, area.y, shown_w, shown_h));
+        self.rows = (0..shown_h).map(|i| (top + i, left)).collect();
         let screen = self.parser.screen();
         draw_screen(
             screen,
@@ -1136,6 +1140,7 @@ impl Embed {
         let (start, end) = wrapped_window(&segments, usize::from(area.height));
         let shown = &segments[start..end];
         self.scroll = (0, 0);
+        self.rows = shown.iter().map(|&(row, left, _)| (row, left)).collect();
         self.origin = Some((area.x, area.y, area.width, shown.len() as u16));
         let screen = self.parser.screen();
         for (i, &(row, left, length)) in shown.iter().enumerate() {

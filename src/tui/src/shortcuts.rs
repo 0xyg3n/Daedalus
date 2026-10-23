@@ -107,6 +107,9 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ("Focus", "Esc", "Leave Focus or detach"),
         ("Focus", "Arrows", "Select another pane in the same tab"),
         ("Focus", "Z", "Zoom selected pane / show whole tab"),
+        ("Terminal", "Drag", "Select text in any view. Shift+drag while a program has the mouse"),
+        ("Terminal", "Ctrl+C", "Copy the selection, or interrupt the attached terminal"),
+        ("Terminal", "Ctrl+V / right click", "Paste into the attached terminal"),
         (
             "Appearance",
             "< / >",

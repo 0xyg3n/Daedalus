@@ -1,4 +1,5 @@
-//! Explicit Windows clipboard reads for form paste shortcuts only.
+//! Clipboard shortcuts. Windows reads and writes the system clipboard.
+//! Other platforms copy with the terminal's OSC 52 sequence.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn paste_key(key: KeyEvent) -> bool {
@@ -6,6 +7,18 @@ pub fn paste_key(key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT))
         || (key.code == KeyCode::Insert && key.modifiers == KeyModifiers::SHIFT)
+}
+
+/// Ctrl+C and Ctrl+Shift+C. A bare Ctrl+C still interrupts when nothing is selected.
+pub fn copy_key(key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+        KeyCode::Char('\u{3}') => true,
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
@@ -61,6 +74,70 @@ pub fn read() -> Result<zeroize::Zeroizing<String>, &'static str> {
     }
 }
 
+#[cfg(windows)]
+pub fn write(text: &str) -> Result<(), &'static str> {
+    use windows_sys::Win32::{
+        Foundation::{GlobalFree, HANDLE},
+        System::{
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+        },
+    };
+    struct Clipboard;
+    impl Drop for Clipboard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    let mut units: Vec<u16> = text.encode_utf16().take(256 * 1024).collect();
+    units.push(0);
+    let bytes = units.len() * 2;
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("Clipboard is busy. Try again.");
+        }
+        let _clipboard = Clipboard;
+        if EmptyClipboard() == 0 {
+            return Err("Could not copy.");
+        }
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if handle.is_null() {
+            return Err("Could not copy.");
+        }
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() {
+            GlobalFree(handle);
+            return Err("Could not copy.");
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr(), pointer.cast(), units.len());
+        GlobalUnlock(handle);
+        if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
+            GlobalFree(handle);
+            return Err("Could not copy.");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+pub fn write(text: &str) -> Result<(), &'static str> {
+    use std::io::Write;
+    let payload = crate::embed::b64_encode(text.as_bytes());
+    let mut out = std::io::stdout().lock();
+    write!(out, "\x1b]52;c;{payload}\x1b\\").map_err(|_| "Could not copy")?;
+    out.flush().map_err(|_| "Could not copy")?;
+    Ok(())
+}
+
+#[cfg(all(unix, test))]
+pub fn write(text: &str) -> Result<(), &'static str> {
+    let _ = text;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +159,26 @@ mod tests {
         )));
         assert!(!paste_key(KeyEvent::new(
             KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        )));
+    }
+
+    #[test]
+    fn copy_key_is_ctrl_c_and_not_alt() {
+        assert!(copy_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(copy_key(KeyEvent::new(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(copy_key(KeyEvent::new(
+            KeyCode::Char('\u{3}'),
+            KeyModifiers::NONE
+        )));
+        assert!(!copy_key(KeyEvent::new(
+            KeyCode::Char('c'),
             KeyModifiers::CONTROL | KeyModifiers::ALT
         )));
     }

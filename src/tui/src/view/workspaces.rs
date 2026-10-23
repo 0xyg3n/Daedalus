@@ -804,7 +804,7 @@ fn heat(ui: &Ui, node: &Node) -> Option<Tone> {
 }
 
 /// One framed screen on the Wall. Returns how many preview rows it shows.
-fn wall_cell(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) -> u16 {
+fn wall_cell(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bool) -> u16 {
     let theme = ui.theme;
     let room = rect.width.saturating_sub(4) as usize;
     let Some(node) = row.source.and_then(|i| ui.snapshot.tree.get(i)) else {
@@ -894,7 +894,8 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &Ui, row: &TileRow, selected: bool) 
     if inner.height == 0 || inner.width == 0 {
         return 0;
     }
-    preview_screen(f, inner, ui, &node.id);
+    let id = node.id.clone();
+    preview_screen(f, inner, ui, &id);
     inner.height
 }
 
@@ -1255,32 +1256,39 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         ui.inline_screen = Some(screen);
     }
     // The preview reads as a small screen inset in the tile.
-    preview_screen(f, screen, ui, &node.id);
+    let id = node.id.clone();
+    preview_screen(f, screen, ui, &id);
     screen.height
 }
 
 /// A terminal's last read screen, drawn as a dark inset; read-only.
-pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &Ui, id: &str) {
+pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str) {
     let theme = ui.theme;
     f.render_widget(Block::default().style(theme.screen()), screen);
-    match ui.previews.get(id) {
-        Some(preview) if preview.error.is_empty() => {
-            if ui.view == View::Wall && ui.selected_terminal().as_deref() == Some(id) {
-                // Read-only snapshots cannot resize the source terminal. Wrap
-                // the selected output instead of hiding its right-hand columns.
-                let rows = preview.wrapped_rows(screen.width, screen.height);
-                let y = screen.bottom() - rows.len() as u16;
-                for (i, (row, left, width)) in rows.into_iter().enumerate() {
-                    embed::draw_screen(
-                        preview.screen.screen(),
-                        Rect::new(screen.x, y + i as u16, width, 1),
-                        f.buffer_mut(),
-                        &theme,
-                        (row, left),
-                    );
-                }
-                return;
+    let wall = ui.view == View::Wall && ui.selected_terminal().as_deref() == Some(id);
+    let recorded = match ui.previews.get(id) {
+        Some(preview) if preview.error.is_empty() && wall => {
+            // Read-only snapshots cannot resize the source terminal. Wrap
+            // the selected output instead of hiding its right-hand columns.
+            let rows = preview.wrapped_rows(screen.width, screen.height);
+            let y = screen.bottom() - rows.len() as u16;
+            let mut map = Vec::with_capacity(rows.len());
+            for (i, (row, left, width)) in rows.into_iter().enumerate() {
+                embed::draw_screen(
+                    preview.screen.screen(),
+                    Rect::new(screen.x, y + i as u16, width, 1),
+                    f.buffer_mut(),
+                    &theme,
+                    (row, left),
+                );
+                map.push((row, left));
             }
+            Some((
+                Rect::new(screen.x, y, screen.width, map.len() as u16),
+                map,
+            ))
+        }
+        Some(preview) if preview.error.is_empty() => {
             // Bottom-aligned: the latest lines matter most.
             let top = preview.lines.saturating_sub(screen.height);
             let shown = Rect {
@@ -1298,6 +1306,8 @@ pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &Ui, id: &str) {
                 &theme,
                 (top, 0),
             );
+            let map = (0..shown.height).map(|i| (top + i, 0)).collect();
+            Some((shown, map))
         }
         Some(preview) => {
             f.render_widget(
@@ -1307,12 +1317,19 @@ pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &Ui, id: &str) {
                 )),
                 screen,
             );
+            None
         }
         None => {
             f.render_widget(
                 Paragraph::new(Span::styled("Reading screen…", theme.fg(Tone::Faint))),
                 screen,
             );
+            None
+        }
+    };
+    if let Some((rect, rows)) = recorded {
+        if rect.width > 0 && rect.height > 0 {
+            ui.screens.push((rect, id.to_string(), rows));
         }
     }
 }
@@ -1783,6 +1800,13 @@ pub(super) fn focus_screen(
     }
     embed.resize(screen.height, screen.width);
     let cursor = embed.render(screen, f.buffer_mut(), &theme);
+    let hit = embed.origin.map(|(x, y, w, h)| {
+        (
+            Rect::new(x, y, w, h),
+            embed.plan.node.clone(),
+            embed.rows.clone(),
+        )
+    });
     if let Phase::Ended(reason) = &embed.phase {
         let reason = reason.clone();
         notice_box(
@@ -1795,6 +1819,9 @@ pub(super) fn focus_screen(
                 "w watches it again; a attaches; Esc detaches.",
             ],
         );
+    }
+    if let Some(hit) = hit {
+        ui.screens.push(hit);
     }
     cursor
 }
