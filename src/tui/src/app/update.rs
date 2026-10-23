@@ -312,44 +312,73 @@ fn directory(path: &Path) -> Result<(), String> {
         .map_err(|_| "Unsafe private update directory permissions")?;
     Ok(())
 }
-fn target() -> Result<PathBuf, String> {
-    let executable = std::env::current_exe().map_err(|_| "Cannot identify running executable")?;
+fn release_store(path: &Path, name: &str) -> bool {
+    path.parent()
+        .and_then(Path::parent)
+        .and_then(|store| store.file_name())
+        == Some(std::ffi::OsStr::new(name))
+}
+fn active_command(directory: &Path) -> Option<PathBuf> {
+    ["daedalus", "daedalus-tui"].into_iter().find_map(|name| {
+        let link = directory.join(name);
+        fs::symlink_metadata(&link)
+            .ok()
+            .filter(|meta| meta.file_type().is_symlink())
+            .map(|_| link)
+    })
+}
+fn command_targets_install(link: &Path, executable: &Path) -> bool {
+    let Ok(destination) = fs::read_link(link) else {
+        return false;
+    };
+    destination == executable || release_store(&destination, ".daedalus-updates") || {
+        release_store(&destination, "native")
+            && destination
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(|dir| dir.file_name())
+                == Some(std::ffi::OsStr::new("daedalus"))
+    }
+}
+fn command_for(executable: &Path) -> Result<PathBuf, String> {
     if !executable.is_absolute() {
         return Err("Running executable path is not absolute".into());
     }
     #[cfg(unix)]
-    if let Some(store) = executable.parent().and_then(Path::parent)
-        && store
-            .file_name()
-            .is_some_and(|name| name == ".daedalus-updates")
-        && let Some(parent) = store.parent()
+    if release_store(executable, ".daedalus-updates")
+        && let Some(parent) = executable.parent().and_then(Path::parent).and_then(Path::parent)
+        && let Some(link) = active_command(parent)
+        && command_targets_install(&link, executable)
     {
-        for name in ["daedalus", "daedalus-tui"] {
-            let link = parent.join(name);
-            if fs::read_link(&link).ok().as_deref() == Some(executable.as_path()) {
-                return Ok(link);
-            }
+        // A retained older binary updates the command that is actually installed.
+        return Ok(link);
+    }
+    #[cfg(unix)]
+    if release_store(executable, "native")
+        && let Some(prefix) = executable
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+    {
+        let link = prefix.join("bin/daedalus");
+        if command_targets_install(&link, executable) {
+            return Ok(link);
         }
+    }
+    #[cfg(unix)]
+    if release_store(executable, ".daedalus-updates") {
         return Err(
             "This retained release is not the active command; update through the installed command"
                 .into(),
         );
     }
-    // The native Linux installer uses prefix/share/daedalus/native/HASH/daedalus.
-    #[cfg(unix)]
-    if let Some(native) = executable.parent().and_then(Path::parent)
-        && native.file_name().is_some_and(|name| name == "native")
-        && let Some(prefix) = native
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-    {
-        let link = prefix.join("bin/daedalus");
-        if fs::read_link(&link).ok().as_deref() == Some(executable.as_path()) {
-            return Ok(link);
-        }
-    }
-    Ok(executable)
+    Ok(executable.to_path_buf())
+}
+fn target() -> Result<PathBuf, String> {
+    command_for(&std::env::current_exe().map_err(|_| "Cannot identify running executable")?)
 }
 fn target_bytes(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(windows)]
@@ -996,6 +1025,33 @@ mod tests {
         let rootstore = root.join(".daedalus-updates");
         let _lock = update_lock(&rootstore).unwrap();
         assert!(update_lock(&rootstore).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn retained_release_updates_the_active_command() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-update-command-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let retained = bin.join(".daedalus-updates/old/daedalus");
+        let current = bin.join(".daedalus-updates/new/daedalus");
+        fs::create_dir_all(retained.parent().unwrap()).unwrap();
+        fs::create_dir_all(current.parent().unwrap()).unwrap();
+        fs::write(&retained, b"old").unwrap();
+        fs::write(&current, b"new").unwrap();
+        std::os::unix::fs::symlink(&current, bin.join("daedalus")).unwrap();
+        assert_eq!(command_for(&current).unwrap(), bin.join("daedalus"));
+        assert_eq!(command_for(&retained).unwrap(), bin.join("daedalus"));
+        let native = root.join("share/daedalus/native/abc/daedalus");
+        fs::create_dir_all(native.parent().unwrap()).unwrap();
+        fs::write(&native, b"native").unwrap();
+        fs::remove_file(bin.join("daedalus")).unwrap();
+        std::os::unix::fs::symlink(&native, bin.join("daedalus")).unwrap();
+        assert_eq!(command_for(&native).unwrap(), bin.join("daedalus"));
+        assert_eq!(command_for(&retained).unwrap(), bin.join("daedalus"));
         fs::remove_dir_all(root).unwrap();
     }
 }
