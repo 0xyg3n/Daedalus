@@ -1381,6 +1381,284 @@ pub fn record_run_result(
     .map_err(|_| Error::Persistence)
 }
 
+/// A global hook command names one registration. Another Herdr window must not
+/// use that file. Match pane, server and conversation, or open a registration
+/// that cannot deliver Telegram until someone binds it.
+fn align_herdr_window(registration: &Registration, payload: &Value) -> Result<AlignedWindow> {
+    let Some((pane, endpoint)) = hook_caller_pane() else {
+        return Ok(AlignedWindow::Same(registration.clone()));
+    };
+    if registration.scope.terminal.backend != crate::core::identity::Backend::Herdr {
+        return Ok(AlignedWindow::Same(registration.clone()));
+    }
+    let Some(conversation) = payload_conversation(registration.scope.harness, payload) else {
+        return Ok(AlignedWindow::Same(registration.clone()));
+    };
+    let terminal = &registration.scope.terminal;
+    if terminal.pane == pane
+        && terminal.endpoint == endpoint
+        && registration.scope.conversation == conversation
+    {
+        return Ok(AlignedWindow::Same(refresh_stopped_harness(registration)?));
+    }
+    let mut want = registration.scope.clone();
+    want.conversation = conversation;
+    want.terminal.pane = pane.clone();
+    want.terminal.endpoint = endpoint.clone();
+    if let Some(existing) = find_window_registration(&registration.directory, &want)? {
+        return Ok(AlignedWindow::Same(refresh_stopped_harness(&existing)?));
+    }
+    let terminals = crate::adapters::terminals::Terminals::default();
+    let generation = match live_herdr_generation(&terminals, &endpoint, &pane) {
+        Ok(generation) => generation,
+        Err(_) => return Ok(AlignedWindow::Ignore),
+    };
+    want.terminal.generation = generation;
+    let Some(process) = ancestor_harness(registration.scope.harness) else {
+        return Ok(AlignedWindow::Ignore);
+    };
+    if verify_process(&process, &terminals.proc_root).is_err() {
+        return Ok(AlignedWindow::Ignore);
+    }
+    let Ok(opened) = window_registration(registration, &want, process, transcript_hint(payload)) else {
+        return Ok(AlignedWindow::Ignore);
+    };
+    if install(&opened).is_err() {
+        return Ok(AlignedWindow::Ignore);
+    }
+    Ok(AlignedWindow::Same(opened))
+}
+enum AlignedWindow {
+    Same(Registration),
+    Ignore,
+}
+std::thread_local! {
+    static HOOK_CALLER_PANE: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+struct HookCallerGuard(Option<(String, String)>);
+impl Drop for HookCallerGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        HOOK_CALLER_PANE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+fn hook_caller_pane() -> Option<(String, String)> {
+    HOOK_CALLER_PANE.with(|slot| slot.borrow().clone())
+}
+fn caller_herdr_pane() -> Option<(String, String)> {
+    let pane = std::env::var("HERDR_PANE_ID").ok()?;
+    let endpoint = std::env::var("HERDR_SESSION").ok()?;
+    (terminal_field(&pane) && terminal_field(&endpoint)).then_some((pane, endpoint))
+}
+fn terminal_field(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.chars().any(|c| c.is_control() || c == '/' || c == '\\')
+}
+fn payload_conversation(harness: Harness, payload: &Value) -> Option<String> {
+    let key = match harness {
+        Harness::Grok => "sessionId",
+        Harness::Cursor => "conversation_id",
+        _ => "session_id",
+    };
+    let text = payload
+        .get(key)
+        .or_else(|| payload.get("session_id"))?
+        .as_str()?;
+    identifier(text).then(|| text.to_owned())
+}
+fn same_window(registration: &Registration, want: &crate::core::goal_store::Scope) -> bool {
+    let terminal = &registration.scope.terminal;
+    registration.scope.harness == want.harness
+        && registration.scope.instance == want.instance
+        && registration.scope.conversation == want.conversation
+        && terminal.backend == want.terminal.backend
+        && terminal.endpoint == want.terminal.endpoint
+        && terminal.pane == want.terminal.pane
+}
+fn find_window_registration(directory: &Path, want: &crate::core::goal_store::Scope) -> Result<Option<Registration>> {
+    let entries = match fs::read_dir(directory.join("hooks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::PrivateState),
+    };
+    let mut found = None;
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err(Error::Invalid("Hook registration limit exceeded"));
+        }
+        let path = entry.map_err(|_| Error::PrivateState)?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if name.contains(".before") || name.contains(".backup") {
+            continue;
+        }
+        let Ok(registration) = inspect(&path) else {
+            continue;
+        };
+        if same_window(&registration, want) && same_local_path(&registration.directory, directory) {
+            if found.is_some() {
+                return Err(Error::Invalid(
+                    "More than one hook registration matches this window",
+                ));
+            }
+            found = Some(registration);
+        }
+    }
+    Ok(found)
+}
+fn live_herdr_generation(
+    terminals: &crate::adapters::terminals::Terminals,
+    endpoint: &str,
+    pane: &str,
+) -> Result<String> {
+    let result = terminals
+        .herdr_result(endpoint, &["pane", "get", pane])
+        .map_err(|_| Error::Identity)?;
+    let generation = result
+        .pointer("/pane/terminal_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !terminal_field(generation) {
+        return Err(Error::Identity);
+    }
+    Ok(generation.to_owned())
+}
+fn transcript_hint(payload: &Value) -> Option<PathBuf> {
+    let text = payload.get("transcript_path")?.as_str()?;
+    let path = PathBuf::from(text);
+    layouts::check_path(&path).ok()?;
+    path.is_absolute().then_some(path)
+}
+fn window_registration(
+    template: &Registration,
+    scope: &crate::core::goal_store::Scope,
+    process: ProcessIdentity,
+    transcript: Option<PathBuf>,
+) -> Result<Registration> {
+    let mut opened = template.clone();
+    opened.id = window_registration_id(&template.id, &scope.terminal.pane, &scope.conversation)?;
+    opened.scope = scope.clone();
+    opened.goal_id = None;
+    opened.server_emitter = None;
+    opened.harness_process = Some(process);
+    opened.transcript = transcript;
+    opened.options = Options::default();
+    opened.validate()?;
+    Ok(opened)
+}
+fn window_registration_id(template: &str, pane: &str, conversation: &str) -> Result<String> {
+    let mut raw = String::new();
+    for (index, part) in [template, pane, conversation].into_iter().enumerate() {
+        if index > 0 {
+            raw.push('-');
+        }
+        for character in part.chars() {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                raw.push(character);
+            } else {
+                raw.push('-');
+            }
+        }
+    }
+    while raw.contains("--") {
+        raw = raw.replace("--", "-");
+    }
+    let raw = raw.trim_matches('-').to_owned();
+    if !identifier(&raw) {
+        return Err(Error::Invalid("Invalid hook registration"));
+    }
+    Ok(raw)
+}
+fn refresh_stopped_harness(registration: &Registration) -> Result<Registration> {
+    let Some(current) = &registration.harness_process else {
+        return Ok(registration.clone());
+    };
+    let Some(live) = ancestor_harness(registration.scope.harness) else {
+        return Ok(registration.clone());
+    };
+    if live == *current && verify_process(current, Path::new("/proc")).is_ok() {
+        return Ok(registration.clone());
+    }
+    if is_ancestor(current.pid) && verify_process(current, Path::new("/proc")).is_ok() {
+        return Ok(registration.clone());
+    }
+    if verify_process(&live, Path::new("/proc")).is_err() {
+        return Ok(registration.clone());
+    }
+    let mut next = registration.clone();
+    next.harness_process = Some(live);
+    next.validate()?;
+    layouts::write_private(
+        &next.path(),
+        &serde_json::to_vec_pretty(&next).map_err(|_| Error::Input)?,
+    )
+    .map_err(|_| Error::PrivateState)?;
+    Ok(next)
+}
+#[cfg(unix)]
+fn is_ancestor(pid: u32) -> bool {
+    let mut cursor = std::process::id();
+    for _ in 0..8 {
+        if cursor == pid {
+            return true;
+        }
+        cursor = match parent_pid(cursor) {
+            Some(parent) if parent > 1 => parent,
+            _ => return false,
+        };
+    }
+    false
+}
+#[cfg(unix)]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("PPid:") else {
+            continue;
+        };
+        return rest.trim().parse().ok();
+    }
+    None
+}
+#[cfg(not(unix))]
+fn is_ancestor(_pid: u32) -> bool {
+    false
+}
+#[cfg(not(unix))]
+fn ancestor_harness(_harness: Harness) -> Option<ProcessIdentity> {
+    None
+}
+#[cfg(unix)]
+fn ancestor_harness(harness: Harness) -> Option<ProcessIdentity> {
+    let needle = match harness {
+        Harness::Grok => "grok",
+        Harness::Codex => "codex",
+        Harness::Claude => "claude",
+        _ => return None,
+    };
+    let mut pid = std::process::id();
+    for _ in 0..8 {
+        pid = parent_pid(pid)?;
+        if pid <= 1 {
+            return None;
+        }
+        let cmd = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let first = cmd.split(|byte| *byte == 0).next().unwrap_or_default();
+        let first = String::from_utf8_lossy(first);
+        let name = Path::new(first.as_ref()).file_name()?.to_str()?;
+        if name != needle {
+            continue;
+        }
+        let ticks = crate::adapters::terminals::process_start(Path::new("/proc"), &pid.to_string())?;
+        let start_ticks = ticks.parse().ok()?;
+        return Some(ProcessIdentity { pid, start_ticks });
+    }
+    None
+}
 /// CLI integration: registration path and optional stable event ID are explicit
 /// arguments. Stdout contains only the harness hook response, never status logs.
 pub fn run(
@@ -1401,6 +1679,8 @@ pub fn run_expected(
     expected: Option<EventKind>,
 ) -> Result<Outcome> {
     let registration = inspect(registration_path)?;
+    let _guard = HookCallerGuard(hook_caller_pane());
+    HOOK_CALLER_PANE.with(|slot| *slot.borrow_mut() = caller_herdr_pane());
     run_verified(
         reader,
         writer,
@@ -1436,6 +1716,22 @@ fn run_verified(
             "Hook event does not match its installed command",
         ));
     }
+    let registration = match align_herdr_window(registration, &payload)? {
+        AlignedWindow::Ignore => {
+            writer
+                .write_all(b"{}\n")
+                .and_then(|_| writer.flush())
+                .map_err(|_| Error::Output)?;
+            return Ok(Outcome {
+                reply: Reply::Empty,
+                event_id: "unbound-herdr-window".into(),
+                planned_effects: Vec::new(),
+                admitted: false,
+            });
+        }
+        AlignedWindow::Same(registration) => registration,
+    };
+    let registration = &registration;
     // Codex loads profile hooks for every conversation using that profile.
     // An event for another session has no authority over this registration;
     // acknowledge it without touching persistent state or reporting failure.
@@ -1743,6 +2039,44 @@ mod tests {
         assert_eq!(passed["state"], "ok");
         assert_eq!(failed["error"], Error::Input.to_string());
         assert_eq!(failed.as_object().unwrap().len(), 4);
+    }
+    #[test]
+    fn another_window_does_not_copy_telegram_or_the_registered_pane() {
+        let fixture = Fixture::new();
+        let mut template = fixture.0.clone();
+        template.id = "telegram-grok".into();
+        template.scope.harness = Harness::Grok;
+        template.options.telegram_delivery = true;
+        template.options.telegram_progress = true;
+        template.events = vec![EventKind::PostToolUse, EventKind::Stop];
+        let mut scope = template.scope.clone();
+        scope.terminal.pane = "wP:p82".into();
+        scope.terminal.endpoint = "daedalus".into();
+        scope.conversation = "01a163f0-b07f-7591-a1eb-9dd5d6d29910".into();
+        scope.terminal.generation = "term".into();
+        let opened = window_registration(
+            &template,
+            &scope,
+            ProcessIdentity {
+                pid: 7,
+                start_ticks: 9,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!opened.options.telegram_delivery);
+        assert!(!opened.options.telegram_progress);
+        assert!(opened.goal_id.is_none());
+        assert!(opened.server_emitter.is_none());
+        assert_eq!(opened.scope.terminal.pane, "wP:p82");
+        assert_ne!(opened.id, template.id);
+        install(&template).unwrap();
+        install(&opened).unwrap();
+        let found = find_window_registration(&template.directory, &scope)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, opened.id);
+        assert!(!found.options.telegram_delivery);
     }
     struct Verified;
     impl Verifier for Verified {

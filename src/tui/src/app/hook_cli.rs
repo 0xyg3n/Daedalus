@@ -179,7 +179,12 @@ pub fn run(
         // last-result record so the UI can explain a nonzero native exit.
         if !result
             .as_ref()
-            .is_ok_and(|outcome| outcome.event_id == "unbound-codex-session")
+            .is_ok_and(|outcome| {
+                matches!(
+                    outcome.event_id.as_str(),
+                    "unbound-codex-session" | "unbound-herdr-window"
+                )
+            })
         {
             let _ = hook_runtime::record_run_result(&path, event_kind, result.as_ref().err());
         }
