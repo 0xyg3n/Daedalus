@@ -2,6 +2,7 @@ mod backdrop;
 mod clipboard;
 mod embed;
 mod graphics;
+mod harness_icons;
 mod model;
 mod neon;
 mod options;
@@ -428,9 +429,8 @@ fn main() -> io::Result<()> {
     let mut inventory = false;
     let mut terminal = ratatui::init();
     // Ask about pictures before anything else reads the input. The first
-    // splash frame shows while the terminal answers. Only the splash uses one.
-    if theme.backdrop
-        && ui.splash.is_some()
+    // frame shows while the terminal answers. Logos also work without a splash.
+    if ((theme.backdrop && ui.splash.is_some()) || harness_icons::requested(&ui))
         && graphics::wanted(|name| {
             std::env::var(name)
                 .ok()
@@ -439,7 +439,7 @@ fn main() -> io::Result<()> {
     {
         terminal.draw(|f| view::draw(f, &mut ui))?;
         ui.kitty = graphics::probe(Duration::from_millis(settings.graphics_probe_timeout_ms));
-        if ui.kitty.is_some() {
+        if ui.kitty.is_some() && theme.backdrop && ui.splash.is_some() {
             graphics::transmit(&mut io::stdout())?;
         }
         // The wait for the answer and the picture's upload do not count
@@ -509,6 +509,7 @@ fn main() -> io::Result<()> {
                                 }
                             }
                             "external_done" => {
+                                ui.harness_logo_cache.invalidate();
                                 terminal = ratatui::init();
                                 execute!(
                                     io::stdout(),
@@ -597,8 +598,12 @@ fn main() -> io::Result<()> {
                 view::draw(f, &mut ui);
                 let area = f.area();
                 updater.draw(f, area, &ui.theme);
+                if updater.visible() {
+                    ui.harness_logo_targets.get_mut().clear();
+                }
             })?;
             show_picture(&mut ui, &mut io::stdout())?;
+            harness_icons::show(&mut ui, &mut io::stdout())?;
             // Drain ready input before repainting. Mouse motion and fast typing
             // must not queue one full rendering interval per event.
             let mut input_started: Option<Instant> = None;
@@ -637,6 +642,7 @@ fn main() -> io::Result<()> {
                     // multiplexer may blank a pane that lost focus, or repaint it
                     // at the same size, and the diff alone would never refill it.
                     repaint(&mut terminal)?;
+                    ui.harness_logo_cache.invalidate();
                     if ui.kitty_shown.take().is_some() {
                         graphics::remove(&mut io::stdout(), false)?;
                     }
@@ -758,6 +764,7 @@ fn main() -> io::Result<()> {
         embed.detach();
     }
     if ui.kitty.is_some() {
+        let _ = ui.harness_logo_cache.hide(&mut io::stdout());
         let _ = graphics::remove(&mut io::stdout(), true);
     }
     let _ = execute!(
@@ -1099,6 +1106,7 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
     if external {
         // The native client takes the real terminal; stop the embedded view first.
         leave_focus(ui);
+        ui.harness_logo_cache.hide(&mut io::stdout())?;
         execute!(
             io::stdout(),
             DisableFocusChange,

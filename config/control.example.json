@@ -52,7 +52,8 @@
     "shortcut_query_limit_chars": 160,
     "agent_session_ids": true,
     "agent_activity": true,
-    "agent_activity_rows": 3
+    "agent_activity_rows": 3,
+    "harness_logos": "auto"
   },
   "runtime": {
     "native_launch_cols": 120,

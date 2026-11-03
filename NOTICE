@@ -32,3 +32,10 @@ Platform download icons:
 - assets/badges/download-linux.svg embeds the same Tux artwork credited above.
 
 These icons identify the supported platforms; they do not imply endorsement.
+
+Workspace logo variants:
+
+- assets/icons/raster/{cursor,pi,opencode}.png are 64-pixel raster versions of
+  the corresponding bundled SVG logomarks, used by the terminal image protocol.
+- assets/icons/pi-dark.svg uses the light mark variant of assets/icons/pi.svg
+  for the dark terminal surface. The mark's paths are unchanged.

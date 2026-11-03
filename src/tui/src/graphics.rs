@@ -161,12 +161,15 @@ fn base64(data: &[u8]) -> String {
 /// Send the picture once, to be shown later by its number. `q=2` keeps the
 /// terminal from answering, so nothing reaches the input.
 pub fn transmit(out: &mut impl Write) -> io::Result<()> {
-    let data = base64(PNG);
+    transmit_png(out, ID, PNG)
+}
+pub fn transmit_png(out: &mut impl Write, id: u32, png: &[u8]) -> io::Result<()> {
+    let data = base64(png);
     let chunks: Vec<&[u8]> = data.as_bytes().chunks(CHUNK).collect();
     for (n, chunk) in chunks.iter().enumerate() {
         let more = u8::from(n + 1 < chunks.len());
         if n == 0 {
-            write!(out, "\x1b_Ga=t,f=100,t=d,i={ID},q=2,m={more};")?;
+            write!(out, "\x1b_Ga=t,f=100,t=d,i={id},q=2,m={more};")?;
         } else {
             write!(out, "\x1b_Gm={more};")?;
         }
@@ -224,8 +227,48 @@ pub fn place_crop(out: &mut impl Write, area: Rect, crop: Option<Rect>) -> io::R
 
 /// Take the picture off the screen; with `forget`, free its data too.
 pub fn remove(out: &mut impl Write, forget: bool) -> io::Result<()> {
+    remove_image(out, ID, forget)
+}
+pub fn remove_image(out: &mut impl Write, id: u32, forget: bool) -> io::Result<()> {
     let what = if forget { 'I' } else { 'i' };
-    write!(out, "\x1b_Ga=d,d={what},i={ID},q=2\x1b\\")?;
+    write!(out, "\x1b_Ga=d,d={what},i={id},q=2\x1b\\")?;
+    out.flush()
+}
+
+/// Fit a square provider logo inside its reserved cells without stretching it.
+/// One dimension stays implicit so Kitty preserves the PNG's aspect ratio.
+pub fn place_square(
+    out: &mut impl Write,
+    id: u32,
+    placement: u32,
+    area: Rect,
+    cell: (f32, f32),
+) -> io::Result<()> {
+    if area.width == 0 || area.height == 0 {
+        return Ok(());
+    }
+    let cell = valid_cell(cell);
+    let pixels = (
+        f32::from(area.width) * cell.0,
+        f32::from(area.height) * cell.1,
+    );
+    let side = pixels.0.min(pixels.1);
+    let offset = ((pixels.0 - side) * 0.5, (pixels.1 - side) * 0.5);
+    let column = area.x + (offset.0 / cell.0).floor() as u16;
+    let row = area.y + (offset.1 / cell.1).floor() as u16;
+    let x = (offset.0 % cell.0).round() as u16;
+    let y = (offset.1 % cell.1).round() as u16;
+    let dimension = if pixels.0 <= pixels.1 {
+        format!("c={}", area.width)
+    } else {
+        format!("r={}", area.height)
+    };
+    write!(
+        out,
+        "\x1b7\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},{dimension},X={x},Y={y},C=1,z=1,q=2\x1b\\\x1b8",
+        row + 1,
+        column + 1
+    )?;
     out.flush()
 }
 
@@ -264,6 +307,24 @@ pub fn cover(frame: Rect, cell: (f32, f32)) -> Rect {
 mod tests {
     use super::*;
 
+    #[test]
+    fn compact_logos_fit_the_cell_pixels_preserve_cursor_and_request_no_replies() {
+        for (cell, dimension, offset) in [
+            ((8.0, 16.0), "c=2", "X=0,Y=0"),
+            ((10.0, 16.0), "r=1", "X=2,Y=0"),
+            ((8.0, 20.0), "c=2", "X=0,Y=2"),
+        ] {
+            let mut bytes = Vec::new();
+            place_square(&mut bytes, 7200, 2, Rect::new(4, 5, 2, 1), cell).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.starts_with("\x1b7\x1b[6;5H"));
+            assert!(text.contains(dimension));
+            assert!(text.contains(offset));
+            assert!(text.contains("C=1,z=1,q=2"));
+            assert!(text.ends_with("\x1b8"));
+            assert_eq!(text.contains("c=") as u8 + text.contains("r=") as u8, 1);
+        }
+    }
     #[test]
     fn only_terminals_known_to_answer_are_asked() {
         let env = |pairs: &'static [(&str, &str)]| {

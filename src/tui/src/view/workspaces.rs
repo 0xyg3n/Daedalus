@@ -1,10 +1,11 @@
 //! Workspace layouts, terminal previews and native split views.
 use super::{
-    glow, hovered, keys, node_icon, node_tone, page_hue, panel, quick_bar, search, since, split,
-    switcher, tone_of, tree_node_spans,
+    glow, hovered, keys, mark_tree_logo, node_harness, node_icon, node_tone, page_hue, panel,
+    quick_bar, search, since, split, switcher, tone_of, tree_node_spans,
 };
 use crate::{
     embed::{self, Mode, Phase},
+    harness_icons,
     model::{Handle, Kind, Node, Order, Sizes, Split, TileRow, Ui, View},
     neon,
     theme::{self, Theme, Tone},
@@ -865,11 +866,20 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         .border_style(theme.fg(edge))
         .title(Line::from(vec![
             Span::styled(
+                harness_icons::text(ui, &tile.harness),
+                theme.fg(harness_icons::brand(ui, &tile.harness)
+                    .map_or(Tone::Text, |brand| brand.tone())),
+            ),
+            Span::styled(
                 format!("{} ", node_icon(&theme, "pane", &tile.state)),
                 theme.fg(tone),
             ),
             Span::styled(
-                fit(&tile.title, room.saturating_sub(used + 2), &theme),
+                fit(
+                    &harness_icons::label(ui, &tile.harness, &tile.title),
+                    room.saturating_sub(used + 2 + width(&harness_icons::text(ui, &tile.harness))),
+                    &theme,
+                ),
                 title_style,
             ),
         ]))
@@ -895,6 +905,9 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
     }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+    if rect.width >= 5 {
+        harness_icons::mark(ui, &tile.harness, Rect::new(rect.x + 1, rect.y, 2, 1));
+    }
     if let Some(label) = identity
         && hovered(ui, Rect::new(rect.x, rect.bottom() - 1, rect.width, 1))
     {
@@ -974,7 +987,8 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
             },
             workspace.1
         );
-        let prefix = format!("{badge}{icon} ");
+        let harness = node.and_then(node_harness).unwrap_or("");
+        let prefix = format!("{badge}{}", harness_icons::prefix(ui, harness, icon));
         let suffix = format!(" {status} ");
         let room = usize::from(inner.width).saturating_sub(width(&prefix) + width(&suffix));
         let identity = ui
@@ -982,12 +996,13 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
             .agent_session_ids
             .then(|| node.and_then(agent_session_label))
             .flatten();
+        let title = harness_icons::label(ui, harness, &clean(title));
         let title = if height == 1
             && let Some(label) = &identity
         {
-            format!("{label} · {}", clean(title))
+            format!("{label} · {title}")
         } else {
-            clean(title)
+            title
         };
         let title = fit(&title, room, &theme);
         let pad = room.saturating_sub(width(&title));
@@ -1000,6 +1015,16 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
             ]))
             .style(base),
             Rect { height: 1, ..rect },
+        );
+        harness_icons::mark(
+            ui,
+            harness,
+            Rect::new(
+                rect.x + width(&badge) as u16,
+                rect.y,
+                rect.width.saturating_sub(width(&badge) as u16),
+                1,
+            ),
         );
         if height == 2 {
             f.render_widget(
@@ -1087,7 +1112,10 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
                 String::new(),
             ),
         };
-        let room = (rect.width as usize).saturating_sub(width(&age) + 4);
+        let harness = node.and_then(node_harness).unwrap_or("");
+        let provider = harness_icons::text(ui, harness);
+        let title = harness_icons::label(ui, harness, &title);
+        let room = (rect.width as usize).saturating_sub(width(&age) + 4 + width(&provider));
         let identity = ui
             .settings
             .agent_session_ids
@@ -1098,7 +1126,8 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
             .map(|label| format!("{label} · {title}"))
             .unwrap_or(title);
         let title = fit(&title, room, &theme);
-        let pad = (rect.width as usize).saturating_sub(width(&title) + width(&age) + 3);
+        let pad = (rect.width as usize)
+            .saturating_sub(width(&title) + width(&age) + 3 + width(&provider));
         let style = if selected {
             theme.selected(1.0)
         } else {
@@ -1106,6 +1135,12 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
         };
         f.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled(
+                    provider,
+                    theme
+                        .fg(harness_icons::brand(ui, harness)
+                            .map_or(Tone::Text, |brand| brand.tone())),
+                ),
                 Span::styled(format!("{icon} "), theme.fg(tone)),
                 Span::styled(title, style),
                 Span::raw(" ".repeat(pad)),
@@ -1113,6 +1148,7 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
             ])),
             rect,
         );
+        harness_icons::mark(ui, harness, rect);
         if let Some(label) = identity
             && hovered(ui, rect)
         {
@@ -1247,10 +1283,22 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         .border_style(theme.fg(edge))
         .title(Line::from(vec![
             Span::styled(
+                harness_icons::text(ui, &tile.harness),
+                theme.fg(harness_icons::brand(ui, &tile.harness)
+                    .map_or(Tone::Text, |brand| brand.tone())),
+            ),
+            Span::styled(
                 format!(" {} ", node_icon(&theme, "pane", &tile.state)),
                 theme.fg(tone),
             ),
-            Span::styled(fit(&tile.title, room, &theme), title_style),
+            Span::styled(
+                fit(
+                    &harness_icons::label(ui, &tile.harness, &tile.title),
+                    room.saturating_sub(width(&harness_icons::text(ui, &tile.harness))),
+                    &theme,
+                ),
+                title_style,
+            ),
             Span::raw(" "),
         ]))
         .title_top(Line::from(right).right_aligned())
@@ -1266,6 +1314,9 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
     }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+    if rect.width >= 5 {
+        harness_icons::mark(ui, &tile.harness, Rect::new(rect.x + 1, rect.y, 2, 1));
+    }
     if inner.height == 0 {
         return 0;
     }
@@ -1577,6 +1628,7 @@ pub(super) fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
             ))),
             Rect { height: 1, ..hit },
         );
+        mark_tree_logo(ui, row, Some(node), Rect { height: 1, ..hit });
         let branch = node.tile.is_none() && row.children;
         let name = &row.title;
         let metadata = session_meta(node, ui.settings.agent_session_ids);
@@ -1741,25 +1793,37 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         return None;
     }
     let _ = input;
-    let screen = if full
-        && ui.settings.agent_session_ids
-        && let Some(label) = node.as_ref().and_then(agent_session_label)
-    {
-        let label = if ui.snapshot.freshness.starts_with("STALE") {
-            format!("STALE · {label}")
+    let harness = node.as_ref().and_then(node_harness).unwrap_or("");
+    let provider = harness_icons::text(ui, harness);
+    let identity = ui
+        .settings
+        .agent_session_ids
+        .then(|| node.as_ref().and_then(agent_session_label))
+        .flatten();
+    let screen = if !provider.is_empty() || (full && identity.is_some()) {
+        let primary = identity
+            .clone()
+            .unwrap_or_else(|| harness_icons::label(ui, harness, ""));
+        let primary = if ui.snapshot.freshness.starts_with("STALE") {
+            format!("STALE · {primary}")
         } else {
-            label
+            primary
         };
-        let line = format!(
-            " {label} · {} · {chip}",
+        let mut line = format!("{provider}{primary}");
+        let tail = format!(
+            " · {} · {chip}",
             node.as_ref().map(session_name).unwrap_or_default()
         );
+        if width(&line) + width(&tail) <= inner.width as usize {
+            line.push_str(&tail);
+        }
         f.render_widget(
             Paragraph::new(fit(&line, inner.width as usize, &theme)).style(theme.fg(Tone::Info)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
+        harness_icons::mark(ui, harness, Rect::new(inner.x, inner.y, inner.width, 1));
         if hovered(ui, Rect::new(inner.x, inner.y, inner.width, 1)) {
-            ui.tooltip = Some(detail_tip(inner, label));
+            ui.tooltip = Some(detail_tip(inner, primary));
         }
         Rect::new(
             inner.x,
@@ -2029,7 +2093,16 @@ fn split_panes(
             }
             None => ("Terminal".into(), String::new(), String::new(), Tone::Faint),
         };
-        let room = rect.width.saturating_sub(4 + width(&age) as u16) as usize;
+        let harness = nodes
+            .get(pane.id.as_str())
+            .and_then(|index| node_harness(&ui.snapshot.tree[*index]))
+            .unwrap_or("");
+        let provider = harness_icons::text(ui, harness);
+        let title = harness_icons::label(ui, harness, &title);
+        let room = rect
+            .width
+            .saturating_sub(4 + width(&age) as u16 + width(&provider) as u16)
+            as usize;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(if here {
@@ -2039,6 +2112,12 @@ fn split_panes(
             })
             .border_style(theme.fg(edge))
             .title(Line::from(vec![
+                Span::styled(
+                    provider,
+                    theme
+                        .fg(harness_icons::brand(ui, harness)
+                            .map_or(Tone::Text, |brand| brand.tone())),
+                ),
                 Span::styled(
                     format!("{} ", node_icon(&theme, "pane", &state)),
                     theme.fg(node_tone(&state, "pane")),
@@ -2058,6 +2137,11 @@ fn split_panes(
             .style(theme.surface());
         let inner = block.inner(rect);
         f.render_widget(block, rect);
+        harness_icons::mark(
+            ui,
+            harness,
+            Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
+        );
         ui.pane_hits.push((rect, pane.id.clone()));
         if here {
             cursor = focus_screen(f, inner, ui, true);

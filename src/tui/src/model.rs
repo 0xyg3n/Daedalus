@@ -1342,6 +1342,8 @@ pub type TerminalSelection = (String, (u16, u16), (u16, u16));
 
 #[derive(Default)]
 pub struct Ui {
+    pub harness_logo_targets: std::cell::RefCell<Vec<crate::harness_icons::Placement>>,
+    pub harness_logo_cache: crate::harness_icons::Cache,
     pub settings: daedalus_tui::app::interface_settings::InterfaceSettings,
     pub binding_search: Option<String>,
     pub binding_scroll: usize,
@@ -1533,6 +1535,7 @@ fn exact_search_rank(terms: &[String], title: &str, aliases: &[String]) -> u8 {
 impl Ui {
     /// A hidden or resized view cannot keep clickable geometry or capture targets.
     pub fn reset_hit_regions(&mut self) {
+        self.harness_logo_targets.get_mut().clear();
         self.detail_view.area = None;
         self.search_area = None;
         self.inline_screen = None;

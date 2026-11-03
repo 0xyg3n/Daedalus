@@ -56,6 +56,7 @@ pub struct InterfaceSettings {
     pub agent_session_ids: bool,
     pub agent_activity: bool,
     pub agent_activity_rows: u64,
+    pub harness_logos: String,
 }
 impl Default for InterfaceSettings {
     fn default() -> Self {
@@ -100,6 +101,7 @@ impl Default for InterfaceSettings {
             agent_session_ids: true,
             agent_activity: true,
             agent_activity_rows: 3,
+            harness_logos: "auto".into(),
         }
     }
 }
@@ -427,6 +429,13 @@ pub const SETTINGS: &[Setting] = &[
         "Workspace display",
         "Maximum working, waiting or failed agents listed on Overview. Zero keeps only activity totals. Available space may reduce the list.",
         Kind::Number { min: 0, max: 12 }
+    ),
+    setting!(
+        harness_logos,
+        "Harness logos in workspaces",
+        "Workspace display",
+        "Native app logos on supported terminals, with recognizable glyphs or distinct ASCII initials underneath. Glyphs disables images; Off retains status icons. Does not change agent state reporting.",
+        Kind::Choice(&["auto", "glyphs", "off"])
     ),
 ];
 

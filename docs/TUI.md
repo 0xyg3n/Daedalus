@@ -128,6 +128,15 @@ remain available.
 | Cube | One workspace per cube; rotate previews or type on the front face |
 | Focus | A terminal and its native tab layout beside the workspace tree |
 
+Workspace rows and terminal cards identify Codex, Claude, Grok, Hermes, Cursor,
+Pi and OpenCode with their bundled app logos. Logos occupy their own header slot;
+working, waiting and error indicators and conversation IDs stay separate.
+Graphics-capable terminals use the native images. Other terminals retain the
+provider glyph and name; ASCII mode uses distinct two-letter badges.
+**Interface settings → Harness logos in workspaces** offers `auto`, `glyphs`
+or `off` (`ui.harness_logos`). Images require Kitty graphics support; Windows
+Terminal uses the text fallback. No font pack or runtime image converter is needed.
+
 | Key | Action |
 |---|---|
 | `n` | New shell, agent terminal or workspace |

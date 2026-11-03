@@ -598,6 +598,13 @@ fn present(
             seed,
         );
     }
+    if ui.tooltip.is_some()
+        || ui.dialog.is_some()
+        || ui.options.is_some()
+        || ui.binding_search.is_some()
+    {
+        ui.harness_logo_targets.get_mut().clear();
+    }
     if let Some((at, label)) = ui.tooltip.take() {
         tooltip(f, area, &theme, at, &label);
     }
@@ -1982,6 +1989,30 @@ fn node_icon(theme: &Theme, kind: &str, state: &str) -> &'static str {
     }
 }
 
+fn node_harness(node: &Node) -> Option<&str> {
+    node.tile
+        .as_ref()
+        .map(|tile| tile.harness.as_str())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            node.parts
+                .iter()
+                .find(|(_, role)| role == "harness")
+                .map(|(name, _)| name.as_str())
+        })
+}
+
+fn mark_tree_logo(ui: &Ui, row: &Row, node: Option<&Node>, area: Rect) {
+    let Some(harness) = node.and_then(node_harness) else {
+        return;
+    };
+    let branch = row.branch.chars().skip(3).collect::<String>();
+    let offset = 3 + width(&ui.theme.branch(&branch)) as u16;
+    if area.width >= offset + 2 {
+        crate::harness_icons::mark(ui, harness, Rect::new(area.x + offset, area.y, 2, 1));
+    }
+}
+
 /// Shared node presentation for Tree and Focus: identical role colours and labels.
 fn tree_node_spans(
     ui: &Ui,
@@ -2042,13 +2073,9 @@ fn tree_node_spans(
         // Busy terminals pulse gently.
         icon_style = icon_style.fg(theme.mix(theme::FAINT, theme::AMBER, 0.4 + 0.6 * pulse));
     }
+    let harness = node.and_then(node_harness).unwrap_or("");
     first.push(Span::styled(
-        format!(
-            "{} ",
-            node.and_then(|n| n.tile.as_ref())
-                .filter(|t| !t.harness.is_empty())
-                .map_or_else(|| node_icon(theme, kind, state), |t| theme.icon(&t.harness))
-        ),
+        crate::harness_icons::prefix(ui, harness, node_icon(theme, kind, state)),
         icon_style,
     ));
     let left: usize = first.iter().map(|s| s.width()).sum();
@@ -2272,6 +2299,7 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
                 Kind::Node => {
                     let node = ui.snapshot.tree.get(row.source);
                     first = tree_node_spans(ui, row, node, base, active, w, tone);
+                    mark_tree_logo(ui, row, node, Rect::new(body.x, y, body.width, 1));
                     if detail_row == Some(i)
                         && let Some(node) = node
                     {
@@ -3631,6 +3659,141 @@ mod tests {
             crate::model::Preview::new("$ make\n\x1b[32mpreview-ok\x1b[0m", ""),
         );
         ui
+    }
+    #[test]
+    fn harness_badges_follow_each_terminal_in_all_workspace_views_and_keep_identity() {
+        use crate::harness_icons::Brand;
+        for view in [View::Tree, View::Tiles, View::Wall, View::Cube, View::Focus] {
+            for brand in Brand::ALL {
+                let mut ui = workspace(
+                    Theme {
+                        reduced_motion: true,
+                        ..Theme::default()
+                    },
+                    view,
+                );
+                let node = ui
+                    .snapshot
+                    .tree
+                    .iter_mut()
+                    .find(|node| node.id == "a")
+                    .unwrap();
+                node.tile.as_mut().unwrap().harness = brand.name().into();
+                node.fields = vec![Field::new(
+                    "Agent session",
+                    "own-conversation-identity",
+                    "id",
+                )];
+                ui.select_id("a");
+                let index = ui.tiles().iter().position(|row| row.id == "a").unwrap();
+                ui.select_tile(index);
+                let buffer = render(&mut ui, 180, 48);
+                let targets = ui.harness_logo_targets.borrow();
+                assert!(
+                    targets.iter().any(|p| p.brand == brand),
+                    "{brand:?} missing in {view:?}"
+                );
+                assert!(targets.iter().all(|p| p.area.width == 2
+                    && p.area.height == 1
+                    && p.area.right() <= 180
+                    && p.area.bottom() <= 48));
+                assert!(
+                    text(&buffer).contains("SID: own-conversation-identity"),
+                    "{view:?}"
+                );
+                drop(targets);
+                ui.settings.harness_logos = "off".into();
+                render(&mut ui, 180, 48);
+                assert!(ui.harness_logo_targets.borrow().is_empty());
+            }
+        }
+        let mut ui = workspace(Theme::default(), View::Tiles);
+        for node in &mut ui.snapshot.tree {
+            if let Some(tile) = &mut node.tile {
+                tile.harness = "custom-shell".into();
+                tile.title = "codex is a word in my title".into();
+            }
+        }
+        render(&mut ui, 180, 48);
+        assert!(
+            ui.harness_logo_targets.borrow().is_empty(),
+            "titles must not imply a harness identity"
+        );
+    }
+    #[test]
+    fn compact_wall_roster_keeps_the_brand_with_its_own_terminal_row() {
+        for height in [5, 10] {
+            let mut ui = workspace(Theme::default(), View::Wall);
+            for (id, harness) in [("a", "codex"), ("b", "claude")] {
+                ui.snapshot
+                    .tree
+                    .iter_mut()
+                    .find(|node| node.id == id)
+                    .unwrap()
+                    .tile
+                    .as_mut()
+                    .unwrap()
+                    .harness = harness.into();
+            }
+            let rows = ui.tiles();
+            let mut terminal = Terminal::new(TestBackend::new(80, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    workspaces::wall_roster(frame, area, &mut ui, &rows);
+                })
+                .unwrap();
+            for (area, index) in &ui.tile_hits {
+                let Some(node) = rows[*index].source.and_then(|i| ui.snapshot.tree.get(i)) else {
+                    continue;
+                };
+                let Some(brand) = node_harness(node).and_then(crate::harness_icons::Brand::parse)
+                else {
+                    continue;
+                };
+                assert!(
+                    ui.harness_logo_targets
+                        .borrow()
+                        .iter()
+                        .any(|target| target.brand == brand
+                            && target.area.y == area.y
+                            && target.area.x >= area.x
+                            && target.area.right() <= area.right())
+                );
+            }
+        }
+    }
+    #[test]
+    fn zoomed_focus_logo_keeps_complete_uuid_and_terminal_input_origin() {
+        let mut ui = workspace(
+            Theme {
+                reduced_motion: true,
+                ..Theme::default()
+            },
+            View::Focus,
+        );
+        ui.zoomed = true;
+        let node = ui
+            .snapshot
+            .tree
+            .iter_mut()
+            .find(|node| node.id == "a")
+            .unwrap();
+        node.tile.as_mut().unwrap().harness = "codex".into();
+        let sid = "12345678-abcd-4000-8000-123456789abc";
+        node.fields = vec![Field::new("Agent session", sid, "id")];
+        let rendered = text(&render(&mut ui, 44, 24));
+        assert!(rendered.contains(&format!("SID: {sid}")), "{rendered}");
+        assert_eq!(
+            ui.harness_logo_targets.borrow().as_slice(),
+            [crate::harness_icons::Placement {
+                brand: crate::harness_icons::Brand::Codex,
+                area: Rect::new(0, 0, 2, 1)
+            }]
+        );
+        ui.dialog = Some(crate::model::Dialog::default());
+        render(&mut ui, 44, 24);
+        assert!(ui.harness_logo_targets.borrow().is_empty());
     }
     #[test]
     fn cube_workspace_badges_follow_identity_and_survive_terminal_reordering() {

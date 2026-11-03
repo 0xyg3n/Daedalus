@@ -981,6 +981,7 @@ fn codex_fork_license_picker_reaches_review_in_real_ui_without_launching() {
     ui.wait_text("License: Fixture account");
     ui.wait_text("Native profile:");
     ui.master.write_all(b"\x1b").unwrap();
+    ui.wait_text("Cancelled");
     assert_eq!(
         fs::read(directory.join("dashboard-checkpoints.json")).unwrap(),
         checkpoints
@@ -2738,7 +2739,91 @@ fn gateway_editor_prefills_validates_and_preserves_disabled_state_after_reopen()
 }
 
 #[test]
-fn screensaver_is_glitch_art_and_sends_no_pictures_without_the_splash() {
+fn workspace_native_logos_negotiate_without_splash_and_hide_behind_options() {
+    fn wait_raw(ui: &mut Ui, start: usize, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !String::from_utf8_lossy(&ui.raw[start..]).contains(needle) {
+            ui.wait_presence("impossible-logo-fixture-marker", false);
+            assert!(
+                Instant::now() < deadline,
+                "Missing graphics command {needle:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let mut ui = Ui::with_graphics(true, false, true);
+    wait_raw(&mut ui, 0, "\x1b_Gi=31");
+    ui.master
+        .write_all(b"\x1b_Gi=31;OK\x1b\\\x1b[6;16;8t\x1b[?62;22c")
+        .unwrap();
+    ui.wait_text("project-alpha");
+    wait_raw(&mut ui, 0, "a=p,i=72");
+    assert!(
+        !String::from_utf8_lossy(&ui.raw).contains("a=t,f=100,i=7183"),
+        "splash remains disabled"
+    );
+    let opening = ui.raw.len();
+    ui.master.write_all(b",").unwrap();
+    wait_raw(&mut ui, opening, "a=d,d=i,i=72");
+    let hidden = ui.raw.len();
+    ui.master.write_all(b"\x1b").unwrap();
+    wait_raw(&mut ui, hidden, "a=p,i=72");
+    assert!(
+        !String::from_utf8_lossy(&ui.raw[hidden..]).contains("a=t,f=100"),
+        "returning reuses cached pixels"
+    );
+    ui.quit();
+    assert_eq!(fs::read_dir(&ui.directory).unwrap().count(), 0);
+}
+
+#[test]
+fn harness_logo_mode_has_a_review_and_survives_restart() {
+    use daedalus_tui::app::{config::ControlConfig, interface_settings::SETTINGS};
+    let mut ui = Ui::configured(false, true);
+    ui.wait_text("LIVE TOPOLOGY");
+    let path = ui.directory.join(".config/daedalus/control.json");
+    let before = fs::read(&path).unwrap();
+    ui.master.write_all(b"\x10Interface settings").unwrap();
+    ui.wait_text("Interface settings_");
+    ui.wait_presence("UPDATING", false);
+    ui.master.write_all(b"\r\r").unwrap();
+    ui.wait_text("Saved in this configuration");
+    let index = SETTINGS
+        .iter()
+        .position(|setting| setting.key == "harness_logos")
+        .unwrap();
+    for _ in 0..index {
+        ui.master.write_all(b"\x1b[B").unwrap();
+    }
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Saved value: auto");
+    ui.master.write_all(b"\x1b[H\x1b[B\r").unwrap();
+    ui.wait_text("Save harness_logos:");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Configuration saved privately");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .harness_logos,
+        "glyphs"
+    );
+    ui.quit();
+    ui.restart();
+    ui.wait_text("LIVE TOPOLOGY");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .harness_logos,
+        "glyphs"
+    );
+    ui.quit();
+}
+
+#[test]
+fn screensaver_is_glitch_art_and_sends_no_images_when_terminal_does_not_reply() {
     let mut ui = Ui::with_graphics(true, false, true);
     // Only the screensaver's hint offers "any key".
     ui.wait_text("any key");
@@ -2753,8 +2838,8 @@ fn screensaver_is_glitch_art_and_sends_no_pictures_without_the_splash() {
     );
     let raw = String::from_utf8_lossy(&ui.raw);
     assert!(
-        !raw.contains("\x1b_G"),
-        "No graphics query, upload or placement without the splash"
+        !raw.contains("a=t,f=100") && !raw.contains("a=p,i="),
+        "Unsupported graphics must retain text without image uploads or placements"
     );
     ui.master.write_all(b"x").unwrap();
     ui.wait_text("project-alpha");
