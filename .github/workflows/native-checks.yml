@@ -67,7 +67,11 @@ jobs:
             choco install nsis --yes --no-progress
             if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
           }
-          & $nsis "/DPRODUCT_VERSION=$version" "/DBINARY=$pwd/dist/daedalus-$version-x86_64-windows.exe" "/DOUTPUT=$pwd/dist/Daedalus-$version-setup.exe" "/DICON=$pwd/assets/daedalus.ico" scripts/windows-installer.nsi
+          $binaryPath = (Resolve-Path -LiteralPath "dist/daedalus-$version-x86_64-windows.exe").ProviderPath
+          $iconPath = (Resolve-Path -LiteralPath assets/daedalus.ico).ProviderPath
+          $scriptPath = (Resolve-Path -LiteralPath scripts/windows-installer.nsi).ProviderPath
+          $outputPath = Join-Path (Resolve-Path -LiteralPath dist).ProviderPath "Daedalus-$version-setup.exe"
+          & $nsis "/DPRODUCT_VERSION=$version" "/DBINARY=$binaryPath" "/DOUTPUT=$outputPath" "/DICON=$iconPath" $scriptPath
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
           @(Get-ChildItem dist -File -Filter '*.exe') | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
