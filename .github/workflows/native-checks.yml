@@ -2,7 +2,7 @@ name: Native checks
 
 on:
   push:
-    branches: [main, 'fix/session-identities*']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -27,6 +27,17 @@ jobs:
       - name: Rust tools
         shell: bash
         run: rustup update stable --no-self-update && rustup component add clippy rustfmt
+      - name: Windows SDK resource compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = Get-Command rc.exe -ErrorAction SilentlyContinue
+          if (-not $compiler) {
+            $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+            $compiler = Get-ChildItem "$sdk/*/x64/rc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $compiler) { throw 'Install the Windows SDK resource compiler before building.' }
+            $compiler.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
       - name: Linux checks
         if: runner.os == 'Linux'
         shell: bash

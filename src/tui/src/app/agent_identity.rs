@@ -717,7 +717,7 @@ fn cli(args: &[String]) -> Result<Option<Cli>> {
         return Err("Invalid agent-identity command; see --help".into());
     }
     let mut options = BTreeMap::new();
-    for pair in args[1..].chunks_exact(2) {
+    for pair in args[1..].as_chunks::<2>().0 {
         if !matches!(
             pair[0].as_str(),
             "--config-dir"
