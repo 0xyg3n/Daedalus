@@ -1,0 +1,634 @@
+{
+  "provenance": [
+    "Pi1.1.0 native --help and bundled cli.md",
+    "Hermes0.20.0 native --help",
+    "Cursor2026.10.22-27dcf5f native --help"
+  ],
+  "options": [
+    {
+      "harness": "pi",
+      "flag": "--provider",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--model",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--api-key",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--system-prompt",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--append-system-prompt",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--mode",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--print",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-p",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--continue",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-c",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--resume",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-r",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--session",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--session-id",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--fork",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--session-dir",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-session",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--name",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "-n",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--models",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-tools",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-nt",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-builtin-tools",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-nbt",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--tools",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "-t",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--exclude-tools",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "-xt",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--thinking",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--extension",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "-e",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-extensions",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-ne",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-mcp",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--skill",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-skills",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-ns",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--prompt-template",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-prompt-templates",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-np",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--theme",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--use-theme",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-themes",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-context-files",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-nc",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--export",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--list-models",
+      "kind": "optional"
+    },
+    {
+      "harness": "pi",
+      "flag": "--verbose",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--tui-mode",
+      "kind": "value"
+    },
+    {
+      "harness": "pi",
+      "flag": "--approve",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-a",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--no-approve",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-na",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--offline",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--help",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-h",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "--version",
+      "kind": "flag"
+    },
+    {
+      "harness": "pi",
+      "flag": "-v",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-h",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--help",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--version",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-V",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-z",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--oneshot",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--usage-file",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-m",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--model",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--provider",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--reasoning",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-t",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--toolsets",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--resume",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-r",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--no-restore-cwd",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--in",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--continue",
+      "kind": "optional"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-c",
+      "kind": "optional"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--worktree",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-w",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--accept-hooks",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--skills",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "-s",
+      "kind": "value"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--yolo",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--pass-session-id",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--ignore-user-config",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--ignore-rules",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--safe-mode",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--tui",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--native",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--tui-native",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--cli",
+      "kind": "flag"
+    },
+    {
+      "harness": "hermes",
+      "flag": "--dev",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-v",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--version",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--api-key",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-H",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--header",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-e",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--endpoint",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-p",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--print",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--output-format",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--stream-partial-output",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--mode",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--plan",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--resume",
+      "kind": "optional"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--continue",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--model",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--list-models",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-f",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--force",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--yolo",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--auto-review",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--sandbox",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--approve-mcps",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--trust",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--workspace",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--add-dir",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--plugin-dir",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-w",
+      "kind": "optional"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--worktree",
+      "kind": "optional"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--worktree-base",
+      "kind": "value"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--skip-worktree-setup",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "-h",
+      "kind": "flag"
+    },
+    {
+      "harness": "cursor",
+      "flag": "--help",
+      "kind": "flag"
+    }
+  ]
+}

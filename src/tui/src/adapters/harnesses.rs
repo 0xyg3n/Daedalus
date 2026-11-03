@@ -80,9 +80,6 @@ pub(crate) fn conversation_argv<'a>(argv: &'a [String], harness: &str) -> Option
 
 pub(crate) fn launch_conversation(argv: &[String]) -> Option<(&'static str, String)> {
     tools().find_map(|tool| {
-        if !matches!(tool.id, "codex" | "claude" | "grok" | "opencode") {
-            return None;
-        }
         let args = conversation_argv(argv, tool.id)?;
         crate::core::checkpoints::resolve_sid(args, tool.id, "")
             .ok()
@@ -556,6 +553,30 @@ fn validate_path(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remaining_harnesses_discover_exact_launch_ids_on_linux_and_windows() {
+        for (harness, binary, selector, id) in [
+            ("pi", "pi", "--session-id", "Owned.Custom-ID"),
+            (
+                "cursor",
+                "cursor-agent",
+                "--resume",
+                "12345678-abcd-4000-8000-123456789abc",
+            ),
+            ("hermes", "hermes", "--resume", "20261104_010203_a1b2c3d4"),
+        ] {
+            for executable in [
+                format!("/fixture/{binary}"),
+                format!("C:\\Tools\\{binary}.EXE"),
+            ] {
+                let argv = vec![executable, selector.into(), id.into()];
+                assert_eq!(
+                    super::launch_conversation(&argv),
+                    Some((harness, id.into()))
+                );
+            }
+        }
+    }
     #[test]
     fn conversation_identity_matches_windows_and_linux_without_guessing_fork_children() {
         const SID: &str = "019a043e-1234-7000-8000-000000000001";

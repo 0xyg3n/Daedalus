@@ -31,6 +31,9 @@ impl Fixture {
         command
     }
     fn start(&mut self, args: &[&str]) -> SessionInfo {
+        self.start_harness("codex", args)
+    }
+    fn start_harness(&mut self, harness: &str, args: &[&str]) -> SessionInfo {
         let mut command = self.command();
         command
             .args([
@@ -42,10 +45,11 @@ impl Fixture {
                 "Private",
                 "--",
             ])
-            .arg(
-                self.root
-                    .join(if cfg!(windows) { "Codex.exe" } else { "codex" }),
-            )
+            .arg(self.root.join(if cfg!(windows) {
+                format!("{harness}.exe")
+            } else {
+                harness.into()
+            }))
             .args(args);
         let output = command.output().unwrap();
         assert!(
@@ -143,4 +147,35 @@ fn native_daemon_reports_only_explicit_conversation_identity_on_linux_and_window
     assert!(terminals::reported_session(&native::pane(&fork)).is_none());
     let fresh = fixture.start(&[]);
     assert!(fresh.launch_session.is_none());
+    for (harness, flag, id) in [
+        ("pi", "--session-id", "Owned.Custom-ID"),
+        ("cursor-agent", "--resume", SID),
+        ("hermes", "--resume", "20261104_010203_a1b2c3d4e5f6"),
+    ] {
+        let alias = fixture.root.join(if cfg!(windows) {
+            format!("{harness}.exe")
+        } else {
+            harness.into()
+        });
+        fs::copy(&provider, &alias).unwrap();
+        let session = fixture.start_harness(
+            harness,
+            &[flag, id, "--model", "private-argument-not-metadata"],
+        );
+        assert_eq!(
+            terminals::reported_session(&native::pane(&session)),
+            Some(id),
+            "{harness}"
+        );
+        let wire = serde_json::to_string(&session).unwrap();
+        assert!(!wire.contains("private-argument-not-metadata") && !wire.contains("argv"));
+        let named = fixture.start_harness(harness, &["--resume", "prompt-or-picker-name"]);
+        assert!(named.launch_session.is_none(), "{harness}");
+        let value = fixture.start_harness(harness, &["--model", "--resume", id]);
+        assert!(value.launch_session.is_none(), "{harness}");
+        if harness == "pi" {
+            let fork = fixture.start_harness(harness, &["--fork", SID]);
+            assert!(fork.launch_session.is_none());
+        }
+    }
 }

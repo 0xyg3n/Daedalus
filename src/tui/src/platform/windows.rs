@@ -648,11 +648,17 @@ pub fn terminal_processes(
 /// Display-only descendant evidence, never terminal ownership authorization.
 /// One snapshot is queried; only the bounded subtree has tokens/images opened.
 pub fn descendant_processes(root_pid: u32) -> io::Result<Vec<ProcessIdentity>> {
+    descendant_processes_with(root_pid, process_identity_with_parent)
+}
+fn descendant_processes_with(
+    root_pid: u32,
+    mut observe: impl FnMut(u32, Option<u32>) -> io::Result<ProcessIdentity>,
+) -> io::Result<Vec<ProcessIdentity>> {
     let parents = process_parents()?;
     let root_parent = *parents
         .get(&root_pid)
         .ok_or_else(|| io::Error::other("Root process unavailable"))?;
-    let root = process_identity_with_parent(root_pid, Some(root_parent))?;
+    let root = observe(root_pid, Some(root_parent))?;
     if root.owner != current_identity()? {
         return Err(denied("Foreign process tree"));
     }
@@ -670,7 +676,11 @@ pub fn descendant_processes(root_pid: u32) -> io::Result<Vec<ProcessIdentity>> {
             if seen.len() >= 128 || depth >= 32 || !seen.insert(pid) {
                 return Err(io::Error::other("Process subtree exceeds bound or cycles"));
             }
-            let child = process_identity_with_parent(pid, Some(parent.pid))?;
+            let child = match observe(pid, Some(parent.pid)) {
+                Ok(child) => child,
+                Err(error) if exited_during_scan(&error) => continue,
+                Err(error) => return Err(error),
+            };
             if child.owner != root.owner || child.creation_time < parent.creation_time {
                 return Err(denied("Process ancestry changed or has a foreign owner"));
             }
@@ -678,7 +688,7 @@ pub fn descendant_processes(root_pid: u32) -> io::Result<Vec<ProcessIdentity>> {
             result.push(child);
         }
     }
-    let current = process_identity_with_parent(root_pid, Some(root_parent))?;
+    let current = observe(root_pid, Some(root_parent))?;
     if current.creation_time != root.creation_time
         || current.owner != root.owner
         || current.executable != root.executable
@@ -1418,6 +1428,35 @@ mod tests {
                 .iter()
                 .any(|entry| entry.pid == pid)
         );
+    }
+    #[test]
+    fn descendant_scan_skips_exited_children_and_retains_live_metadata_failures() {
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let gone = descendant_processes_with(std::process::id(), |candidate, parent| {
+            if candidate == pid {
+                Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32))
+            } else {
+                process_identity_with_parent(candidate, parent)
+            }
+        });
+        let blocked = descendant_processes_with(std::process::id(), |candidate, parent| {
+            if candidate == pid {
+                Err(denied("Live metadata inaccessible"))
+            } else {
+                process_identity_with_parent(candidate, parent)
+            }
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!gone.unwrap().iter().any(|process| process.pid == pid));
+        assert_eq!(blocked.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
     #[test]
     fn exited_process_is_not_a_live_executable_mapping() {

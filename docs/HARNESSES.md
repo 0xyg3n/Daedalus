@@ -48,8 +48,29 @@ OpenCode1.19.5 help, plus their
 [Claude](https://code.claude.com/docs/en/cli-reference),
 [Grok](https://docs.x.ai/build/cli/reference) and
 [OpenCode](https://dev.opencode.ai/docs/cli/) references. This does not certify
-live-provider behavior or every CLI spelling. Other provider selector grammars
-remain under review.
+live-provider behavior or every CLI spelling.
+
+Pi1.1.0, Hermes0.20.0 and Cursor2026.10.22 selectors are also checked against
+installed help and their native references. Pi's `--resume`/`-r` opens a picker;
+`--session` selects a path/ID and `--session-id` is an exact creation ID.
+A Pi `--fork` parent is never reported as its child. A known distinct creation
+ID can identify the child. Checkpoint capture verifies an explicitly selected
+private fork file's first-line header and file identity before and after capture;
+it does not derive an ID from its filename. Paths must be symlink-free, without
+parent traversal. Partial IDs still require native evidence.
+Hermes resume names and Cursor's latest/picker selectors also need native IDs.
+Hermes timestamp IDs with six, eight or twelve hex characters and canonical UUID
+selectors can identify explicit launches. Known option values never become session
+flags, and helper subcommands do not acquire a live conversation ID. Native Pi,
+Hermes and Cursor UI selections can change without restarting the process; current
+native metadata takes precedence over nonforking launch arguments.
+See [Pi](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md),
+[Hermes](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) and
+[Cursor](https://cursor.com/docs/cli/reference/parameters).
+Native Pi fork/creation/new-session semantics are exercised offline through metadata
+RPC commands; this does not certify live model/provider compatibility. Unknown
+extension flags, additional legacy ID formats and other native changes still need
+explicit contracts.
 
 ## Readiness
 

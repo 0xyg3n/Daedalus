@@ -70,6 +70,60 @@ fn header(path: &Path) -> Result<(Vec<u8>, u64, u64)> {
     }
     Ok((line, device, inode))
 }
+/// Metadata proof for an explicitly selected Pi fork file. No directory search,
+/// filename ID inference or transcript parsing is involved.
+pub struct Parent {
+    pub id: String,
+    path: PathBuf,
+    bytes: Vec<u8>,
+    device: u64,
+    inode: u64,
+}
+impl Parent {
+    pub fn verify(&self) -> Result<()> {
+        let (bytes, device, inode) = header(&self.path)?;
+        if bytes != self.bytes || (device, inode) != (self.device, self.inode) {
+            return Err("Pi fork parent header changed; refresh".into());
+        }
+        Ok(())
+    }
+}
+pub fn fork_parent(argv: &[String], cwd: &Path) -> Result<Option<Parent>> {
+    let Some(selector) = crate::core::checkpoints::pi_fork_selector(argv)? else {
+        return Ok(None);
+    };
+    let path = Path::new(&selector);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    if !path.exists()
+        && !Path::new(&selector).is_absolute()
+        && Path::new(&selector).components().count() == 1
+    {
+        return Ok(None);
+    }
+    let (bytes, device, inode) = header(&path)?;
+    crate::core::json_preflight::check(&bytes, || Ok(()))?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Malformed Pi fork parent header")?;
+    if value["type"] != "session" || value["version"] != 3 {
+        return Err("Unsupported Pi fork parent header".into());
+    }
+    let id = value["id"].as_str().ok_or("Missing Pi fork parent ID")?;
+    let declared = ["pi".into(), "--session-id".into(), id.into()];
+    crate::core::checkpoints::resolve_sid(&declared, "pi", "")?
+        .ok_or("Invalid Pi fork parent ID")?;
+    Ok(Some(Parent {
+        id: id.into(),
+        path,
+        bytes,
+        device,
+        inode,
+    }))
+}
+
 struct Evidence {
     plan_path: PathBuf,
     plan_bytes: Vec<u8>,
@@ -403,5 +457,62 @@ mod tests {
         fs::remove_file(&f.file).unwrap();
         symlink(f.root.join("marker"), &f.file).unwrap();
         assert!(saved(&f.root, SID).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parent_metadata_tests {
+    use super::*;
+    #[test]
+    fn selected_parent_header_proves_child_identity_and_rechecks_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-pi-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = root.join("arbitrary-file-name.jsonl");
+        let id = "12345678-abcd-4000-8000-123456789abc";
+        let raw = format!(
+            "{}\n{{\"body\":\"NOT_METADATA\"}}\n",
+            serde_json::json!({"type":"session","version":3,"id":id,"cwd":root})
+        );
+        layouts::write_private(&file, raw.as_bytes()).unwrap();
+        let argv = [
+            "pi".into(),
+            "--fork".into(),
+            "arbitrary-file-name.jsonl".into(),
+        ];
+        let parent = fork_parent(&argv, &root).unwrap().unwrap();
+        assert_eq!(parent.id, id);
+        assert!(!String::from_utf8_lossy(&parent.bytes).contains("NOT_METADATA"));
+        parent.verify().unwrap();
+        assert_eq!(
+            crate::core::checkpoints::resolve_sid_with_pi_parent(&argv, "pi", id, Some(&parent.id))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            crate::core::checkpoints::resolve_sid_with_pi_parent(
+                &argv,
+                "pi",
+                "actual-child",
+                Some(&parent.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("actual-child")
+        );
+        layouts::write_private(&file, raw.as_bytes()).unwrap();
+        assert!(parent.verify().is_err());
+        layouts::write_private(
+            &file,
+            b"{\"type\":\"session\",\"version\":3,\"id\":\"one\",\"id\":\"two\"}\n",
+        )
+        .unwrap();
+        assert!(fork_parent(&argv, &root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

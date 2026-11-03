@@ -346,8 +346,37 @@ fn codex_launch(argv: &[String]) -> Option<CodexLaunch<'_>> {
     })
 }
 
+fn hermes_native_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    matches!(bytes.len(), 22 | 24 | 28)
+        && bytes.get(8) == Some(&b'_')
+        && bytes.get(15) == Some(&b'_')
+        && bytes[..8]
+            .iter()
+            .chain(bytes[9..15].iter())
+            .all(u8::is_ascii_digit)
+        && bytes[16..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// A path selector is returned only after the complete known Pi grammar parses.
+pub fn pi_fork_selector(argv: &[String]) -> Result<Option<String>> {
+    Ok(super::session_args::parse(argv, "pi")?
+        .filter(|launch| launch.forking)
+        .and_then(|launch| launch.resume)
+        .map(str::to_owned))
+}
 /// A fork parent's launch ID is never reported as the new child's ID.
 pub fn resolve_sid(argv: &[String], harness: &str, reported: &str) -> Result<Option<String>> {
+    resolve_sid_with_pi_parent(argv, harness, reported, None)
+}
+/// The Pi adapter can supply an exact parent ID from the selected private file's
+/// verified header. The core never derives a file's ID from its filename.
+pub fn resolve_sid_with_pi_parent(
+    argv: &[String],
+    harness: &str,
+    reported: &str,
+    pi_parent: Option<&str>,
+) -> Result<Option<String>> {
     if harness == "codex" {
         if !reported.is_empty() && !valid_sid(reported) {
             return Err("Invalid reported session ID".into());
@@ -437,38 +466,65 @@ pub fn resolve_sid(argv: &[String], harness: &str, reported: &str) -> Result<Opt
             }
         }));
     }
-    let end = argv
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(argv.len());
-    let argv = &argv[..end];
-    let forking = argv.iter().any(|a| a == "--fork-session");
-    let mut ids = Vec::new();
-    for pair in argv.windows(2) {
-        if matches!(pair[0].as_str(), "--resume" | "-r" | "--session-id") {
-            ids.push(pair[1].as_str());
-        }
-    }
-    if forking {
-        if reported.is_empty() || ids.contains(&reported) {
-            return Ok(None);
-        }
-        if !valid_sid(reported) {
+    if matches!(harness, "pi" | "hermes" | "cursor") {
+        if !reported.is_empty() && !valid_sid(reported) {
             return Err("Invalid reported session ID".into());
         }
-        return Ok(Some(reported.into()));
+        let Some(launch) = super::session_args::parse(argv, harness)? else {
+            return Ok(None);
+        };
+        let selected = (harness == "pi" && launch.forking)
+            .then_some(pi_parent)
+            .flatten()
+            .or_else(|| {
+                launch.resume.filter(|value| {
+                    canonical_uuid(value) || (harness == "hermes" && hermes_native_id(value))
+                })
+            });
+        let created = launch
+            .created
+            .map(|value| {
+                if valid_sid(value)
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                    && value
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                {
+                    Ok(value)
+                } else {
+                    Err("Invalid Pi launch session ID".to_string())
+                }
+            })
+            .transpose()?;
+        if launch.forking {
+            let Some(parent) = selected else {
+                return Ok(None);
+            };
+            if created.is_some_and(|child| child.eq_ignore_ascii_case(parent)) {
+                return Err("Fork child ID must differ from its parent".into());
+            }
+            return Ok(if !reported.is_empty() {
+                (!parent.eq_ignore_ascii_case(reported)).then(|| reported.to_owned())
+            } else {
+                created.map(str::to_owned)
+            });
+        }
+        // Native UIs can change conversation without replacing the process.
+        // A fresh reported selection supersedes the original launch selector.
+        if !reported.is_empty() {
+            return Ok(Some(reported.into()));
+        }
+        return Ok(created.or(selected).map(str::to_owned));
     }
-    if !reported.is_empty() {
-        ids.push(reported);
+    // No grammar exists for custom tools. Metadata can still identify a
+    // conversation, but provider-looking arguments are never interpreted.
+    if !reported.is_empty() && !valid_sid(reported) {
+        return Err("Invalid reported session ID".into());
     }
-    ids.retain(|id| valid_sid(id));
-    ids.sort_unstable();
-    ids.dedup();
-    match ids.len() {
-        0 => Ok(None),
-        1 => Ok(Some(ids[0].into())),
-        _ => Err("Native metadata and launch arguments disagree on the session ID".into()),
-    }
+    Ok((!reported.is_empty()).then(|| reported.to_owned()))
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -1191,6 +1247,182 @@ mod tests {
                 .collect();
             assert_eq!(resolve_sid(&args, "codex", current).unwrap(), None);
         }
+    }
+    #[test]
+    fn pi_picker_does_not_turn_prompt_text_into_a_session_id_or_report_a_fork_parent() {
+        let parent = "12345678-abcd-4000-8000-123456789abc";
+        for args in [
+            vec!["pi", "--resume", "prompt-text"],
+            vec!["pi", "-r", "prompt-text"],
+            vec!["pi", "--model", "--session-id", parent],
+            vec!["pi", "--", "--session-id", parent],
+        ] {
+            let argv = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(resolve_sid(&argv, "pi", "").unwrap(), None, "{argv:?}");
+        }
+        let fork = ["pi", "--fork", parent].map(String::from);
+        assert_eq!(resolve_sid(&fork, "pi", parent).unwrap(), None);
+        assert_eq!(
+            resolve_sid(&fork, "pi", "distinct-child")
+                .unwrap()
+                .as_deref(),
+            Some("distinct-child")
+        );
+    }
+    #[test]
+    fn hermes_and_cursor_names_are_selectors_and_current_native_selection_can_change() {
+        let parent = "12345678-abcd-4000-8000-123456789abc";
+        for harness in ["hermes", "cursor"] {
+            let named = [harness, "--resume", "work"].map(String::from);
+            assert_eq!(resolve_sid(&named, harness, "").unwrap(), None, "{harness}");
+            let resumed = [harness, "--resume", parent].map(String::from);
+            assert_eq!(
+                resolve_sid(&resumed, harness, "current-conversation")
+                    .unwrap()
+                    .as_deref(),
+                Some("current-conversation")
+            );
+            let inline = [harness, &format!("--resume={parent}")].map(String::from);
+            assert_eq!(
+                resolve_sid(&inline, harness, "").unwrap().as_deref(),
+                Some(parent)
+            );
+        }
+    }
+    #[test]
+    fn remaining_native_help_values_cannot_smuggle_a_selector_and_flags_keep_identity() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/remaining-provider-help.json"
+        ))
+        .unwrap();
+        let sid = "12345678-abcd-4000-8000-123456789abc";
+        for row in fixture["options"].as_array().unwrap() {
+            let harness = row["harness"].as_str().unwrap();
+            let flag = row["flag"].as_str().unwrap();
+            if row["kind"] == "value" {
+                let argv = [harness, flag, "--resume", sid].map(String::from);
+                assert!(
+                    !matches!(resolve_sid(&argv, harness, ""), Ok(Some(_))),
+                    "{argv:?}"
+                );
+            } else if row["kind"] == "flag"
+                && !matches!(
+                    flag,
+                    "--help"
+                        | "-h"
+                        | "--version"
+                        | "-v"
+                        | "-V"
+                        | "--list-models"
+                        | "--resume"
+                        | "-r"
+                        | "--continue"
+                        | "-c"
+                        | "--no-session"
+                )
+            {
+                let selector = if harness == "pi" {
+                    "--session"
+                } else {
+                    "--resume"
+                };
+                let argv = [harness, flag, selector, sid].map(String::from);
+                assert_eq!(
+                    resolve_sid(&argv, harness, "").unwrap().as_deref(),
+                    Some(sid),
+                    "{argv:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn pi_exact_creation_constraints_and_unknown_parent_or_options_stay_explicit() {
+        let parent = "12345678-abcd-4000-8000-123456789abc";
+        for tail in [
+            vec!["--session-id", "Owned.Custom-ID"],
+            vec!["--session-id=Owned.Custom-ID"],
+            vec!["--fork", parent, "--session-id", "Owned.Custom-ID"],
+        ] {
+            let argv = std::iter::once("pi")
+                .chain(tail)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                resolve_sid(&argv, "pi", "").unwrap().as_deref(),
+                Some("Owned.Custom-ID")
+            );
+        }
+        for tail in [
+            vec!["--session-id", "invalid:id"],
+            vec!["--session-id", "ends-"],
+            vec!["--fork", parent, "--session", parent],
+            vec!["--fork", parent, "--continue"],
+            vec!["--fork", parent, "--no-session"],
+            vec!["--session-id", parent, "--resume"],
+            vec!["--session-id", parent, "--fork", parent],
+        ] {
+            let argv = std::iter::once("pi")
+                .chain(tail)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            assert!(resolve_sid(&argv, "pi", "").is_err(), "{argv:?}");
+        }
+        for tail in [
+            vec!["--fork", "partial"],
+            vec!["--fork", "/owned/session.jsonl"],
+            vec!["--unknown", "--session-id", parent],
+            vec!["--help", "--session-id", parent],
+            vec!["install", "--session-id", parent],
+        ] {
+            let argv = std::iter::once("pi")
+                .chain(tail)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            assert_eq!(resolve_sid(&argv, "pi", "").unwrap(), None, "{argv:?}");
+        }
+    }
+    #[test]
+    fn hermes_profile_continue_names_and_cursor_commands_preserve_native_selection_only() {
+        for argv in [
+            vec!["hermes", "--profile", "--resume", "prompt"],
+            vec!["hermes", "-c", "work"],
+            vec!["cursor-agent", "--resume=-1"],
+            vec![
+                "cursor-agent",
+                "create-chat",
+                "--resume",
+                "12345678-abcd-4000-8000-123456789abc",
+            ],
+        ] {
+            let harness = if argv[0] == "hermes" {
+                "hermes"
+            } else {
+                "cursor"
+            };
+            assert_eq!(
+                resolve_sid(
+                    &argv.into_iter().map(String::from).collect::<Vec<_>>(),
+                    harness,
+                    ""
+                )
+                .unwrap(),
+                None
+            );
+        }
+        for sid in ["20261104_010203_a1b2c3", "20261104_010203_a1b2c3d4"] {
+            let argv = ["hermes", "-pwork", "chat", "--resume", sid].map(String::from);
+            assert_eq!(
+                resolve_sid(&argv, "hermes", "").unwrap().as_deref(),
+                Some(sid)
+            );
+        }
+        let argv = [
+            "cursor-agent",
+            "-HKey:Value",
+            "--resume=12345678-abcd-4000-8000-123456789abc",
+        ]
+        .map(String::from);
+        assert!(resolve_sid(&argv, "cursor", "").unwrap().is_some());
     }
     #[test]
     fn native_fork_requires_capability_and_same_harness() {

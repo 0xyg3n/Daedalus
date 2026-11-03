@@ -959,10 +959,14 @@ impl SessionStore {
         } else {
             None
         };
-        let reported = discovered_pi
-            .as_ref()
-            .map(|s| s.id.clone())
-            .unwrap_or(reported);
+        let reported = if reported.is_empty() {
+            discovered_pi
+                .as_ref()
+                .map(|session| session.id.clone())
+                .unwrap_or_default()
+        } else {
+            reported
+        };
         #[cfg(windows)]
         let discovered_hermes = if harness == "hermes" && reported.is_empty() {
             let process = windows_native_process(adapter, &actual, &harness)?;
@@ -977,11 +981,21 @@ impl SessionStore {
             .as_ref()
             .map(|session| session.0.clone())
             .unwrap_or(reported);
+        let pi_parent = if harness == "pi" {
+            evidence
+                .as_ref()
+                .map(|process| pi_sessions::fork_parent(&process.argv, Path::new(&process.cwd)))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let reported = if let Some(process) = &evidence {
-            checkpoints::resolve_sid(
+            checkpoints::resolve_sid_with_pi_parent(
                 harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
                 &harness,
                 &reported,
+                pi_parent.as_ref().map(|parent| parent.id.as_str()),
             )?
             .unwrap_or_default()
         } else {
@@ -990,10 +1004,11 @@ impl SessionStore {
         let supplied_sid = supplied_sid.trim();
         if !supplied_sid.is_empty()
             && let Some(process) = &evidence
-            && checkpoints::resolve_sid(
+            && checkpoints::resolve_sid_with_pi_parent(
                 harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
                 &harness,
                 supplied_sid,
+                pi_parent.as_ref().map(|parent| parent.id.as_str()),
             )?
             .is_none()
         {
@@ -1056,6 +1071,9 @@ impl SessionStore {
             return Err("Native harness metadata changed; refresh".into());
         }
         check_process(adapter, &evidence, &harness)?;
+        if let Some(parent) = &pi_parent {
+            parent.verify()?;
+        }
         if let Some(session) = &discovered_pi {
             session.verify()?;
         }
@@ -1269,11 +1287,21 @@ impl SessionStore {
         let reported = terminals::reported_session(&before)
             .unwrap_or_default()
             .to_owned();
+        let pi_parent = if harness == "pi" {
+            process
+                .as_ref()
+                .map(|evidence| pi_sessions::fork_parent(&evidence.argv, Path::new(&evidence.cwd)))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         let current_sid = if let Some(process) = &process {
-            checkpoints::resolve_sid(
+            checkpoints::resolve_sid_with_pi_parent(
                 harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
                 &harness,
                 &reported,
+                pi_parent.as_ref().map(|parent| parent.id.as_str()),
             )?
             .unwrap_or_default()
         } else {
@@ -1291,6 +1319,9 @@ impl SessionStore {
         let content = adapter.capture(pane, 120)?;
         let after = self.verify_pane(adapter, pane)?;
         check_process(adapter, &process, &harness)?;
+        if let Some(parent) = &pi_parent {
+            parent.verify()?;
+        }
         if fingerprint != capture_fingerprint(adapter, &after, &harness, &process)? {
             return Err("Handoff foreground process changed during context capture".into());
         }
@@ -2686,6 +2717,101 @@ mod tests {
         assert!(matches!(result, Err(error) if error.contains("Watch in another Daedalus window")));
     }
     #[test]
+    fn pi_current_native_metadata_supersedes_the_registered_launch_header() {
+        use crate::app::{
+            hook_launch::Plan,
+            hook_runtime::{Options, ProcessIdentity, Registration},
+            hooks::{EventKind, Harness},
+        };
+        use crate::core::{goal_store::Scope, identity::Backend};
+        let mut f = fixture();
+        let original = "12345678-abcd-4000-8000-123456789abc";
+        let current = "22345678-abcd-4000-8000-123456789abc";
+        f.pane["agent"] = json!("pi");
+        f.pane["agent_session"] = json!({"kind":"id","agent":"pi","value":current});
+        fs::write(f.dir.join("pane.json"), json!({"pane":f.pane}).to_string()).unwrap();
+        publish_script(
+            &f.adapter.herdr,
+            format!(
+                "#!/bin/sh\ncase \"$4\" in\nget) /bin/cat '{}' ;;\nprocess-info) printf '%s\\n' '{{\"process_info\":{{\"pane_id\":\"pane\",\"foreground_processes\":[{{\"pid\":90}}]}}}}' ;;\n*) exit 79 ;;\nesac\n",
+                f.dir.join("pane.json").display()
+            ),
+        );
+        let registration = Registration {
+            version: 1,
+            id: "fixture".into(),
+            directory: f.store.directory.clone(),
+            scope: Scope {
+                instance: "example".into(),
+                terminal: TerminalId {
+                    backend: Backend::Herdr,
+                    endpoint: "work".into(),
+                    pane: "pane".into(),
+                    generation: "uuid".into(),
+                },
+                conversation: original.into(),
+                harness: Harness::Pi,
+            },
+            goal_id: None,
+            harness_process: Some(ProcessIdentity {
+                pid: 90,
+                start_ticks: 500,
+            }),
+            server_emitter: None,
+            transcript: None,
+            events: vec![EventKind::Stop],
+            options: Options::default(),
+            activity_lease_ms: 30000,
+            pending_timeout_ms: 30000,
+            hook_timeout_ms: 12000,
+        };
+        let mut template = registration.clone();
+        template.harness_process = None;
+        let executable = json!({"device":0,"inode":0,"size":0,"modified":0,"modified_ns":0,"changed":0,"changed_ns":0});
+        let plan:Plan=serde_json::from_value(json!({"spec":{"registration":template,"native_binary":"/fixture/node","entrypoint":"/fixture/cli.js","daedalus_binary":"/fixture/daedalus","working_directory":f.dir,"observed_version":"1.1.0","expires_ms":1,"model":null},"native":executable,"daemon":executable,"entrypoint":executable,"hooks":[]})).unwrap();
+        layouts::write_private(&plan.path(), &serde_json::to_vec(&plan).unwrap()).unwrap();
+        layouts::write_private(&plan.path().with_extension("claimed"), b"claimed\n").unwrap();
+        let registration_bytes = serde_json::to_vec(&registration).unwrap();
+        layouts::write_private(&registration.path(), &registration_bytes).unwrap();
+        layouts::write_private(
+            &plan.plugin().join("sessions/owned.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"session","version":3,"id":original,"cwd":f.dir})
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let pid = f.adapter.proc_root.join("90");
+        fs::create_dir(&pid).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[2] = "90";
+        fields[4] = "99";
+        fields[5] = "90";
+        fields[19] = "500";
+        fs::write(
+            pid.join("stat"),
+            format!("90 (fixture) {}", fields.join(" ")),
+        )
+        .unwrap();
+        let mut argv = vec!["/fixture/node".into()];
+        argv.extend(plan.command());
+        fs::write(pid.join("cmdline"), format!("{}\0", argv.join("\0"))).unwrap();
+        fs::write(pid.join("environ"), format!("HOME={}\0", f.dir.display())).unwrap();
+        std::os::unix::fs::symlink(&f.dir, pid.join("cwd")).unwrap();
+        let row = f
+            .store
+            .live_source(&f.adapter, &f.config, &f.environment, &f.pane, "")
+            .unwrap();
+        assert_eq!(row.sid, current);
+        assert_eq!(
+            fs::read(registration.path()).unwrap(),
+            registration_bytes,
+            "observation must not retarget hook authorization"
+        );
+    }
+    #[test]
     fn inventory_recovers_explicit_foreground_ids_and_drops_expired_evidence() {
         use std::os::unix::fs::symlink;
         const SID: &str = "019a043e-1234-7000-8000-000000000001";
@@ -2695,6 +2821,9 @@ mod tests {
                 "codex",
                 vec!["/usr/bin/node", "/tools/codex.js", "resume", SID],
             ),
+            ("pi", vec!["/usr/bin/pi", "--session-id", SID]),
+            ("cursor", vec!["/usr/bin/cursor-agent", "--resume", SID]),
+            ("hermes", vec!["/usr/bin/hermes", "--resume", SID]),
             ("claude", vec!["/usr/bin/claude", "--resume", SID]),
             ("grok", vec!["/usr/bin/grok", "--session-id", SID]),
             (
