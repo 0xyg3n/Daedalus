@@ -25,6 +25,7 @@ type Result<T> = std::result::Result<T, String>;
 const PREVIEW_LIMIT: usize = 48;
 const PREVIEW_ROWS: usize = 200;
 const PREVIEW_TEXT_BUDGET: usize = 1024 * 1024;
+const DISPLAY_LIMIT_MESSAGE: &str = "Terminal display is incomplete; increase Terminal display size limit in settings or narrow discovery scope.";
 
 #[derive(Clone, Debug)]
 pub struct Observations {
@@ -87,6 +88,65 @@ pub trait Source {
         _request: super::telegram_admin::Request,
     ) -> Result<super::telegram_admin::Reply> {
         Err("Telegram administration is unavailable for this source".into())
+    }
+    fn memory_configuration(&mut self) -> Result<Option<super::memory::Config>> {
+        Err("Memory configuration is unavailable".into())
+    }
+    fn history_access(&mut self, _global: bool) -> Result<super::history::State> {
+        Err("Control history inspection is unavailable".into())
+    }
+    fn history_archives(&mut self, _global: bool, _offset: usize) -> Result<Value> {
+        Err("History archives unavailable".into())
+    }
+    fn history_archive_page(
+        &mut self,
+        _global: bool,
+        _name: &str,
+        _offset: usize,
+        _unresolved: bool,
+    ) -> Result<Value> {
+        Err("History archive review unavailable".into())
+    }
+    fn history_page(&mut self, _global: bool, _offset: usize, _unresolved: bool) -> Result<Value> {
+        Err("Control history is unavailable".into())
+    }
+    fn apply_history(&mut self, _plan: super::history::Plan) -> Result<()> {
+        Err("Control history editing is unavailable".into())
+    }
+    fn dashboard_state(&mut self) -> Result<super::dashboard::State> {
+        Err("Dashboard settings are unavailable for this source".into())
+    }
+    fn prepare_dashboard_recovery(&mut self) -> Result<super::dashboard::Plan> {
+        Err("Dashboard recovery is unavailable for this source".into())
+    }
+    fn configuration_file(&mut self, _expected: &ControlConfig) -> Result<PathBuf> {
+        Err("Configuration editing is unavailable for this source".into())
+    }
+    fn prepare_configuration(
+        &mut self,
+        _expected: &ControlConfig,
+        _updated: ControlConfig,
+    ) -> Result<super::setup::SetupPlan> {
+        Err("Configuration editing is unavailable for this source".into())
+    }
+    fn apply_configuration(&mut self, _plan: super::setup::SetupPlan) -> Result<ControlConfig> {
+        Err("Configuration editing is unavailable for this source".into())
+    }
+    fn apply_dashboard(&mut self, _plan: super::dashboard::Plan) -> Result<()> {
+        Err("Dashboard settings are unavailable for this source".into())
+    }
+    fn prepare_gateway(
+        &mut self,
+        _expected: Option<super::gateway::Config>,
+        _updated: super::gateway::Config,
+    ) -> Result<super::gateway::Plan> {
+        Err("Gateway configuration is unavailable".into())
+    }
+    fn apply_gateway(&mut self, _plan: super::gateway::Plan) -> Result<String> {
+        Err("Gateway configuration is unavailable".into())
+    }
+    fn memory_registrations(&mut self) -> Result<Vec<super::hook_runtime::Registration>> {
+        Err("Memory registrations are unavailable".into())
     }
     fn memory_settings(
         &mut self,
@@ -249,8 +309,15 @@ pub fn assemble(
         action.badges.push(unavailable.clone());
         action.note = format!("{} · Not available for this operation", action.note);
     }
-    let topology = Tree::build(context.snapshot, context.health, tree_context);
-    let tree = topology.rows(tree_context);
+    let topology = Tree::build(
+        context.snapshot,
+        context.health,
+        &ProjectionContext {
+            runtime: context.config.runtime.clone(),
+            checkpoint_matches: context.config.ui.checkpoint_matches,
+            ..tree_context.clone()
+        },
+    );
     let mut identities = BTreeSet::new();
     let mut views = 0;
     for node in &topology.nodes {
@@ -273,8 +340,86 @@ pub fn assemble(
         .and_then(Value::as_object)
         .map_or(0, |routes| routes.len());
     let checkpoints = array(context.health, "checkpoints").len();
-    let warnings = array(context.snapshot, "errors").len() + array(context.health, "errors").len();
-    let mut frame = json!({"version":protocol::VERSION,"kind":"state","tree":tree,"sections":projected.sections,"overview":projected.overview,"instance":context.config_dir.file_name().and_then(|s|s.to_str()).unwrap_or("instance"),"release":env!("CARGO_PKG_VERSION"),"demo":context.demo,"freshness":projected.freshness,"observed_at":context.last_success.unwrap_or(0.0),"terminals":identities.len(),"views":views,"routes":routes,"checkpoints":checkpoints,"warnings":warnings,"message":message,"page":page,"focus":"","terminal_actions":terminal_actions,"workspace":workspace_state(&topology,context.layouts,restore_view,context.refresh_error)});
+    let warnings = array(context.snapshot, "errors").len()
+        + array(context.health, "errors").len()
+        + usize::from(topology.relationships_limited)
+        + topology.layout_warnings.len()
+        + topology
+            .observation_warnings
+            .iter()
+            .filter(|warning| {
+                !array(context.snapshot, "errors")
+                    .iter()
+                    .any(|entry| entry["error"].as_str() == Some(**warning))
+            })
+            .count();
+    let message = if message.is_empty() && context.local["dashboard_preferences_available"] == false
+    {
+        "Dashboard preferences unavailable; open Settings > Dashboard and instance discovery to recover"
+    } else {
+        message
+    };
+    let mut frame = json!({"version":protocol::VERSION,"kind":"state","tree":[],"sections":projected.sections,"overview":projected.overview,"instance":context.config_dir.file_name().and_then(|s|s.to_str()).unwrap_or("instance"),"release":env!("CARGO_PKG_VERSION"),"demo":context.demo,"freshness":projected.freshness,"observed_at":context.last_success.unwrap_or(0.0),"terminals":identities.len(),"views":views,"routes":routes,"checkpoints":checkpoints,"warnings":warnings,"message":message,"page":page,"focus":"","terminal_actions":terminal_actions,"workspace":workspace_state(&topology,context.layouts,restore_view,context.refresh_error)});
+    if !topology.observation_warnings.is_empty() {
+        frame["observation_warnings"] = json!(topology.observation_warnings);
+        let original = frame["message"].as_str().unwrap_or("");
+        let warning = topology.observation_warnings.join("\n");
+        frame["message"] = json!(if original.is_empty() {
+            warning
+        } else {
+            format!("{original}\n{warning}")
+        });
+        if !context.demo && !context.refresh_error {
+            let freshness = frame["freshness"].as_str().unwrap_or("");
+            frame["freshness"] = json!(format!(
+                "PARTIAL · {}",
+                freshness
+                    .split_once(" · ")
+                    .map_or("observations conflict", |(_, age)| age)
+            ));
+        }
+    }
+    if !topology.layout_warnings.is_empty() {
+        frame["layout_warnings"] = json!(topology.layout_warnings);
+        let original = frame["message"].as_str().unwrap_or("");
+        let reasons = topology.layout_warnings.join("\n");
+        frame["message"] = json!(if original.is_empty() {
+            reasons
+        } else {
+            format!("{original}\n{reasons}")
+        });
+        if !context.demo && !context.refresh_error {
+            let freshness = frame["freshness"].as_str().unwrap_or("");
+            frame["freshness"] = json!(format!(
+                "PARTIAL · {}",
+                freshness
+                    .split_once(" · ")
+                    .map_or("layout unavailable", |(_, age)| age)
+            ));
+        }
+    }
+    if topology.relationships_limited {
+        frame["relationship_limited"] = json!(true);
+        let original = frame["message"].as_str().unwrap_or("");
+        frame["message"] = json!(if original.is_empty() {
+            super::tree_relations::WARNING.into()
+        } else {
+            format!("{original}\n{}", super::tree_relations::WARNING)
+        });
+        if !context.demo && !context.refresh_error {
+            let freshness = frame["freshness"].as_str().unwrap_or("");
+            frame["freshness"] = json!(format!(
+                "PARTIAL · {}",
+                freshness
+                    .split_once(" · ")
+                    .map_or("relationship details incomplete", |(_, age)| age)
+            ));
+        }
+    }
+    frame["ui_settings"] =
+        serde_json::to_value(&context.config.ui).map_err(|_| "Cannot encode interface settings")?;
+    frame["resize_settings"] = serde_json::to_value(context.config.runtime.resize_policy())
+        .map_err(|_| "Cannot encode resize settings")?;
     if include_catalog {
         let mut catalog = registry::builtin().catalog();
         for entry in &mut catalog {
@@ -291,7 +436,104 @@ pub fn assemble(
         frame["catalog"] =
             serde_json::to_value(catalog).map_err(|_| "Cannot encode command catalog")?;
     }
+    let limit = (context.config.runtime.discovery_frame_limit_bytes as usize)
+        .min(protocol::MAX_FRAME_BYTES);
+    let (remaining, metadata_limited) = fit_state_metadata(&mut frame, limit.saturating_sub(512))?;
+    let (rows, tree_limited) = topology.rows_bounded(tree_context, remaining);
+    frame["tree"] = rows.into();
+    if metadata_limited || tree_limited {
+        frame["display_limited"] = json!(true);
+        frame["warnings"] = json!(warnings.saturating_add(1));
+        if !context.demo && !context.refresh_error {
+            let freshness = frame["freshness"].as_str().unwrap_or("");
+            frame["freshness"] = json!(format!(
+                "PARTIAL · {}",
+                freshness
+                    .split_once(" · ")
+                    .map_or("display limited", |(_, age)| age)
+            ));
+        }
+        let message = frame["message"].as_str().unwrap_or("");
+        frame["message"] = json!(if message.is_empty() {
+            DISPLAY_LIMIT_MESSAGE.into()
+        } else {
+            format!("{message}\n{DISPLAY_LIMIT_MESSAGE}")
+        });
+    }
+    super::discovery_budget::json_size(&frame, limit)?;
     Ok(frame)
+}
+/// Keep compiled controls available even when saved presentation metadata is large.
+fn fit_state_metadata(frame: &mut Value, limit: usize) -> Result<(usize, bool)> {
+    use super::discovery_budget::json_size;
+    if let Ok(bytes) = json_size(frame, limit) {
+        return Ok((limit - bytes, false));
+    }
+    let mut records = Vec::new();
+    for (index, section) in frame["sections"]
+        .as_array_mut()
+        .ok_or("Invalid section metadata")?
+        .iter_mut()
+        .enumerate()
+    {
+        let items = std::mem::take(
+            section["items"]
+                .as_array_mut()
+                .ok_or("Invalid item metadata")?,
+        );
+        for item in items {
+            if item["id"]
+                .as_str()
+                .is_some_and(|id| registry::builtin().action(id).is_some())
+            {
+                section["items"].as_array_mut().unwrap().push(item);
+            } else {
+                records.push((index, item));
+            }
+        }
+    }
+    let pins = frame["workspace"]["pins"].take();
+    frame["workspace"]["pins"] = json!([]);
+    let apply = frame["workspace"]["apply"].take();
+    frame["workspace"]["apply"] = json!({});
+    if json_size(frame, limit).is_err() {
+        let message = frame["message"].as_str().unwrap_or("");
+        let mut end = message.len().min(8192);
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        frame["message"] = json!(&message[..end]);
+        frame["overview"] = json!({"connections":[],"setup":[]});
+    }
+    let base = json_size(frame, limit)
+        .map_err(|_| "Compiled control metadata exceeds supported display size")?;
+    let mut remaining = limit - base;
+    if let Ok(bytes) = json_size(&apply, remaining.saturating_add(2)) {
+        let added = bytes.saturating_sub(2);
+        if added <= remaining {
+            frame["workspace"]["apply"] = apply;
+            remaining -= added;
+        }
+    }
+    for pin in pins.as_array().into_iter().flatten() {
+        let separator = usize::from(!frame["workspace"]["pins"].as_array().unwrap().is_empty());
+        if let Ok(bytes) = json_size(pin, remaining.saturating_sub(separator)) {
+            remaining -= bytes + separator;
+            frame["workspace"]["pins"]
+                .as_array_mut()
+                .unwrap()
+                .push(pin.clone());
+        }
+    }
+    for (index, item) in records {
+        let items = frame["sections"][index]["items"].as_array_mut().unwrap();
+        let separator = usize::from(!items.is_empty());
+        if let Ok(bytes) = json_size(&item, remaining.saturating_sub(separator)) {
+            remaining -= bytes + separator;
+            items.push(item);
+        }
+    }
+    Ok((remaining, true))
 }
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
@@ -301,27 +543,14 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .unwrap_or(&[])
 }
 fn reference(pane: &Value) -> Result<TerminalRef> {
-    let id = terminals::identity(pane)?;
     Ok(TerminalRef {
-        backend: id.backend,
-        server: pane
-            .get("server")
-            .and_then(Value::as_str)
-            .unwrap_or(&id.endpoint)
-            .into(),
-        pane_id: id.pane,
-        terminal_id: id.generation,
-        generation: pane
-            .get("generation")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .into(),
         label: super::tree::title(pane, ""),
         place: pane
             .get("session")
             .and_then(Value::as_str)
             .unwrap_or("")
             .into(),
+        ..terminals::reference(pane)?
     })
 }
 fn workspace_state(tree: &Tree, layouts: Option<&Layouts>, restore: bool, stale: bool) -> Value {
@@ -329,13 +558,26 @@ fn workspace_state(tree: &Tree, layouts: Option<&Layouts>, restore: bool, stale:
         return json!({"pins":[],"apply":{}});
     };
     let mut terminals: Vec<(TerminalRef, String)> = Vec::new();
+    let mut unique_terminals = std::collections::HashSet::new();
+    let mut conflicting = std::collections::HashSet::new();
     for node in &tree.nodes {
+        if let Some(pane) = &node.pane
+            && crate::adapters::pane_observations::conflicted(pane)
+            && let Ok(id) = terminals::identity(pane)
+        {
+            conflicting.insert(id);
+        }
+
         if node.kind == "pane"
             && let Some(pane) = &node.pane
             && let Ok(reference) = reference(pane)
-            && !terminals
-                .iter()
-                .any(|(existing, _)| existing.same_identity(&reference))
+            && unique_terminals.insert((
+                reference.backend.clone(),
+                reference.server.clone(),
+                reference.pane_id.clone(),
+                reference.terminal_id.clone(),
+                reference.generation.clone(),
+            ))
         {
             terminals.push((reference, node.id()));
         }
@@ -347,6 +589,15 @@ fn workspace_state(tree: &Tree, layouts: Option<&Layouts>, restore: bool, stale:
     let resolve = |reference: &TerminalRef| {
         if stale {
             ("unverified", String::new(), "Inventory is stale; refresh")
+        } else if reference
+            .identity()
+            .is_ok_and(|identity| conflicting.contains(&identity))
+        {
+            (
+                "ambiguous",
+                String::new(),
+                crate::adapters::pane_observations::WARNING,
+            )
         } else {
             match layouts::resolve(reference, &live) {
                 Resolution::Live(index) => ("live", terminals[index].1.clone(), ""),
@@ -358,7 +609,7 @@ fn workspace_state(tree: &Tree, layouts: Option<&Layouts>, restore: bool, stale:
             }
         }
     };
-    let pins:Vec<_>=layouts.current.pins.iter().map(|reference| { let (status,id,reason)=resolve(reference);json!({"id":id,"label":reference.label,"place":reference.place,"status":status,"reason":reason,"key":super::tree::key_id(&[serde_json::to_value(&reference.backend).unwrap_or(Value::Null),json!(reference.server),json!(reference.pane_id),json!(reference.terminal_id)])}) }).collect();
+    let pins:Vec<_>=layouts.current.pins.iter().map(|reference| { let (status,id,reason)=resolve(reference);json!({"id":id,"label":reference.label,"place":reference.place,"status":status,"reason":reason,"key":reference.key()}) }).collect();
     let mut apply = json!({});
     if restore {
         apply = serde_json::to_value(&layouts.current).unwrap_or(json!({}));
@@ -414,6 +665,8 @@ impl<S: Source> Backend<S> {
     }
     fn tree_context(&self) -> ProjectionContext {
         ProjectionContext {
+            runtime: self.config.runtime.clone(),
+            checkpoint_matches: self.config.ui.checkpoint_matches,
             home: self
                 .observations
                 .home
@@ -465,11 +718,45 @@ impl<S: Source> Backend<S> {
             !self.catalog_sent,
             self.restore_pending,
         )?;
+        if let Some(health) = self.observations.health.as_object_mut() {
+            if frame["observation_warnings"].is_array() {
+                health.insert(
+                    "observation_warnings".into(),
+                    frame["observation_warnings"].clone(),
+                );
+            } else {
+                health.remove("observation_warnings");
+            }
+            if frame["layout_warnings"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                health.insert("layout_warnings".into(), frame["layout_warnings"].clone());
+            } else {
+                health.remove("layout_warnings");
+            }
+            if frame["relationship_limited"] == true {
+                health.insert(
+                    "projection_warning".into(),
+                    json!(super::tree_relations::WARNING),
+                );
+            } else {
+                health.remove("projection_warning");
+            }
+            if frame["display_limited"] == true {
+                health.insert("display_warning".into(), json!(DISPLAY_LIMIT_MESSAGE));
+            } else {
+                health.remove("display_warning");
+            }
+        }
         self.catalog_sent = true;
         self.restore_pending = false;
         Ok(frame)
     }
     pub fn refresh(&mut self) -> Result<Value> {
+        self.refresh_with_message("")
+    }
+    fn refresh_with_message(&mut self, message: &str) -> Result<Value> {
         match self.source.refresh(&self.config) {
             Ok(mut observations) if observations.now.is_finite() && observations.now >= 0.0 => {
                 if self.last_success.is_some() {
@@ -478,7 +765,7 @@ impl<S: Source> Backend<S> {
                 self.last_success = Some(observations.now);
                 self.observations = observations;
                 self.refresh_error = false;
-                self.message.clear();
+                self.message = message.into();
             }
             _ => {
                 self.refresh_error = true;
@@ -504,12 +791,13 @@ impl<S: Source> Backend<S> {
             None
         } else {
             let topology = self.topology();
-            let node = topology
+            // Browsing preferences and quit must remain usable when the last
+            // selection disappears or becomes ambiguous. Never persist a new
+            // reference inferred from that selection.
+            topology
                 .find(selected)
-                .ok_or("Selected terminal disappeared; refresh")?;
-            Some(reference(
-                node.pane.as_ref().ok_or("Select a terminal, not a group")?,
-            )?)
+                .and_then(|node| node.pane.as_ref())
+                .and_then(|pane| reference(pane).ok())
         };
         if let Some(sizes) = object.get("sizes") {
             current.sizes = Some(
@@ -567,6 +855,7 @@ impl<S: Source> Backend<S> {
                 .and_then(|node| node.pane.as_ref());
             if let Some(pane) = pane
                 && !self.refresh_error
+                && !crate::adapters::pane_observations::conflicted(pane)
             {
                 slots.push(items.len());
                 targets.push(pane.clone());
@@ -575,6 +864,8 @@ impl<S: Source> Backend<S> {
             }
             let error = if pane.is_none() {
                 "Terminal disappeared; refresh"
+            } else if pane.is_some_and(crate::adapters::pane_observations::conflicted) {
+                crate::adapters::pane_observations::WARNING
             } else {
                 "Inventory is stale; refresh before reading"
             };
@@ -662,8 +953,9 @@ impl<S: Source> Backend<S> {
             self.observations = Observations::default();
             self.page = registry::OVERVIEW;
             self.restore_pending = true;
-            self.message = "Managing the selected private instance".into();
-            return Ok(vec![self.refresh()?]);
+            return Ok(vec![
+                self.refresh_with_message("Managing the selected private instance")?,
+            ]);
         }
         if action == "instances.saved" && page == registry::INSTANCES {
             self.show_saved = !self.show_saved;
@@ -679,6 +971,10 @@ impl<S: Source> Backend<S> {
             && !super::telegram_menu::available(action)
             && !super::wizard_menu::available(action)
             && !super::harness_menu::available(action)
+            && action != "settings.interface"
+            && action != "settings.runtime"
+            && action != "settings.dashboard"
+            && action != "settings.history"
             && ![
                 "help.guide",
                 "system.update",
@@ -699,6 +995,12 @@ impl<S: Source> Backend<S> {
             .unwrap_or_default();
         let selected = topology.find(selected_id);
         if action == "terminal.resize" {
+            if selected
+                .and_then(|node| node.pane.as_ref())
+                .is_some_and(crate::adapters::pane_observations::conflicted)
+            {
+                return Err(crate::adapters::pane_observations::WARNING.into());
+            }
             let resize = serde_json::from_value(
                 request
                     .get("resize")
@@ -706,16 +1008,18 @@ impl<S: Source> Backend<S> {
                     .ok_or("Missing resize request")?,
             )
             .map_err(|_| "Invalid resize request")?;
-            self.message = self
+            let message = self
                 .source
                 .resize_terminal(&self.config, selected_id, resize)?;
-            return Ok(vec![self.refresh()?]);
+            return Ok(vec![self.refresh_with_message(&message)?]);
         }
         let view = session_menu::View {
             snapshot: self.observations.snapshot.clone(),
             health: self.observations.health.clone(),
             layouts: self.observations.layouts.clone(),
-            selected: selected.and_then(|node| node.pane.clone()),
+            selected: selected
+                .and_then(|node| node.pane.clone())
+                .filter(|pane| !crate::adapters::pane_observations::conflicted(pane)),
             checkpoint: selected
                 .and_then(|node| node.attributes.get("checkpoint"))
                 .and_then(|row| row.get("key"))
@@ -771,17 +1075,17 @@ impl<S: Source> Backend<S> {
             self.restore_pending = true;
         }
         if !outcome.message.is_empty() {
-            self.message = outcome.message;
+            self.message = outcome.message.clone();
         }
         if !outcome.frames.is_empty() {
             let mut frames = outcome.frames;
             if outcome.refresh {
-                frames.push(self.refresh()?);
+                frames.push(self.refresh_with_message(&outcome.message)?);
             }
             return Ok(frames);
         }
         Ok(vec![if outcome.refresh {
-            self.refresh()?
+            self.refresh_with_message(&outcome.message)?
         } else {
             self.state()?
         }])
@@ -1084,6 +1388,15 @@ fn hook_instance(directory: &Path, config: &ControlConfig) -> Result<String> {
 }
 
 impl NativeSource {
+    fn history_directory(&self, global: bool) -> Result<PathBuf> {
+        if global {
+            let cwd = std::env::current_dir().map_err(|_| "Current directory unavailable")?;
+            super::startup::preference_directory(&cwd, |key| std::env::var_os(key))
+        } else {
+            Ok(self.directory.clone())
+        }
+    }
+
     fn herdr_hook_request(
         &self,
         config: &ControlConfig,
@@ -1205,6 +1518,7 @@ impl Source for NativeSource {
         request: super::pane_launch::Request,
     ) -> Result<super::pane_launch::Plan> {
         self.require_configuration()?;
+        self.terminals.apply_settings(&config.runtime)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "Invalid clock")?
@@ -1225,6 +1539,7 @@ impl Source for NativeSource {
         approved: &str,
     ) -> Result<crate::adapters::terminal_actions::Receipt> {
         self.require_configuration()?;
+        self.terminals.apply_settings(&config.runtime)?;
         let current = ControlConfig::parse(
             &layouts::read_private(&self.directory.join("control.json"))?
                 .ok_or("Configuration missing")?,
@@ -1289,6 +1604,117 @@ impl Source for NativeSource {
             super::telegram_admin::execute(&self.directory, request)
         }
     }
+    fn prepare_gateway(
+        &mut self,
+        expected: Option<super::gateway::Config>,
+        updated: super::gateway::Config,
+    ) -> Result<super::gateway::Plan> {
+        self.require_configuration()?;
+        super::gateway::Plan::prepare(&self.directory, &expected, updated)
+    }
+    fn apply_gateway(&mut self, plan: super::gateway::Plan) -> Result<String> {
+        self.require_configuration()?;
+        let approval = plan.approval();
+        super::control_audit::perform(
+            &self.directory,
+            super::control_audit::Action::Gateway,
+            || plan.apply(&approval),
+            |_| super::control_audit::State::Completed,
+        )?;
+        Ok("Gateway configuration saved privately; existing processes are unchanged".into())
+    }
+    fn configuration_file(&mut self, expected: &ControlConfig) -> Result<PathBuf> {
+        self.require_configuration()?;
+        let path = self.directory.join("control.json");
+        let bytes = layouts::read_private_limit(&path, super::config::MAX_CONFIG_BYTES as u64)?
+            .ok_or("Configuration missing")?;
+        if &ControlConfig::parse(&bytes)? != expected {
+            return Err("Configuration changed; reopen settings".into());
+        }
+        Ok(path)
+    }
+    fn prepare_configuration(
+        &mut self,
+        expected: &ControlConfig,
+        updated: ControlConfig,
+    ) -> Result<super::setup::SetupPlan> {
+        self.require_configuration()?;
+        super::setup::SetupPlan::edit_if_current(&self.directory, expected, updated)
+    }
+    fn apply_configuration(&mut self, plan: super::setup::SetupPlan) -> Result<ControlConfig> {
+        self.require_configuration()?;
+        if plan.preview.destination != self.directory.join("control.json") {
+            return Err("Configuration directory changed; reopen the editor".into());
+        }
+        let updated = plan.config().clone();
+        super::control_audit::perform(
+            &self.directory,
+            super::control_audit::Action::Configure,
+            || plan.apply(),
+            |_| super::control_audit::State::Completed,
+        )?;
+        Ok(updated)
+    }
+    fn history_access(&mut self, global: bool) -> Result<super::history::State> {
+        super::history::State::inspect(&self.history_directory(global)?)
+    }
+    fn history_archives(&mut self, global: bool, offset: usize) -> Result<Value> {
+        super::history::archives(&self.history_directory(global)?, offset)
+    }
+    fn history_archive_page(
+        &mut self,
+        global: bool,
+        name: &str,
+        offset: usize,
+        unresolved: bool,
+    ) -> Result<Value> {
+        super::history::archive_page(&self.history_directory(global)?, name, offset, unresolved)
+    }
+    fn history_page(&mut self, global: bool, offset: usize, unresolved: bool) -> Result<Value> {
+        super::control_audit::list(&self.history_directory(global)?, offset, unresolved)
+    }
+    fn apply_history(&mut self, plan: super::history::Plan) -> Result<()> {
+        if plan.directory() != self.directory {
+            let cwd = std::env::current_dir().map_err(|_| "Current directory unavailable")?;
+            let preferences =
+                super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+            if plan.directory() != preferences {
+                return Err("History directory changed; reopen the review".into());
+            }
+        }
+        let approval = plan.approval();
+        plan.apply(&approval)
+    }
+    fn dashboard_state(&mut self) -> Result<super::dashboard::State> {
+        let cwd = std::env::current_dir().map_err(|_| "Current directory is unavailable")?;
+        let preferences = super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+        super::dashboard::State::load(&preferences)
+    }
+    fn prepare_dashboard_recovery(&mut self) -> Result<super::dashboard::Plan> {
+        let cwd = std::env::current_dir().map_err(|_| "Current directory is unavailable")?;
+        let preferences = super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+        super::dashboard::Plan::recover(&preferences)
+    }
+    fn apply_dashboard(&mut self, plan: super::dashboard::Plan) -> Result<()> {
+        let cwd = std::env::current_dir().map_err(|_| "Current directory is unavailable")?;
+        let preferences = super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+        if plan.directory() != preferences {
+            return Err("Dashboard preference directory changed".into());
+        }
+        let approval = plan.approval();
+        super::control_audit::perform(
+            &preferences,
+            super::control_audit::Action::Configure,
+            || plan.apply(&approval),
+            |_| super::control_audit::State::Completed,
+        )
+    }
+    fn memory_configuration(&mut self) -> Result<Option<super::memory::Config>> {
+        super::memory::load(&self.directory)
+    }
+    fn memory_registrations(&mut self) -> Result<Vec<super::hook_runtime::Registration>> {
+        super::memory::registrations(&self.directory)
+    }
     fn memory_settings(
         &mut self,
         path: &Path,
@@ -1314,6 +1740,7 @@ impl Source for NativeSource {
         expected: Option<super::memory::Config>,
         config: super::memory::Config,
     ) -> Result<super::memory::Plan> {
+        self.require_configuration()?;
         super::memory::Plan::update(&self.directory, expected.as_ref(), config)
     }
     fn apply_memory(&mut self, plan: super::memory::Plan) -> Result<Value> {
@@ -1609,11 +2036,12 @@ impl Source for NativeSource {
         let service = super::telegram_config::ServiceConfig::load(
             &destination.join("telegram-service.json"),
         )?;
+        let terminals = self.terminals.configured(&config.runtime)?;
         let mut operations = super::telegram_commands::NativeOperations {
             instance: service.instance,
             directory: destination.into(),
             config,
-            terminals: self.terminals.clone(),
+            terminals,
             environment: crate::platform::environment(),
         };
         let global = super::telegram_service::global_directory()?;
@@ -1751,6 +2179,7 @@ impl Source for NativeSource {
         config: &ControlConfig,
         request: session_menu::Request,
     ) -> Result<session_menu::Answer> {
+        self.terminals.apply_settings(&config.runtime)?;
         use super::session_actions::{self, LaunchRequest, SessionStore};
         use crate::adapters::{harnesses, process};
         use session_menu::{Answer, Request};
@@ -1782,7 +2211,6 @@ impl Source for NativeSource {
                 crate::adapters::terminal_actions::Action::Rename(_) => AuditAction::Rename,
             }),
             Request::Harness(_) => Some(AuditAction::Account),
-            Request::GatewaySave { .. } => Some(AuditAction::Gateway),
             _ => None,
         };
         if audit.is_some() {
@@ -1862,13 +2290,6 @@ impl Source for NativeSource {
                     ))
                 }
                 Request::GatewayLoad => Ok(Answer::Gateway(super::gateway::load(&self.directory)?)),
-                Request::GatewaySave { expected, updated } => {
-                    super::gateway::save(&self.directory, &expected, &updated)?;
-                    Ok(Answer::Text(
-                        "Gateway configuration saved privately; existing processes are unchanged"
-                            .into(),
-                    ))
-                }
                 Request::Harness(mut run) => {
                     let current = ControlConfig::parse(
                         &layouts::read_private(&self.directory.join("control.json"))?
@@ -1890,16 +2311,11 @@ impl Source for NativeSource {
                             .secret
                             .take()
                             .ok_or("Native login requires private input")?;
-                        let mut input = secret.into_bytes();
-                        input.push(b'\n');
-                        let result = process::run_with_input(
+                        Ok(Answer::Text(super::harness_menu::execute_private_login(
                             &mut plan.command(),
-                            std::time::Duration::from_secs(120),
-                            256 * 1024,
-                            &input,
-                        );
-                        input.fill(0);
-                        match result {Ok(output) if output.status.success()=>Ok(Answer::Text("Native sign-in command completed; credentials remain with the harness".into())),_=>Err("Native sign-in outcome is unconfirmed; inspect the harness account before retrying".into())}
+                            secret,
+                            &config.runtime,
+                        )?))
                     } else {
                         Ok(Answer::Text(super::workspace_actions::run_native(
                             plan.command(),
@@ -1966,16 +2382,14 @@ impl Source for NativeSource {
                     Ok(Answer::Text(super::workspace_actions::run_native(command)?))
                 }
                 Request::Configure { expected, updated } => {
-                    let actual = ControlConfig::parse(
-                        &layouts::read_private(&self.directory.join("control.json"))?
-                            .ok_or("Configuration disappeared")?,
-                    )?;
-                    if actual != *expected {
-                        return Err("Configuration changed; refresh and review it again".into());
-                    }
-                    super::setup::SetupPlan::edit(&self.directory, (*updated).clone())?.apply()?;
+                    super::setup::SetupPlan::edit_if_current(
+                        &self.directory,
+                        &expected,
+                        (*updated).clone(),
+                    )?
+                    .apply()?;
                     Ok(Answer::Configured {
-                        configuration: *updated,
+                        configuration: updated,
                         message: "Configuration saved privately".into(),
                     })
                 }
@@ -1986,9 +2400,11 @@ impl Source for NativeSource {
                     &pane,
                     &request,
                 )?)),
-                Request::Load(key) => Ok(Answer::Saved(store.get(&key)?)),
+                Request::Load(key) => Ok(Answer::Saved(
+                    store.get_with_settings(&key, &config.runtime)?,
+                )),
                 Request::Remove(key) => {
-                    store.remove(&key)?;
+                    store.remove_with_settings(&key, &config.runtime)?;
                     Ok(Answer::Text(
                     "Saved reference removed; native session history and terminals are unchanged"
                         .into(),
@@ -2096,7 +2512,9 @@ impl Source for NativeSource {
                     let mut receipt =
                         session_actions::apply_duplicate_view(&self.terminals, prepared)?;
                     if receipt.state == crate::adapters::terminal_actions::ReceiptState::Submitted
-                        && store.register_view(&source, &receipt, &mechanism).is_err()
+                        && store
+                            .register_view(&source, &receipt, &mechanism, &config.runtime)
+                            .is_err()
                     {
                         receipt.message.push_str(". Viewer registration failed; the submitted view must not be launched again automatically.");
                     }
@@ -2141,16 +2559,25 @@ impl Source for NativeSource {
     }
 
     fn refresh(&mut self, config: &ControlConfig) -> Result<Observations> {
-        let mut snapshot = inventory::collect(config, &self.terminals, &inventory::socket_roots());
+        self.terminals.apply_settings(&config.runtime)?;
+        let budget = std::sync::Arc::new(super::discovery_budget::Budget::new(&config.runtime)?);
+        let mut snapshot = inventory::collect_with_budget(
+            config,
+            &self.terminals,
+            &inventory::socket_roots(),
+            &budget,
+        );
         let mut errors = Vec::new();
-        if super::hook_runtime::enrich_native_sessions(
+        let mut session_terminals = self.terminals.clone();
+        session_terminals.discovery_budget = Some(budget.clone());
+        if super::session_actions::enrich_sessions(
             &self.directory,
             &mut snapshot,
-            &self.terminals,
+            &session_terminals,
         )
         .is_err()
         {
-            errors.push("Native harness session metadata could not be verified");
+            errors.push("Some harness session metadata could not be verified");
         }
         let mut layouts_available = true;
         let layouts = match Layouts::load(&self.directory) {
@@ -2164,27 +2591,40 @@ impl Source for NativeSource {
         let checkpoints = match (super::session_actions::SessionStore {
             directory: self.directory.clone(),
         })
-        .list()
+        .observe_checkpoints(&config.runtime, &budget)
         {
-            Ok(rows) => Some(
-                rows.into_iter()
-                    .map(serde_json::to_value)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|_| "Cannot encode saved checkpoints")?,
-            ),
-            Err(_) => {
+            Ok(rows) => Some(rows),
+            Err(error) => {
                 errors.push("Saved checkpoints could not be read");
+                snapshot["errors"]
+                    .as_array_mut()
+                    .expect("discovery errors")
+                    .push(json!({"backend":"checkpoints","error":error}));
                 None
             }
         };
         match (super::session_actions::SessionStore {
             directory: self.directory.clone(),
         })
-        .live_views(&snapshot)
+        .live_views(&snapshot, &config.runtime, &budget)
         {
-            Ok(views) => snapshot["daedalus_views"] = json!(views),
-            Err(_) => errors.push("Saved view identities could not be read"),
+            Ok(views) => {
+                snapshot["daedalus_views"] = json!(views.rows);
+                if views.unresolved > 0 {
+                    snapshot["view_records_incomplete"] = json!(true);
+                    errors.push(super::view_records::WARNING);
+                }
+            }
+            Err(error) => {
+                snapshot["view_records_incomplete"] = json!(true);
+                errors.push("Saved view identities could not be read");
+                snapshot["errors"]
+                    .as_array_mut()
+                    .expect("discovery errors")
+                    .push(json!({"backend":"views","error":error}));
+            }
         }
+        budget.finish(&mut snapshot);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "System clock is before epoch")?
@@ -2225,6 +2665,12 @@ impl Source for NativeSource {
             fallback["warnings"] = json!(["Instance discovery unavailable"]);
             fallback
         });
+        if local["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty())
+        {
+            errors.push("Instance discovery is incomplete; inspect Dashboard and instance discovery settings");
+        }
         let mut health = json!({"errors":errors,"layouts_available":layouts_available});
         match native_route_observation(&self.directory, &telegram) {
             Ok(routes) => {
@@ -2442,6 +2888,254 @@ mod tests {
             },
         )
         .unwrap()
+    }
+    #[test]
+    fn invalid_layout_is_partial_preserves_stale_and_clears_on_recovery() {
+        let mut backend = backend();
+        let pane = &mut backend.source.observation.snapshot["panes"][0];
+        for (key, value) in [("left", 0), ("top", 0), ("width", 70000), ("height", 24)] {
+            pane[key] = json!(value);
+        }
+        let partial = backend.refresh().unwrap();
+        assert_eq!(partial["terminals"], 1);
+        assert!(
+            partial["freshness"]
+                .as_str()
+                .unwrap()
+                .starts_with("PARTIAL")
+        );
+        assert!(!partial["layout_warnings"].as_array().unwrap().is_empty());
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"action","page":6,"action":"activity.discovery"}))
+            .unwrap();
+        assert!(frames.iter().any(|frame| {
+            frame["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Layout geometry is incomplete"))
+        }));
+        backend.menu.cancel();
+        backend.refresh_error = true;
+        let stale = backend.state().unwrap();
+        assert!(stale["freshness"].as_str().unwrap().starts_with("STALE"));
+        assert!(stale["layout_warnings"].is_array());
+        backend.source.observation.snapshot["panes"][0]["width"] = json!(120);
+        let recovered = backend.refresh().unwrap();
+        assert!(recovered.get("layout_warnings").is_none());
+        assert!(backend.observations.health.get("layout_warnings").is_none());
+        assert!(
+            !recovered["freshness"]
+                .as_str()
+                .unwrap()
+                .starts_with("PARTIAL")
+        );
+        assert_eq!(backend.source.effects, 0);
+    }
+    #[test]
+    fn conflicting_base_observations_keep_known_ids_refuse_previews_and_clear_after_refresh() {
+        let mut backend = backend();
+        let mut original = backend.source.observation.snapshot["panes"][0].clone();
+        original["agent"] = json!("codex");
+        original["agent_session"] = json!({"kind":"id","agent":"codex","value":"one"});
+        backend.source.observation.layouts.current.pins = vec![reference(&original).unwrap()];
+        let mut changed = original.clone();
+        changed["agent_session"]["value"] = json!("two");
+        backend.source.observation.snapshot["panes"] = json!([original.clone(), changed]);
+        let partial = backend.refresh().unwrap();
+        assert_eq!(partial["terminals"], 1);
+        assert_eq!(partial["views"], 1);
+        assert!(
+            partial["freshness"]
+                .as_str()
+                .unwrap()
+                .starts_with("PARTIAL")
+        );
+        let pane = partial["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "pane")
+            .unwrap();
+        let id = pane["id"].as_str().unwrap();
+        assert_eq!(pane["actionable"], false);
+        assert_eq!(partial["workspace"]["pins"][0]["status"], "ambiguous");
+        let _ = backend.preview(&json!({"nodes":[id],"rows":24})).unwrap();
+        assert_eq!(backend.source.previews, 0);
+        assert!(backend.handle(&json!({"version":2,"op":"action","page":1,"action":"terminal.resize","node":id})).is_err());
+        backend.refresh_error = true;
+        assert!(
+            backend.state().unwrap()["freshness"]
+                .as_str()
+                .unwrap()
+                .starts_with("STALE")
+        );
+        backend.source.observation.snapshot["panes"] = json!([original.clone(), original]);
+        let recovered = backend.refresh().unwrap();
+        assert_eq!(recovered["terminals"], 1);
+        assert_eq!(recovered["views"], 1);
+        assert!(recovered.get("observation_warnings").is_none());
+        assert!(
+            backend
+                .observations
+                .health
+                .get("observation_warnings")
+                .is_none()
+        );
+        assert_eq!(recovered["workspace"]["pins"][0]["status"], "live");
+        assert_eq!(backend.source.effects, 0);
+    }
+    #[test]
+    fn unverified_selection_does_not_block_view_preferences_or_graceful_quit() {
+        let mut backend = backend();
+        let first = backend.source.observation.snapshot["panes"][0].clone();
+        let mut second = first.clone();
+        second["title"] = json!("conflicting title");
+        backend.source.observation.snapshot["panes"] = json!([first, second]);
+        let frame = backend.refresh().unwrap();
+        let id = frame["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "pane")
+            .unwrap()["id"]
+            .clone();
+        let view = json!({"mode":"tiles","selected":id,"motion":"off"});
+        backend
+            .handle(&json!({"version":2,"op":"view","view":view}))
+            .unwrap();
+        assert!(backend.observations.layouts.current.selected.is_none());
+        assert_eq!(
+            backend.observations.layouts.current.preferences["motion"],
+            "off"
+        );
+        assert!(
+            backend
+                .handle(&json!({"version":2,"op":"quit","view":view}))
+                .unwrap()
+                .1
+        );
+        assert_eq!(backend.source.effects, 0);
+    }
+    #[test]
+    fn relationship_partial_state_keeps_all_terminals_controls_and_stale_evidence() {
+        let mut backend = backend();
+        backend.config.runtime.discovery_relationship_limit = 1;
+        let original = backend.source.observation.snapshot["panes"][0].clone();
+        backend.source.observation.snapshot["panes"] = (0..128)
+            .map(|n| {
+                let mut pane = original.clone();
+                pane["pane_id"] = json!(format!("%{n}"));
+                pane
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let partial = backend.refresh().unwrap();
+        assert_eq!(partial["relationship_limited"], true);
+        assert_eq!(partial["terminals"], 128);
+        assert!(
+            partial["freshness"]
+                .as_str()
+                .unwrap()
+                .starts_with("PARTIAL")
+        );
+        assert_ne!(partial["display_limited"], true);
+        assert_eq!(
+            partial["tree"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["kind"] == "pane")
+                .count(),
+            128
+        );
+        assert!(
+            partial["catalog"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == "action:settings.runtime")
+        );
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"action","page":6,"action":"activity.discovery"}))
+            .unwrap();
+        assert!(frames.iter().any(|frame| {
+            frame["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(super::super::tree_relations::WARNING))
+        }));
+        backend.menu.cancel();
+        backend.refresh_error = true;
+        let stale = backend.state().unwrap();
+        assert_eq!(stale["relationship_limited"], true);
+        assert!(stale["freshness"].as_str().unwrap().starts_with("STALE"));
+        backend.config.runtime.discovery_relationship_limit = 16384;
+        let complete = backend.refresh().unwrap();
+        assert_ne!(complete["relationship_limited"], true);
+        assert!(
+            backend
+                .observations
+                .health
+                .get("projection_warning")
+                .is_none()
+        );
+        assert_eq!(backend.source.effects, 0);
+    }
+    #[test]
+    fn limited_state_preserves_controls_exact_tree_prefix_and_verified_totals() {
+        let mut backend = backend();
+        backend.config.runtime.discovery_frame_limit_bytes = 1048576;
+        let original = backend.source.observation.snapshot["panes"][0].clone();
+        backend.source.observation.snapshot["panes"] = (0..2000)
+            .map(|index| {
+                let mut pane = original.clone();
+                pane["pane_id"] = json!(format!("%{index}"));
+                pane
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let frame = backend.refresh().unwrap();
+        assert_eq!(frame["display_limited"], true);
+        assert_eq!(frame["terminals"], 2000);
+        assert!(frame["freshness"].as_str().unwrap().starts_with("PARTIAL"));
+        assert!(super::super::discovery_budget::json_size(&frame, 1048576).is_ok());
+        backend.refresh_error = true;
+        let stale = backend.state().unwrap();
+        assert_eq!(stale["display_limited"], true);
+        assert!(stale["freshness"].as_str().unwrap().starts_with("STALE"));
+        backend.refresh_error = false;
+        let rows = frame["tree"].as_array().unwrap();
+        let full = backend.topology().rows(&backend.tree_context());
+        assert!(rows.len() < full.len());
+        assert_eq!(rows, &full[..rows.len()]);
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            let parent = row["parent"].as_str().unwrap();
+            assert!(parent.is_empty() || seen.contains(parent));
+            seen.insert(row["id"].as_str().unwrap().to_owned());
+        }
+        assert!(
+            frame["catalog"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == "action:settings.runtime")
+        );
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"action","page":6,"action":"activity.discovery"}))
+            .unwrap();
+        assert!(frames.iter().any(|frame| {
+            frame["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(DISPLAY_LIMIT_MESSAGE))
+        }));
+        assert_eq!(backend.source.effects, 0);
+        backend.menu.cancel();
+        backend.source.observation.snapshot["panes"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let complete = backend.refresh().unwrap();
+        assert_ne!(complete["display_limited"], true);
+        assert!(backend.observations.health.get("display_warning").is_none());
     }
     #[test]
     fn completed_setup_switches_backend_and_source_before_terminal_actions() {
@@ -2669,6 +3363,34 @@ mod tests {
             .handle(&json!({"version":2,"op":"previews","nodes":[node],"rows":2}))
             .unwrap();
         assert_eq!(backend.source.previews, 1);
+    }
+    #[test]
+    fn action_confirmation_survives_its_refresh_but_stale_observations_are_explicit() {
+        let mut backend = backend();
+        let frame = backend
+            .menu_outcome(session_menu::Outcome {
+                message: "Configuration saved privately".into(),
+                refresh: true,
+                ..session_menu::Outcome::default()
+            })
+            .unwrap();
+        assert_eq!(frame[0]["message"], "Configuration saved privately");
+        assert_eq!(backend.refresh().unwrap()["message"], "");
+        backend.source.fail = true;
+        let frame = backend
+            .menu_outcome(session_menu::Outcome {
+                message: "Configuration saved privately".into(),
+                refresh: true,
+                ..session_menu::Outcome::default()
+            })
+            .unwrap();
+        assert!(
+            frame[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Refresh failed")
+        );
+        assert!(frame[0]["freshness"].as_str().unwrap().starts_with("STALE"));
     }
     #[test]
     fn view_and_quit_persist_valid_settings_and_reject_invalid_changes() {

@@ -17,7 +17,15 @@ shown beside each name. Ctrl+P searches every command, `?` shows the key bar and
 `q` quits. The Details panel explains the selected item. Help includes the
 [command reference](COMMANDS.md).
 
-- **Settings**: detected harnesses, profile directories, Telegram configuration and setup.
+Opening a new search or switching pages while an earlier action finishes keeps
+your current page, query and selection. Its reply still updates observations and
+reports the outcome. Enter explains when an action is still running; press it
+again after completion to open a different action. A blocked Enter is not saved
+for automatic execution.
+
+- **Settings**: interface preferences, detected harnesses, profile directories,
+  Telegram configuration, Hindsight settings, [control receipt history](HISTORY.md)
+  and setup.
 - **Hooks**: hook profiles and Hindsight memory ([hooks](HOOKS.md)).
 - **Telegram**: guided connection settings, private bot token, service start and
   destination selection. Each step has its own review. Sender permissions are
@@ -36,6 +44,20 @@ Setup detects installed harnesses and preselects them for review. You can desele
 any tool before saving. Codex and Claude Code report sign-in through their native
 status commands; other tools show detected profiles or installations. Account
 identities and tokens are not displayed. Authentication stays in the harness.
+
+**Use an existing account profile** opens the saved directory for the selected
+tool. Enter an existing absolute directory, or `inherit` to remove the saved
+override. The field identifies the tool's native environment variable; Ctrl+U
+clears it, and invalid paths return to the field for correction. A review shows
+the old and proposed selection before a separate save. Cancel retains the current
+configuration. Saving keeps a private backup and refuses changed configuration
+bytes, a busy shared configuration lock, or a retired instance.
+
+Saved profile roots take precedence over the tool's environment variable and
+default profile. Clearing an override restores that environment/default lookup;
+entering a default directory explicitly still overrides an inherited custom
+directory. Profile selection applies to future launches. Native account files
+remain with the tool, and sign-in is a separate action.
 
 Open **Options → Configuration settings → Telegram configuration** and choose
 **Connect my bot and DM**. Enter the bot token and your numeric owner user ID.
@@ -56,7 +78,13 @@ to filter; Home/End moves to the first or last result. **Options** (`,`) explain
 changes apply immediately. Tab / Shift+Tab selects the next / previous option;
 PageUp / PageDown moves five. Left/Right changes preferences; press Enter to open
 settings, check updates or reset panel sizes. **Settings** holds connection and
-harness configuration.
+harness configuration alongside interface preferences.
+
+Unreadable dashboard preferences leave the default instance accessible and show
+an instance discovery warning. Open **Dashboard and instance discovery** to review
+recovery or cancel it. Recovery keeps an exact private backup and starts with
+automatic instance scanning disabled. See [dashboard recovery](DASHBOARD.md) for
+the saved references it clears and files it can recover.
 
 Forms keep pasted secrets hidden and show how many characters were entered.
 Left/Right moves the cursor; Home/End jumps to either end. Backspace/Delete
@@ -85,6 +113,12 @@ one writer; additional views can Watch. Standalone external shell processes are
 listed separately as read-only observations.
 Set nondefault tmux sockets and Herdr endpoints in the configuration. Keep each
 project in its own workspace with its shells, agents and logs.
+
+Repeated identical terminal views count once. Conflicting observations keep the
+known terminal visible with a warning, but its actions, previews and layout
+dividers remain unavailable until a clean refresh. **Activity → Discovery warnings**
+explains the conflict. Other verified terminals, interface preferences and quit
+remain available.
 
 | View | Shows |
 |---|---|
@@ -123,6 +157,83 @@ saved in the configuration directory. Previews read recent output of visible
 terminals only and are not stored. Watching, attaching and capture can show private
 terminal output.
 
+Duplicate views retain `XDG_CONFIG_HOME`; Herdr clients also retain
+`HERDR_CONFIG_PATH` from Daedalus's environment. The reviewed source supplies the
+native session and terminal identity. Caller pane, socket and harness profile
+variables are excluded from the child launch.
+
+Checkpoint links distinguish **Checkpoint saved here** from **Checkpoint ID match**.
+Details show the saved profile, project, source and the limits of the association.
+Both labels leave the current profile unverified. **Interface settings → Checkpoint
+tree links** chooses all native-ID candidates, exact saved origins only, or no tree
+links. Saved checkpoints and their reviewed resume/fork actions remain available.
+
+**Configuration settings → Terminals and discovery** edits saved native launch
+and shell dimensions, tmux/Herdr query deadlines and output limits, discovery
+worker/endpoint/socket-entry budgets, the whole-refresh deadline, shared metadata
+byte/value budgets, terminal display size, native/external scan limits, local account probe budgets and
+database snapshot limits. The five snapshot fields control per-database time,
+size, copy steps, busy waits and progress checks during import/cutover, using the
+source instance's saved values. Existing destination SQLite sidecars are preserved
+and require separate inspection before another copy can use that destination.
+Each field shows its saved value, bounds and effect. Invalid entries reopen the
+form; saving requires confirmation. New dimensions apply to future launches and
+may be resized on attach. See [runtime defaults and CLI precedence](COMMANDS.md#native-terminals).
+
+The **Instance import and cutover** group controls retained bytes, directory
+entries, cumulative JSON validation and logical byte work, plus one cooperative
+deadline through preparation and publication admission. These operations use the
+source instance's saved values. Review time counts; an expired or exhausted plan
+requires a fresh review. Changing a limit does not start a service or an import.
+The group also contains queued-frame size and attachment reference count/combined
+byte limits. Per-file eligibility uses the final Telegram service's separate
+**Attachment size limit** setting.
+
+The **Viewer history** controls in the same menu set the saved record count,
+file-size limit, cumulative JSON value budget and processing deadline. History
+that exceeds a limit stays on disk and produces **Discovery warnings** with
+incomplete viewer details. Raise the relevant limit and refresh to inspect it.
+Known terminals remain visible. Reading never prunes saved records, and a failed
+registration does not submit another viewer launch.
+
+Failed automatic socket scans and exhausted discovery limits show **PARTIAL**;
+open **Discovery warnings** for the reasons. A partial refresh keeps the terminals it did verify;
+it does not claim the remaining endpoints are absent. Increase the relevant saved
+limit or reduce the configured discovery scope to complete the scan.
+When terminal detail rows exceed the saved display size, the UI keeps an ordered
+prefix with parents before children and retains the compiled settings controls.
+Verified terminal/view totals still describe the full admitted snapshot; omitted
+rows do not change terminal identity or authority. **Discovery warnings** explains
+the display limit. **Workspace hierarchy** also reports a truncated text outline.
+Shared metadata budgets count cumulative wire/normalized JSON, including object
+keys, rather than measuring total application memory. Native RPC deadlines span
+the whole exchange; filesystem/process scan deadlines are cooperative, with late
+results refused. These settings apply on the next refresh.
+Optional relationship details have saved count, JSON byte and projection-time
+limits. Exhaustion reports **PARTIAL** and keeps every base terminal identity and
+verified total. **Discovery warnings** explains omitted details; increasing the
+limits restores them. Client activity counts remain compact, and incomplete
+client indexes show activity unavailable. A failed refresh retains **STALE** when
+display or relationship details are limited.
+
+**Saved viewer history limit** controls how many viewer registrations remain after
+the next confirmed registration; its default is 200. Reading history leaves it
+unchanged. Ambiguous or unsupported old viewer identities appear in **Discovery
+warnings** and are omitted from relationship counts. Increasing a display budget
+does not repair an ambiguous identity. Saved pin badges and removal actions require
+the complete saved identity, including any supplemental generation; a changed
+terminal stays stale until explicitly selected again.
+
+**Configuration settings → Instance settings** edits the default identity,
+workspace, preferred tools, terminal discovery and exact connections, plus
+portable Telegram hints. Lists and metadata connections have per-entry add,
+edit and remove controls with pagination. A comma or space stays part of a path.
+Changes stay in a draft until their exact review is confirmed; cancelling keeps
+the saved file. Saving refuses a changed file or instance directory and keeps a
+private backup. Telegram hints do not change service grants or credentials.
+The default name is an identity: review its effects before changing it. Setup
+preserves saved tool selections; installed tools are suggestions for fresh setup.
+
 ## Reviews
 
 Every change opens a review dialog. A confirmation applies once, to the exact
@@ -138,6 +249,109 @@ when its process can be verified. Renaming Herdr metadata needs an explicit sock
 mapping.
 
 ## Display
+
+Open **Options → Configuration settings → Interface settings** to edit appearance,
+accessibility, update checks, refresh timing, rendering and input behavior. Each
+change shows its saved before/after value and requires confirmation. Settings are
+stored under `ui` in the selected instance's private `control.json`; older files
+use the existing defaults. Saving here updates the running interface. Splash and
+graphics detection changes apply on the next launch. Changes made through the CLI
+or another process apply when the instance is reopened.
+
+Hindsight settings have editable prefilled fields. **Ctrl+U** clears a text form
+before entering a replacement; **Esc** discards the draft. Query fields preserve
+line breaks through quoted text with `\n` escapes. Outside text forms, Ctrl+U
+keeps its release-details shortcut.
+
+Matching environment variables override saved values. Terminal capabilities still
+limit artwork and color; `NO_COLOR` disables color even when `ui.colors` is true.
+The view's Motion switch also disables animation. `s` remembers whether the view
+allows the screensaver; a zero idle delay or unavailable artwork pauses it.
+
+`daedalus config show --config-dir ABS` lists every editable setting, its description
+and numeric bounds. `daedalus config set --config-dir ABS --key ui.SETTING --value VALUE`
+previews a change; add `--apply` to save it with a backup.
+
+**Dashboard and instance discovery** edits global search roots, saved instance
+references and discovery limits. Its dialog shows the global preference directory
+and applies discovery changes on refresh. See [dashboard preferences](DASHBOARD.md)
+for fields, startup-selection behavior and the corresponding CLI.
+
+| Saved setting (`ui.` prefix) | Default | Values or purpose |
+|---|---|---|
+| `colors` | `true` | Enable color |
+| `icons` | `auto` | `auto`, `ascii`, `unicode` |
+| `reduced_motion` | `false` | Disable animation |
+| `backdrop` | `true` | Enable background light and artwork |
+| `splash` | `true` | Show the startup splash |
+| `graphics` | `auto` | `auto`, `cells`, `kitty` |
+| `screensaver_seconds` | `15` | `0` disables; otherwise 3–86400 seconds |
+| `update_check` | `true` | Automatic release checks; manual checks remain available |
+| `refresh_interval_ms` | `5000` | Inventory refresh interval |
+| `preview_interval_ms` | `2000` | Refresh interval for visible terminal previews |
+| `preview_settle_ms` | `250` | Minimum delay between changed preview targets |
+| `resize_debounce_ms` | `600` | Delay before saving panel dimensions |
+| `quit_timeout_ms` | `1500` | Maximum wait for the backend to exit |
+| `graphics_probe_timeout_ms` | `1000` | Startup graphics capability query timeout |
+| `live_frame_ms` | `16` | Attached-terminal rendering interval |
+| `animation_frame_ms` | `33` | Transition and busy rendering interval |
+| `saver_frame_ms` | `50` | Animated screensaver rendering interval |
+| `idle_frame_ms` | `100` | Idle rendering interval |
+| `reduced_motion_frame_ms` | `250` | Rendering interval with motion disabled |
+| `still_saver_frame_ms` | `1000` | Static screensaver rendering interval |
+| `input_batch_ms` | `4` | Time budget for draining ready input |
+| `input_batch_limit` | `64` | Maximum input events per rendering cycle |
+| `suspended_poll_ms` | `40` | Poll interval while an external command owns the terminal |
+| `quit_poll_ms` | `15` | Backend exit poll interval |
+| `animation_window_ms` | `400` | Time to keep transition rendering active |
+| `double_click_ms` | `500` | Maximum interval between double-clicks |
+| `clipboard_read_limit_bytes` | `65536` | Windows clipboard paste buffer limit; 2–8388608 bytes |
+| `clipboard_write_limit_bytes` | `524290` | Copy selection limit; 2–8388608 bytes |
+| `checkpoint_matches` | `all` | Checkpoint tree links: `all`, `source`, `off` |
+| `terminal_scroll_rows` | `3` | 1–1000 rows per native/controlled-Herdr terminal wheel step |
+| `list_page_rows` | `10` | 1–1000 rows per list/search/shortcut PageUp/Down or dialog details page |
+| `details_page_rows` | `8` | 1–1000 rows per Alt+PageUp/Down in the details panel |
+| `options_page_items` | `5` | 1–1000 items per Options PageUp/Down |
+| `mouse_scroll_rows` | `3` | 1–1000 rows per local list, shortcut, details, Focus outline or output-dialog wheel step |
+| `choice_wheel_items` | `1` | 1–1000 items per Options or chooser wheel step |
+| `search_query_limit_chars` | `1024` | 1–16384 Unicode characters per list, command or terminal-switcher query |
+| `shortcut_query_limit_chars` | `160` | 1–16384 Unicode characters per shortcut query |
+| `agent_session_ids` | `true` | Labeled agent conversation IDs on workspace cards, outlines and selected-terminal status |
+
+Local navigation steps clamp at the beginning/end of available items or text.
+Chooser PageUp/Down scrolls its details; arrows and wheel select a choice, and
+only Enter confirms it. Options page/wheel movement selects without changing a
+preference. Workspace grids outside search keep their visible-layout paging and
+wheel movement. Terminal history has its separate `terminal_scroll_rows` policy.
+Typed and pasted search text share their respective query limit and remove
+control characters. Counts use Unicode scalar characters rather than bytes or
+display columns. Lowering a limit preserves an existing longer query and prevents
+further growth; Backspace still removes a whole grapheme. These query limits
+apply to local searches; text forms and attached terminal input keep their own
+handling. General shortcut remapping remains unsupported.
+
+Native watchers and controllers scroll independently through retained history.
+The status bar identifies the history offset; wheel down returns toward live.
+Controller input returns its view to live. Native history capacity is selected
+at launch with `runtime.native_scrollback_rows` (1000 by default, zero disables).
+Saving a new capacity affects future terminals. Older native daemons keep their
+live stream and show an explicit history-unavailable notice. This does not read
+history from any other user's pane or adopt an unmanaged terminal.
+**Instance settings → Native terminal discovery override** accepts `true`, `false`
+or `inherit`. Set it to `true` with automatic discovery off for native-only
+discovery; `inherit` preserves the earlier automatic-discovery behavior.
+
+Clipboard copy refuses text above its saved limit and shows the reason instead of
+copying a shortened selection. Soft-wrapped terminal rows copy as one line,
+including spaces at the wrap; explicit line breaks remain. Selecting either half
+of a wide character copies the whole character. Windows counts UTF-16 bytes including the final
+terminator; other platforms count UTF-8 text bytes before OSC 52 encoding. The
+paste limit bounds the Windows clipboard buffer read by explicit paste shortcuts;
+terminal-managed paste on other platforms keeps its own handling.
+On Unix, the copy notice confirms that the request was sent to the terminal;
+clipboard access still depends on that terminal's OSC 52 support and settings.
+
+Environment overrides:
 
 | Setting | Effect |
 |---|---|
@@ -172,6 +386,12 @@ same sizes. It does not resize only Daedalus's Details panel. Both exact termina
 identities and the captured layout are checked again before the native command;
 a changed layout is rejected and an uncertain result is not automatically retried.
 Small-pane limits and backend resize support still apply.
+
+In a nested Herdr layout, moving a shared divider can resize several panes.
+Every changed pane must keep the saved minimum width and height. Requests beyond
+native size limits are refused instead of applying a shorter movement. Missing
+split information asks for a refresh; an unconfirmed result requires inspecting
+the layout before trying again.
 
 ## Quick terminal switcher and Herdr usage
 
@@ -234,10 +454,26 @@ sidebar entries show these labels, and terminal cards use the same state colors.
 The local action bar owns Attach/Watch shortcuts; the footer supplies navigation
 and only adds an action shortcut when it could not fit in the local bar.
 
-Focus separates human session names from identity details. Terminal entries show
-harness, pane, short conversation ID and reported profile/model text beneath
+Focus separates human session names from identity details. Workspace views label
+the observed agent conversation as **SID:**, independently of terminal, window
+or pane IDs. Cards and outlines fit the available width; the selected terminal's
+status and identity hover text retain the full reported value where space permits.
+Details retains the observed value and explains missing evidence. Compact views
+show SID labels only when a conversation ID is known; they do not repeat missing-ID
+warnings. Current transport metadata takes precedence over verified hooks and
+explicit foreground launch selectors. Windows executable names and paths use the
+same harness identity matching as Linux. Native daemons report only the parsed
+launch ID, never the full arguments; older daemons remain compatible.
+IDs are never inferred from terminal output, titles or terminal generations.
+**Interface settings → Agent session IDs in views** controls these compact labels.
+Dedicated agent-session hierarchy nodes and Details remain available when compact
+labels are off. A hierarchy prefix without full metadata is marked with an ellipsis.
+Zoomed Focus reserves one identity row above the terminal when these labels are
+enabled. Its reported viewport and mouse origin exclude that row; disabling the
+labels restores the whole-pane terminal.
+Terminal entries also show harness, pane and reported profile/model text beneath
 the name when space permits; the selected entry can add its reported topic.
-Unknown details are omitted. Hover a terminal for its full name and metadata.
+Hover a terminal for its full name and metadata.
 The selected terminal's folder and session context sit above its screen, and
 Workspace Tree expands the selected terminal's metadata on a separate line.
 Focus adjusts sidebar width while reserving at least 50 columns for the terminal;

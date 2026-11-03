@@ -119,18 +119,12 @@ pub fn run_with(
             start: command.verb == "start",
         },
         "bindings" => Request::Bindings {
-            registration: command
-                .registration
-                .clone()
-                .ok_or("Registration missing")?,
+            registration: command.registration.clone().ok_or("Registration missing")?,
         },
         "bind" => Request::Bind {
-            registration: command
-                .registration
-                .clone()
-                .ok_or("Registration missing")?,
-            chat: command.chat.clone().ok_or("Chat missing")?,
-            actor: command.actor.clone().ok_or("Actor missing")?,
+            registration: command.registration.clone().ok_or("Registration missing")?,
+            chat: command.chat.ok_or("Chat missing")?,
+            actor: command.actor.ok_or("Actor missing")?,
         },
         _ => return Err("Unknown Telegram operation".into()),
     };
@@ -453,7 +447,11 @@ mod tests {
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["service"]["state"], "running");
         assert!(value["service"].get("healthy").is_none());
-        assert!(!String::from_utf8(output).unwrap().contains("offline_fixture"));
+        assert!(
+            !String::from_utf8(output)
+                .unwrap()
+                .contains("offline_fixture")
+        );
     }
     #[test]
     fn parser_rejects_unreviewed_or_mismatched_options() {

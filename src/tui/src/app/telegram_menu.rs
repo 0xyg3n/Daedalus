@@ -62,6 +62,11 @@ impl Next {
 enum Stage {
     LocalSetup(String),
     Settings(ServiceConfig),
+    RuntimeFields(Box<ServiceConfig>),
+    RuntimeValue {
+        key: String,
+        expected: Box<ServiceConfig>,
+    },
     Names(Vec<Value>),
     Name(i64),
     Owner {
@@ -103,7 +108,7 @@ enum Stage {
         chat: i64,
         actor: i64,
     },
-    Confirm(Box<Plan>),
+    Confirm(Box<Plan>, bool),
 }
 struct Pending {
     id: u64,
@@ -186,7 +191,7 @@ impl Menu {
         let Reply::Plan(plan) = reply else {
             return Err("Expected reviewed Telegram plan".into());
         };
-        self.frame(seq,"choose","Review Telegram changes",json!({"description":super::dialog_text::format(&plan.review()).map_err(|_|"Cannot display Telegram review")?,"options":[["apply","Apply reviewed changes","Apply this plan once"],["cancel","Cancel","Leave configuration unchanged"]]}),Stage::Confirm(plan))
+        self.frame(seq,"choose","Review Telegram changes",json!({"description":super::dialog_text::format(&plan.review()).map_err(|_|"Cannot display Telegram review")?,"options":[["apply","Apply reviewed changes","Apply this plan once"],["cancel","Cancel","Leave configuration unchanged"]]}),Stage::Confirm(plan,false))
     }
     pub fn start<S: Source>(
         &mut self,
@@ -255,15 +260,48 @@ impl Menu {
                 let Reply::Data(value)=source.telegram(Request::Inspect)? else {return Err("Invalid Telegram settings response".into());};
                 let expected:Option<ServiceConfig>=value.get("settings").map(|v|serde_json::from_value(v.clone()).map_err(|_|"Invalid Telegram settings")).transpose()?;
                 let directory=PathBuf::from(value["config_directory"].as_str().ok_or("Missing configuration directory")?);
-                let updated=expected.clone().unwrap_or(ServiceConfig {version:1,instance:String::new(),bot_id:0,token_file:directory.join("telegram.env"),grants:vec![],listen_chats:BTreeSet::new(),registrations:vec![],hook_bindings:vec![]});
+                let updated=expected.clone().unwrap_or(ServiceConfig {runtime: Default::default(),version:1,instance:String::new(),bot_id:0,token_file:directory.join("telegram.env"),grants:vec![],listen_chats:BTreeSet::new(),registrations:vec![],hook_bindings:vec![]});
                 if expected.is_none() {
                     self.frame(seq,"choose","Connect Telegram",json!({"description":"Start with your private DM. You can add named groups afterwards.","options":[["dm","Connect my bot and DM","Enter the bot token and your Telegram user ID"],["automatic","Find my DM or group","Discover recent chats, then review access"],["manual","Advanced setup","Enter bot and chat IDs separately"]]}),Stage::InitialMode(updated))
                 } else {
-                    self.frame(seq,"choose","Telegram configuration",json!({"description":"Edit this connection without repeating onboarding. Existing chats, routes and hooks are preserved.","options":[["add","Add a DM or group","Authorize a Telegram user and chat ID"],["names","Manage chat names","Name registered chats for the pane selector"],["route","Assign chats to panes","Choose a default destination for each chat"],["token","Change bot token","Replace the private credential for this bot"],["discover","Find chats automatically","Discover recent chats while the service is stopped"],["start","Start connection","Review starting the Telegram service"],["stop","Stop connection","Stop this instance's managed service"]]}),Stage::Settings(updated))
+                    self.frame(seq,"choose","Telegram configuration",json!({"description":"Edit this connection without repeating onboarding. Existing chats, routes and hooks are preserved.","options":[["runtime","Transport and service","Configure network, feedback, progress and streaming"],["add","Add a DM or group","Authorize a Telegram user and chat ID"],["names","Manage chat names","Name registered chats for the pane selector"],["route","Assign chats to panes","Choose a default destination for each chat"],["token","Change bot token","Replace the private credential for this bot"],["discover","Find chats automatically","Discover recent chats while the service is stopped"],["start","Start connection","Review starting the Telegram service"],["stop","Stop connection","Stop this instance's managed service"]]}),Stage::Settings(updated))
                 }
             }
             _=>Err("Unknown Telegram action".into()),
         }
+    }
+    fn runtime_value(
+        &mut self,
+        seq: &mut u64,
+        key: String,
+        expected: Box<ServiceConfig>,
+        error: Option<&str>,
+    ) -> Result<Outcome> {
+        let field = super::telegram_runtime::FIELDS
+            .iter()
+            .find(|f| f.key == key)
+            .ok_or("Unknown Telegram runtime setting")?;
+        let mut description = format!(
+            "{}\nSaved value: {}. Stop Telegram before saving runtime changes; they apply on its next start.",
+            field.description,
+            expected.runtime.display(&key)?
+        );
+        if let super::telegram_runtime::Kind::Number { min, max } = field.kind {
+            description.push_str(&format!("\nEnter a whole number from {min} to {max}."));
+        }
+        if let super::telegram_runtime::Kind::Boolean = field.kind {
+            description.push_str("\nEnter true or false.");
+        }
+        if let Some(error) = error {
+            description.push_str(&format!("\n{error}"));
+        }
+        self.frame(
+            seq,
+            "input",
+            field.label,
+            json!({"secret":false,"description":description,"input":expected.runtime.display(&key)?}),
+            Stage::RuntimeValue { key, expected },
+        )
     }
     fn field(
         &mut self,
@@ -403,6 +441,8 @@ impl Menu {
                 Ok(outcome)
             }
             Stage::Settings(updated) => match text {
+                "runtime" => self.frame(seq,"choose","Telegram transport and service",json!({"description":"Saved settings for this connection. Stop the service before applying a change. Endpoint changes select the server receiving the bot credential.",
+                    "options":super::telegram_runtime::FIELDS.iter().map(|field| Ok(json!([field.key,format!("{} · {}",field.label,updated.runtime.display(field.key)?),format!("{} · {}",field.group,field.description)]))).collect::<Result<Vec<_>>>()?}),Stage::RuntimeFields(Box::new(updated))),
                 "add" => self.field(seq,2,Some(updated.clone()),updated,None,false),
                 "names" => {
                     let Reply::Data(data) = source.telegram(Request::Inspect)? else { return Err("Invalid chat inventory".into()); };
@@ -414,6 +454,15 @@ impl Menu {
                 }
                 other => self.start(match other {"route"=>"telegram.route","token"=>"telegram.token","discover"=>"telegram.discover","start"=>"telegram.start",_=>"telegram.stop"},source,_config,seq),
             },
+            Stage::RuntimeFields(expected)=>self.runtime_value(seq,text.into(),expected,None),
+            Stage::RuntimeValue {key,expected}=>{
+                let runtime=match expected.runtime.set(&key,text) {Ok(value)=>value,Err(error)=>return self.runtime_value(seq,key,expected,Some(&error))};
+                let before=expected.runtime.display(&key)?; let after=runtime.display(&key)?;
+                let mut updated=(*expected).clone(); updated.runtime=runtime;
+                let Reply::Plan(plan)=source.telegram(Request::Configure{expected:Some(expected),config:Box::new(updated)})? else {return Err("Invalid Telegram runtime plan".into());};
+                self.frame(seq,"choose","Review Telegram runtime change",json!({"description":format!("Save {key}: {before} → {after}. The service must be stopped; saving does not start it.\n\n{}",super::dialog_text::format(&plan.review()).map_err(|_|"Cannot display runtime review")?),
+                    "options":[["cancel","Cancel","Keep existing settings"],["apply","Save reviewed setting","Apply this change once; restart separately"]]}),Stage::Confirm(plan,true))
+            }
             Stage::Names(chats) => {
                 let chat = chats.get(text.parse::<usize>().map_err(|_|"Invalid chat")?).and_then(|c|c["chat"].as_i64()).ok_or("Invalid chat")?;
                 self.frame(seq,"input","Chat display name",json!({"description":"Use a short name for this chat (up to 120 characters). This is private display metadata; chat ID and permissions stay unchanged."}),Stage::Name(chat))
@@ -609,7 +658,7 @@ impl Menu {
                     ),
                 }
             }
-            Stage::Confirm(plan) => {
+            Stage::Confirm(plan,runtime) => {
                 if text == "cancel" {
                     return Ok(Outcome::default());
                 }
@@ -633,7 +682,7 @@ impl Menu {
                 };
                 let (summary, mut next) = match &*plan {
                     Plan::ChatName(_) => ("Chat name saved. It will appear when assigning a Telegram chat to a pane.", None),
-                    Plan::Configuration(_) => ("Telegram settings saved. Saving settings does not start or reconnect the bot.", Some(Next::Token)),
+                    Plan::Configuration(_) => ("Telegram settings saved. Saving settings does not start or reconnect the bot.", if runtime {None} else {Some(Next::Token)}),
                     Plan::Token(_) => ("Bot token saved privately. Its format matches the configured bot; Telegram has not verified it yet.", Some(Next::Start)),
                     Plan::Service(_) if plan.review()["operation"] == "start" => ("Telegram start requested. Check connection status before sending a message.", Some(Next::Route)),
                     Plan::Service(_) => ("Telegram stop requested. Check connection status to confirm it stopped.", None),
@@ -998,6 +1047,53 @@ mod tests {
         for text in ["fixture", "123", "456", "group", "-100789"] {
             answer(menu, local, seq, json!(text));
         }
+    }
+    #[test]
+    fn runtime_settings_validate_cancel_and_save_without_repeating_token_onboarding() {
+        let (mut menu, mut local, mut seq) = (Menu::default(), Local::new(), 0);
+        details(&mut menu, &mut local, &mut seq);
+        answer(&mut menu, &mut local, &mut seq, json!("apply"));
+        menu.cancel();
+        let path = local.directory.join("telegram-service.json");
+        let before = std::fs::read(&path).unwrap();
+        menu.start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        let fields = answer(&mut menu, &mut local, &mut seq, json!("runtime"));
+        assert_eq!(
+            fields.frames[0]["options"].as_array().unwrap().len(),
+            super::super::telegram_runtime::FIELDS.len()
+        );
+        answer(&mut menu, &mut local, &mut seq, json!("loop_interval_ms"));
+        assert_eq!(
+            answer(&mut menu, &mut local, &mut seq, json!("0")).frames[0]["mode"],
+            "input"
+        );
+        let review = answer(&mut menu, &mut local, &mut seq, json!("250"));
+        assert_eq!(review.frames[0]["options"][0][0], "cancel");
+        answer(&mut menu, &mut local, &mut seq, json!("cancel"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        menu.start("telegram.details", &mut local, &config(), &mut seq)
+            .unwrap();
+        answer(&mut menu, &mut local, &mut seq, json!("runtime"));
+        answer(&mut menu, &mut local, &mut seq, json!("loop_interval_ms"));
+        answer(&mut menu, &mut local, &mut seq, json!("250"));
+        let confirmed = seq;
+        let result = answer(&mut menu, &mut local, &mut seq, json!("apply"));
+        assert!(!result.frames[0]["text"].as_str().unwrap().contains("Next:"));
+        assert_eq!(
+            ServiceConfig::load(&path).unwrap().runtime.loop_interval_ms,
+            250
+        );
+        assert!(
+            menu.answer(
+                &mut local,
+                &config(),
+                &json!({"op":"reply","id":confirmed,"value":"apply"}),
+                &mut seq
+            )
+            .is_err()
+        );
+        assert!(!local.directory.join("telegram-runtime.json").exists());
     }
     #[test]
     fn quick_connection_derives_bot_id_defaults_to_owner_dm_and_redacts_token() {

@@ -212,18 +212,19 @@ fn daemon_identity_of(path: &std::path::Path) -> Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(format!(
+        Ok(format!(
             "{}:{}:{}:{}:{}",
             metadata.dev(),
             metadata.ino(),
             metadata.len(),
             metadata.mtime(),
             metadata.mtime_nsec()
-        ));
+        ))
     }
     #[cfg(windows)]
     {
-        let file = crate::platform::open_regular(path).map_err(|_| "Cannot inspect launch executable")?;
+        let file =
+            crate::platform::open_regular(path).map_err(|_| "Cannot inspect launch executable")?;
         let (volume, index) = crate::platform::file_identity(&file)
             .map_err(|_| "Cannot identify launch executable")?;
         let modified = metadata
@@ -430,9 +431,6 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(
-            error.contains("review the launch again"),
-            "{error}"
-        );
+        assert!(error.contains("review the launch again"), "{error}");
     }
 }

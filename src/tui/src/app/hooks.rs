@@ -116,7 +116,7 @@ pub(crate) fn windows_native_path(path: &Path) -> PathBuf {
         } else {
             raw
         };
-        return PathBuf::from(text);
+        PathBuf::from(text)
     }
     #[cfg(not(windows))]
     path.to_path_buf()
@@ -131,7 +131,7 @@ pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
                 .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
                 .collect::<Vec<_>>()
         };
-        return fold(left) == fold(right);
+        fold(left) == fold(right)
     }
     #[cfg(not(windows))]
     {
@@ -631,7 +631,10 @@ mod tests {
     #[test]
     fn windows_registration_paths_ignore_separator_case_and_verbatim_prefix() {
         let native = Path::new(r"C:\Users\A\hooks\id.json");
-        assert!(paths_equivalent(native, Path::new(r"C:/Users/A/hooks/id.json")));
+        assert!(paths_equivalent(
+            native,
+            Path::new(r"C:/Users/A/hooks/id.json")
+        ));
         assert!(paths_equivalent(
             native,
             Path::new(r"\\?\C:\Users\a\hooks\id.json")
@@ -640,6 +643,9 @@ mod tests {
             windows_native_path(Path::new(r"C:/Users/A/hooks/id.json")),
             PathBuf::from(r"C:\Users\A\hooks\id.json")
         );
-        assert!(!paths_equivalent(native, Path::new(r"C:\Users\A\hooks\other.json")));
+        assert!(!paths_equivalent(
+            native,
+            Path::new(r"C:\Users\A\hooks\other.json")
+        ));
     }
 }

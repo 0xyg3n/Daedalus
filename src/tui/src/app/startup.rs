@@ -71,6 +71,17 @@ pub struct Launch {
     pub workspace: PathBuf,
 }
 impl Launch {
+    /// Read startup preferences before the splash or update checker starts.
+    pub fn interface_settings(&self) -> Result<super::interface_settings::InterfaceSettings> {
+        let Some(directory) = &self.directory else {
+            return Ok(super::interface_settings::InterfaceSettings::default());
+        };
+        match layouts::read_private(&directory.join("control.json"))? {
+            Some(bytes) => Ok(super::config::ControlConfig::parse(&bytes)?.ui),
+            None if self.first_run => Ok(super::interface_settings::InterfaceSettings::default()),
+            None => Err("Configuration disappeared before interface startup".into()),
+        }
+    }
     pub fn resolve(
         args: &[String],
         cwd: &Path,
@@ -124,8 +135,11 @@ impl Launch {
             directory = cwd.join(directory);
         }
         validate(&directory)?;
+        // Dashboard preferences are optional startup hints. An unreadable hint
+        // must not prevent opening the default private instance. The backend
+        // reports the problem and disables automatic instance scans.
         if explicit.is_none()
-            && let Some(remembered) = super::instances::remembered(&directory)?
+            && let Ok(Some(remembered)) = super::instances::remembered(&directory)
         {
             directory = remembered;
         }
@@ -228,9 +242,7 @@ fn temporary_setup_executable_str(text: &str) -> bool {
         return true;
     }
     // The NSIS package and a replaced image are not hook runtimes.
-    if name == "daedalus-setup.exe"
-        || (name.ends_with(".exe.old") && name.contains("daedalus"))
-    {
+    if name == "daedalus-setup.exe" || (name.ends_with(".exe.old") && name.contains("daedalus")) {
         return true;
     }
     if !matches!(
@@ -285,10 +297,7 @@ pub fn windows_runtime_executable(running: &Path, installed: Option<&Path>) -> P
 /// Replace temporary setup executables inside one hook profile.
 /// Other commands, including registration paths that merely live under Temp, stay.
 /// `Ok(None)` means the profile already names no temporary setup executable.
-pub fn rewrite_temporary_hook_paths(
-    profile: &str,
-    installed: &Path,
-) -> Result<Option<String>> {
+pub fn rewrite_temporary_hook_paths(profile: &str, installed: &Path) -> Result<Option<String>> {
     let installed_text = installed
         .to_str()
         .filter(|text| !text.is_empty())
@@ -353,7 +362,7 @@ fn encode_like(raw: &str, installed: &str) -> Option<String> {
         if slash != doubled * 2 {
             return None;
         }
-        return Some(installed.replace('\\', "\\\\").replace('/', "\\\\"));
+        return Some(installed.replace(['\\', '/'], "\\\\"));
     }
     if raw.contains('/') && !raw.contains('\\') {
         return Some(installed.replace('\\', "/"));
@@ -413,7 +422,8 @@ fn executable_end(span: &str) -> Option<usize> {
             let before_ok = at == 0 || matches!(bytes[at - 1], b'\\' | b'/');
             let next = bytes.get(end).copied();
             let after_ok = next.is_none_or(|byte| !byte.is_ascii_alphanumeric());
-            let short_prefix = marker == "daedalus" && next.is_some_and(|byte| byte == b'.' || byte == b'-');
+            let short_prefix =
+                marker == "daedalus" && next.is_some_and(|byte| byte == b'.' || byte == b'-');
             if before_ok && after_ok && !short_prefix {
                 best = Some(match best {
                     Some((old_at, old_end)) if old_at < at || (old_at == at && old_end >= end) => {
@@ -430,9 +440,7 @@ fn executable_end(span: &str) -> Option<usize> {
     while let Some(relative) = lower[search..].find(".daedalus-install-") {
         let at = search + relative;
         let before_ok = at == 0 || matches!(bytes[at - 1], b'\\' | b'/');
-        if before_ok
-            && let Some(tmp) = lower[at..].find(".tmp")
-        {
+        if before_ok && let Some(tmp) = lower[at..].find(".tmp") {
             let end = at + tmp + 4;
             let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
             if after_ok {
@@ -607,6 +615,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit.directory, Some(base.clone()));
+        let mut customized = config.clone();
+        customized.ui.splash = false;
+        customized.ui.update_check = false;
+        layouts::write_private(&base.join("control.json"), &customized.encode().unwrap()).unwrap();
+        assert_eq!(explicit.interface_settings().unwrap(), customized.ui);
         std::fs::remove_dir_all(&saved).unwrap();
         assert_eq!(
             Launch::resolve(&[], &root, env).unwrap().directory,
@@ -617,6 +630,48 @@ mod tests {
             preference
         );
         assert!(Launch::resolve(&["--config-dir".into(), "".into()], &root, env).is_err());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn bad_dashboard_hints_fall_back_without_writing_but_bad_control_still_refuses() {
+        let f = super::super::dashboard::fixtures::Fixture::new();
+        let directory = f.instance("default");
+        let path = directory.join("dashboard.json");
+        let control = std::fs::read(directory.join("control.json")).unwrap();
+        let env = |name: &str| match name {
+            "DAEDALUS_CONFIG_DIR" => Some(directory.as_os_str().to_owned()),
+            "HOME" => Some(f.0.as_os_str().to_owned()),
+            _ => None,
+        };
+        let oversized = vec![b'x'; 64 * 1024 + 1];
+        for bad in [
+            b"{bad-private-startup-fixture".as_slice(),
+            b"[]",
+            br#"{"instances":[17]}"#,
+            br#"{"discovery":{"scan_processes":17}}"#,
+            &oversized,
+        ] {
+            layouts::write_private(&path, bad).unwrap();
+            let launch = Launch::resolve(&[], &f.0, env).unwrap();
+            assert_eq!(launch.directory, Some(directory.clone()));
+            assert!(!launch.first_run);
+            assert!(launch.interface_settings().is_ok());
+            assert_eq!(std::fs::read(&path).unwrap(), bad);
+            assert_eq!(
+                std::fs::read(directory.join("control.json")).unwrap(),
+                control
+            );
+        }
+        let retained = directory.join("retained-original");
+        std::fs::rename(&path, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &path).unwrap();
+        assert_eq!(
+            Launch::resolve(&[], &f.0, env).unwrap().directory,
+            Some(directory.clone())
+        );
+        assert_eq!(std::fs::read(retained).unwrap(), oversized);
+        layouts::write_private(&directory.join("control.json"), b"bad private control").unwrap();
+        assert!(Launch::resolve(&[], &f.0, env).is_err());
     }
     #[test]
     fn demo_ignores_private_paths_and_needs_no_environment() {
@@ -631,6 +686,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(launch.directory, None);
+        assert_eq!(
+            launch.interface_settings().unwrap(),
+            super::super::interface_settings::InterfaceSettings::default()
+        );
         let command = launch.command(OsStr::new("/installed/daedalus"));
         assert_eq!(command.get_program(), "/installed/daedalus");
         assert_eq!(
@@ -759,14 +818,20 @@ mod tests {
         let rewritten = rewrite_temporary_hook_paths(profile, &installed)
             .unwrap()
             .unwrap();
-        assert!(rewritten.contains(r"C:\\Users\\Public\\AppData\\Local\\Daedalus\\bin\\daedalus.exe"));
+        assert!(
+            rewritten.contains(r"C:\\Users\\Public\\AppData\\Local\\Daedalus\\bin\\daedalus.exe")
+        );
         assert!(!rewritten.contains("nsA1B2.tmp"));
         assert!(rewritten.contains(r"C:\\Users\\Public\\AppData\\Local\\Temp\\hooks.json"));
-        assert!(rewritten.contains(r"C:\\Users\\Temp\\AppData\\Local\\Daedalus\\bin\\daedalus.exe"));
+        assert!(
+            rewritten.contains(r"C:\\Users\\Temp\\AppData\\Local\\Daedalus\\bin\\daedalus.exe")
+        );
         assert!(!rewritten.contains("serve"));
-        assert!(rewrite_temporary_hook_paths(&rewritten, &installed)
-            .unwrap()
-            .is_none());
+        assert!(
+            rewrite_temporary_hook_paths(&rewritten, &installed)
+                .unwrap()
+                .is_none()
+        );
         let forward = r#"{"binary":"C:/Users/Public/AppData/Local/Temp/daedalus.exe"}"#;
         let forward = rewrite_temporary_hook_paths(forward, &installed)
             .unwrap()

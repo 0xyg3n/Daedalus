@@ -14,9 +14,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_CONFIG_BYTES: u64 = super::config::MAX_CONFIG_BYTES as u64;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-const ALLOWED: [&str; 8] = [
+const ALLOWED: [&str; 10] = [
     "version",
     "agent_name",
     "agent_home",
@@ -25,6 +25,8 @@ const ALLOWED: [&str; 8] = [
     "profiles",
     "tmux_sockets",
     "discovery",
+    "ui",
+    "runtime",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +65,20 @@ impl SetupPlan {
         Ok(plan)
     }
 
+    /// Bind the replacement to the configuration from which it was derived.
+    pub fn edit_if_current(
+        directory: &Path,
+        expected: &ControlConfig,
+        updated: ControlConfig,
+    ) -> Result<Self, String> {
+        let plan = Self::edit(directory, updated)?;
+        let actual = ControlConfig::parse(plan.before.as_deref().unwrap())?;
+        if &actual != expected {
+            return Err("Configuration changed; refresh and review it again".into());
+        }
+        Ok(plan)
+    }
+
     pub fn fresh(directory: &Path, config: ControlConfig) -> Result<Self, String> {
         let plan = Self::prepare(directory, config, None, vec![], vec![])?;
         if plan.before.is_some() {
@@ -74,6 +90,7 @@ impl SetupPlan {
     /// Imports only portable settings. Other state requires its own versioned migration.
     pub fn import(directory: &Path, source: &Path) -> Result<Self, String> {
         let bytes = read_regular(source)?.ok_or("Import source does not exist")?;
+        super::control_settings::check_unique_json(&bytes)?;
         let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid import JSON")?;
         let object = value
             .as_object_mut()
@@ -150,7 +167,16 @@ impl SetupPlan {
             .ok_or("Missing configuration directory")?;
         validate_directory(directory)?;
         ensure_private_directory(directory)?;
+        let _configuration = super::telegram_config::configuration_lock(directory)?;
         let _lock = SetupLock::acquire(directory)?;
+        if super::telegram_config::read_private(
+            &directory.join("cutover-retired.json"),
+            MAX_CONFIG_BYTES,
+        )?
+        .is_some()
+        {
+            return Err("Instance is retired; configure its active replacement instead".into());
+        }
         if read_regular(destination)? != self.before {
             return Err("Configuration changed since preview; prepare setup again".into());
         }
@@ -468,6 +494,7 @@ mod tests {
             .tmux_sockets
             .push(crate::test_support::path("/tmp/example/custom-socket").into());
         changed.discovery.automatic = false;
+        changed.ui.preview_interval_ms = 700;
         changed
             .discovery
             .herdr_sessions
@@ -496,6 +523,36 @@ mod tests {
         assert!(fs::read_to_string(source).unwrap().contains("do not copy"));
     }
     #[test]
+    fn edits_reject_stale_configuration_before_and_after_preparation() {
+        let temp = Temp::new();
+        let directory = temp.0.join("target");
+        let original = config();
+        SetupPlan::fresh(&directory, original.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let mut other = original.clone();
+        other.discovery.automatic = false;
+        SetupPlan::edit(&directory, other.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let mut desired = original.clone();
+        desired.ui.colors = false;
+        assert!(SetupPlan::edit_if_current(&directory, &original, desired.clone()).is_err());
+        let plan = SetupPlan::edit_if_current(&directory, &other, desired).unwrap();
+        other.ui.refresh_interval_ms = 3000;
+        SetupPlan::edit(&directory, other.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        assert!(plan.apply().is_err());
+        assert_eq!(
+            ControlConfig::parse(&fs::read(directory.join("control.json")).unwrap()).unwrap(),
+            other
+        );
+    }
+    #[test]
     fn stale_preview_does_not_overwrite() {
         let temp = Temp::new();
         let directory = temp.0.join("target");
@@ -506,6 +563,65 @@ mod tests {
         assert_eq!(
             fs::read(directory.join("control.json")).unwrap(),
             b"concurrent change"
+        );
+    }
+    #[test]
+    fn prepared_control_edit_refuses_retired_instance_and_preserves_bytes() {
+        let temp = Temp::new();
+        let directory = temp.0.join("target");
+        SetupPlan::fresh(&directory, config())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let before = fs::read(directory.join("control.json")).unwrap();
+        let mut changed = config();
+        changed.ui.colors = false;
+        let plan = SetupPlan::edit(&directory, changed).unwrap();
+        crate::core::layouts::write_private(&directory.join("cutover-retired.json"), b"{}")
+            .unwrap();
+        let refused = plan.apply().is_err();
+        assert_eq!(
+            fs::read(directory.join("control.json")).unwrap(),
+            before,
+            "A retired instance was modified"
+        );
+        assert!(refused, "A retired instance accepted a prepared edit");
+        assert!(
+            SetupPlan::edit(&directory, config())
+                .unwrap()
+                .apply()
+                .is_err(),
+            "No-op edits must also refuse retired instances"
+        );
+    }
+    #[test]
+    fn prepared_control_edit_uses_shared_configuration_exclusion() {
+        let temp = Temp::new();
+        let directory = temp.0.join("target");
+        SetupPlan::fresh(&directory, config())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let before = fs::read(directory.join("control.json")).unwrap();
+        let mut changed = config();
+        changed.ui.colors = false;
+        let plan = SetupPlan::edit(&directory, changed.clone()).unwrap();
+        let lock = super::super::telegram_config::configuration_lock(&directory).unwrap();
+        let refused = plan.apply().is_err();
+        drop(lock);
+        assert_eq!(
+            fs::read(directory.join("control.json")).unwrap(),
+            before,
+            "An edit bypassed the shared configuration lock"
+        );
+        assert!(refused);
+        SetupPlan::edit(&directory, changed.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        assert_eq!(
+            ControlConfig::parse(&fs::read(directory.join("control.json")).unwrap()).unwrap(),
+            changed
         );
     }
     #[test]

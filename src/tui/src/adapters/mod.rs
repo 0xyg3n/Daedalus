@@ -14,3 +14,4 @@ pub(crate) mod windows_launch;
 pub mod standalone;
 
 pub mod native;
+pub(crate) mod pane_observations;

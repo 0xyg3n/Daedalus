@@ -84,16 +84,6 @@ fn path(text: &str) -> Result<PathBuf> {
     Ok(p)
 }
 impl Menu {
-    fn current(&self, config: &ControlConfig) -> Spec {
-        let mut spec = Spec::current(config);
-        for tool in &self.detected {
-            if tool.installed && !spec.selection.harnesses.contains(&tool.id) {
-                spec.selection.harnesses.push(tool.id.clone());
-            }
-        }
-        spec
-    }
-
     pub fn pending(&self) -> bool {
         self.pending.is_some() || self.telegram.pending() || self.hooks.pending()
     }
@@ -184,7 +174,7 @@ impl Menu {
             seq,
             "Detected harnesses",
             json!(options),
-            "Installed harnesses are preselected. Review or deselect them before saving. Saved profiles are reused; sign-in remains inside each harness.",
+            if matches!(spec.mode, Mode::Fresh { .. }) { "Installed harnesses are suggested for this fresh setup. Review or deselect them before saving. Sign-in remains inside each harness." } else { "Saved tool selections are preserved. Detection shows what is installed without selecting extra tools. Saved profiles and gateway selection are retained; sign-in remains inside each harness." },
             Stage::Tools(spec),
         )
     }
@@ -290,7 +280,7 @@ impl Menu {
                 &format!("Detected on this computer:\n{}\n\nEach step is optional. Existing agents keep running.",self.detected.iter().map(|d|format!("{} · {}",d.id,d.status)).collect::<Vec<_>>().join("\n")),
                 Stage::Root,
             ),
-            "tools.choose" => self.tools(seq, self.current(config)),
+            "tools.choose" => self.tools(seq, Spec::current(config)),
             _ => Err("Unknown setup action".into()),
         }
     }
@@ -367,9 +357,7 @@ impl Menu {
                     Stage::Local,
                 ),
                 "done" => {
-                    let mut selected = config.clone();
-                    selected.subscriptions = self.current(config).selection.harnesses;
-                    let configuration = source.finish_local_setup(&selected)?;
+                    let configuration = source.finish_local_setup(config)?;
                     Ok(Outcome {
                         configuration: Some(configuration),
                         refresh: true,
@@ -393,7 +381,7 @@ impl Menu {
                 _ => Err("This step is unsupported by the setup menu".into()),
             },
             Stage::Local => match text {
-                "current" => self.tools(seq, self.current(config)),
+                "current" => self.tools(seq, Spec::current(config)),
                 "cutover" => self.input(seq,"Staged destination configuration directory",Stage::CutoverDirectory),
                 "fresh" => self.input(
                     seq,
@@ -730,6 +718,32 @@ mod tests {
     fn config() -> ControlConfig {
         ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/workspace"))).unwrap()
     }
+    #[test]
+    fn audit_configuration_saved_tool_choices_do_not_reselect_installed_tools() {
+        let mut config = config();
+        config.subscriptions = vec!["codex".into(), "gateway".into()];
+        let mut menu = Menu::default();
+        menu.detected
+            .push(super::super::harness_detection::Detected {
+                id: "claude".into(),
+                installed: true,
+                status: "Installed fixture".into(),
+            });
+        let frame = menu.start("tools.choose", &config, &mut 0).unwrap();
+        let options = frame.frames[0]["options"].as_array().unwrap();
+        assert!(
+            options.iter().find(|row| row[0] == "codex").unwrap()[2]
+                .as_str()
+                .unwrap()
+                .contains("Selected")
+        );
+        assert!(
+            options.iter().find(|row| row[0] == "claude").unwrap()[2]
+                .as_str()
+                .unwrap()
+                .contains("Choose to select")
+        );
+    }
     fn reply(menu: &mut Menu, source: &mut Mock, seq: &mut u64, value: Value) -> Result<Outcome> {
         menu.reply(
             &json!({"op":"reply","id":*seq,"value":value}),
@@ -768,7 +782,9 @@ mod tests {
                 .any(|r| r[0] == "tools.signin")
         );
         menu.cancel();
-        let choice = menu.start("tools.choose", &config(), &mut seq).unwrap();
+        let mut saved = config();
+        saved.subscriptions = vec!["codex".into()];
+        let choice = menu.start("tools.choose", &saved, &mut seq).unwrap();
         let codex = choice.frames[0]["options"]
             .as_array()
             .unwrap()
@@ -1002,6 +1018,7 @@ mod tests {
             crate::test_support::path("/tmp/private-profile").into(),
         );
         original.telegram.owner_id = Some("123".into());
+        original.subscriptions = vec!["gateway".into()];
         crate::core::layouts::write_private(
             &directory.join("control.json"),
             &original.encode().unwrap(),
@@ -1057,7 +1074,7 @@ mod tests {
             ControlConfig::parse(&std::fs::read(directory.join("control.json")).unwrap()).unwrap();
         assert_eq!(installed.profiles, original.profiles);
         assert_eq!(installed.telegram, original.telegram);
-        assert_eq!(installed.subscriptions, vec!["codex"]);
+        assert_eq!(installed.subscriptions, vec!["codex", "gateway"]);
         assert!(result.configuration.unwrap().backup.is_some());
         let reviewed =
             Wizard::configure(&directory, installed.clone(), environment, selection).unwrap();

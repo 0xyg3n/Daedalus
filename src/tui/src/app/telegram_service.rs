@@ -1,33 +1,51 @@
 //! Service coordination. The journal owner never waits for Telegram long polling.
 //! A worker cannot acknowledge another batch until the owner durably admits it.
 use super::telegram::{Engine, Outbound, Result};
+use super::timing::Delay;
 use crate::adapters::telegram::{Api, Error};
 use crate::core::journal::Delivery;
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 type Batch = std::result::Result<Vec<Value>, Error>;
 
+struct RetryWait {
+    delivery_id: String,
+    lease: String,
+    delay: Delay,
+}
+
 /// One outbound HTTP request at a time, independent of polling and feeder work.
 /// The owner keeps the lease; the worker has no database or retry authority.
 pub struct Sender {
+    destination_limit: usize,
     request: Option<SyncSender<Box<Delivery>>>,
     response: Receiver<std::result::Result<Value, Error>>,
     stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pending: Option<Box<Delivery>>,
     after: String,
-    retry_at: f64,
+    retry: Option<Delay>,
+    retries: BTreeMap<String, RetryWait>,
 }
 impl Sender {
-    pub fn spawn(mut api: impl Api + Send + 'static) -> Result<Self> {
+    pub fn spawn(api: impl Api + Send + 'static) -> Result<Self> {
+        Self::spawn_configured(api, &Default::default())
+    }
+    pub fn spawn_configured(
+        mut api: impl Api + Send + 'static,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
         let (request, requests) = mpsc::sync_channel::<Box<Delivery>>(1);
         let (responses, response) = mpsc::sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -47,26 +65,45 @@ impl Sender {
             })
             .map_err(|_| "Cannot start Telegram delivery worker")?;
         Ok(Self {
+            destination_limit: settings.outbound_batch_limit as usize,
             request: Some(request),
             response,
             stopped,
             worker: Some(worker),
             pending: None,
             after: String::new(),
-            retry_at: 0.0,
+            retry: None,
+            retries: BTreeMap::new(),
         })
     }
     pub fn tick(&mut self, engine: &mut Engine, bot: i64, now: f64) -> Result<()> {
+        self.tick_at(engine, bot, now, Instant::now())
+    }
+    fn tick_at(&mut self, engine: &mut Engine, bot: i64, now: f64, elapsed: Instant) -> Result<()> {
         if !now.is_finite() || now < 0.0 {
             return Err("Invalid service timestamp".into());
         }
         if let Some(row) = self.pending.as_ref() {
             match self.response.try_recv() {
                 Ok(result) => {
-                    if let Err(Error::RateLimited(delay)) = &result {
-                        self.retry_at = now + (*delay).max(1) as f64;
-                    }
+                    let retry = engine
+                        .outbound_retry_delay(&result)
+                        .map(|duration| Delay::new(elapsed, duration));
+                    let rate_limited = matches!(&result, Err(Error::RateLimited(_)));
                     engine.complete_send(row, result, now)?;
+                    if let Some(delay) = retry {
+                        self.retries.insert(
+                            row.destination.clone(),
+                            RetryWait {
+                                delivery_id: row.delivery_id.clone(),
+                                lease: row.lease_token.clone().ok_or("Missing delivery lease")?,
+                                delay,
+                            },
+                        );
+                        if rate_limited {
+                            self.retry = Some(delay);
+                        }
+                    }
                     self.pending = None;
                 }
                 Err(TryRecvError::Empty) => return Ok(()),
@@ -77,12 +114,32 @@ impl Sender {
                 }
             }
         }
-        if now < self.retry_at || self.stopped.load(Ordering::Acquire) {
+        if self.retry.is_some_and(|delay| !delay.ready(elapsed))
+            || self.stopped.load(Ordering::Acquire)
+        {
             return Ok(());
+        }
+        self.retry = None;
+        // A backward wall-clock adjustment must not make a completed local wait
+        // wait again for the journal's persisted UTC deadline. Only this exact
+        // known-not-sent attempt can release its delay; state and lease changes
+        // make the release a no-op. Unknown effects never enter this collection.
+        let mut ready = Vec::new();
+        for (destination, retry) in &self.retries {
+            if retry.delay.ready(elapsed) {
+                engine
+                    .journal
+                    .release_outbound_retry(&retry.delivery_id, &retry.lease)
+                    .map_err(|e| e.to_string())?;
+                ready.push(destination.clone());
+            }
+        }
+        for destination in ready {
+            self.retries.remove(&destination);
         }
         let destinations = engine
             .journal
-            .destinations("outbound", &self.after, 32)
+            .destinations("outbound", &self.after, self.destination_limit)
             .map_err(|e| e.to_string())?;
         if destinations.is_empty() {
             self.after.clear();
@@ -91,6 +148,10 @@ impl Sender {
         let prefix = format!("telegram:{bot}:");
         for destination in destinations {
             self.after = destination.clone();
+            // A forward adjustment must not bypass a locally scheduled wait.
+            if self.retries.contains_key(&destination) {
+                continue;
+            }
             let Some(chat) = destination
                 .strip_prefix(&prefix)
                 .and_then(|s| s.parse::<i64>().ok())
@@ -139,18 +200,27 @@ impl Drop for Sender {
 }
 
 pub struct Poller {
+    retry_ms: u64,
     request: Option<SyncSender<i64>>,
     response: Receiver<Batch>,
     stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pending: bool,
-    retry_at: f64,
+    retry: Option<Delay>,
 }
 
 impl Poller {
     /// Construct only after verifying the transport's bot identity. Production
-    /// transports must bound every request (BotApi uses a 60-second deadline).
-    pub fn spawn(mut api: impl Api + Send + 'static) -> Result<Self> {
+    /// transports must bound every request; BotApi uses the saved runtime deadlines.
+    pub fn spawn(api: impl Api + Send + 'static) -> Result<Self> {
+        Self::spawn_configured(api, &Default::default())
+    }
+    pub fn spawn_configured(
+        mut api: impl Api + Send + 'static,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
+        let poll_timeout = settings.poll_timeout_seconds;
         let (request, requests) = mpsc::sync_channel(1);
         let (responses, response) = mpsc::sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -162,7 +232,7 @@ impl Poller {
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
-                    let result = api.updates(offset, 50);
+                    let result = api.updates(offset, poll_timeout);
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
@@ -175,18 +245,22 @@ impl Poller {
             })
             .map_err(|_| "Cannot start Telegram polling worker")?;
         Ok(Self {
+            retry_ms: settings.poll_retry_ms,
             request: Some(request),
             response,
             stopped,
             worker: Some(worker),
             pending: false,
-            retry_at: 0.0,
+            retry: None,
         })
     }
 
     /// Returns without waiting on HTTP. Admission failure stops scheduling;
     /// callers must treat it as a service fault, not advance the polling offset.
     pub fn tick(&mut self, engine: &mut Engine, now: f64) -> Result<usize> {
+        self.tick_at(engine, now, Instant::now())
+    }
+    fn tick_at(&mut self, engine: &mut Engine, now: f64, elapsed: Instant) -> Result<usize> {
         if !now.is_finite() || now < 0.0 {
             return Err("Invalid service timestamp".into());
         }
@@ -201,10 +275,13 @@ impl Poller {
                 }
                 Ok(Err(error)) => {
                     self.pending = false;
-                    self.retry_at = now
-                        + match error {
-                            Error::RateLimited(delay) => delay.max(1) as f64,
-                            Error::NotSent | Error::Uncertain => 5.0,
+                    self.retry = Some(Delay::new(
+                        elapsed,
+                        match error {
+                            Error::RateLimited(delay) => Duration::from_secs(delay.max(1)),
+                            Error::NotSent | Error::Uncertain => {
+                                Duration::from_millis(self.retry_ms)
+                            }
                             Error::Rejected(code) => {
                                 self.stopped.store(true, Ordering::Release);
                                 return Err(match code {
@@ -217,7 +294,8 @@ impl Poller {
                                 self.stopped.store(true, Ordering::Release);
                                 return Err("Telegram polling response was invalid; no updates were acknowledged.".into());
                             }
-                        };
+                        },
+                    ));
                 }
                 Err(TryRecvError::Empty) => return Ok(0),
                 Err(TryRecvError::Disconnected) => {
@@ -225,13 +303,17 @@ impl Poller {
                 }
             }
         }
-        if !self.pending && now >= self.retry_at && !self.stopped.load(Ordering::Acquire) {
+        if !self.pending
+            && self.retry.is_none_or(|delay| delay.ready(elapsed))
+            && !self.stopped.load(Ordering::Acquire)
+        {
             self.request
                 .as_ref()
                 .ok_or("Telegram polling worker stopped")?
                 .try_send(engine.cursor()?)
                 .map_err(|_| "Telegram polling worker unavailable")?;
             self.pending = true;
+            self.retry = None;
         }
         Ok(admitted)
     }
@@ -273,6 +355,25 @@ pub struct Owner {
     _instance: OwnerLock,
 }
 struct OwnerLock(std::fs::File);
+pub(crate) struct RuntimeEditGuard {
+    _owner: OwnerLock,
+}
+pub(crate) fn runtime_edit_guard(
+    directory: &std::path::Path,
+    fresh: bool,
+) -> Result<Option<RuntimeEditGuard>> {
+    // Without either configuration or an owner inode, there is no service to
+    // exclude. Keep first-time setup inert; never unlink existing owner files.
+    if fresh {
+        match std::fs::symlink_metadata(directory.join(".telegram-service.lock")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("Service ownership is unavailable".into()),
+            Ok(_) => {}
+        }
+    }
+    lock(&directory.join(".telegram-service.lock")).map(|owner|Some(RuntimeEditGuard{_owner:owner}))
+        .map_err(|_|"Stop Telegram before changing runtime settings; service ownership is active or unavailable".into())
+}
 #[cfg(unix)]
 impl Drop for OwnerLock {
     fn drop(&mut self) {
@@ -371,6 +472,7 @@ fn refresh_policy(
         || current.instance != next.instance
         || current.bot_id != next.bot_id
         || current.token_file != next.token_file
+        || current.runtime != next.runtime
     {
         return Err(
             "Service transport identity changed; restart with the reviewed configuration".into(),
@@ -411,7 +513,13 @@ impl Cursors {
     ) -> Result<()> {
         let events = engine
             .journal
-            .events_page("hooks", &config.instance, &["admitted"], self.hooks, 32)
+            .events_page(
+                "hooks",
+                &config.instance,
+                &["admitted"],
+                self.hooks,
+                config.runtime.hook_batch_limit as usize,
+            )
             .map_err(|e| e.to_string())?;
         if events.is_empty() {
             self.hooks = 0;
@@ -429,6 +537,14 @@ impl Cursors {
                 .hook_bindings
                 .iter()
                 .filter(|b| b.registration_id == registration.id)
+                .filter(|b| {
+                    serde_json::to_value(b).ok().is_some_and(|value| {
+                        engine
+                            .journal
+                            .hook_after_binding_start(&config.instance, &value, event.id)
+                            .unwrap_or(false)
+                    })
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if bindings.is_empty() {
@@ -451,10 +567,11 @@ impl Cursors {
         &mut self,
         engine: &mut Engine,
         feeder: &mut impl super::telegram::Feeder,
+        limit: usize,
     ) -> Result<()> {
         let destinations = engine
             .journal
-            .destinations("inbound", &self.inbound, 8)
+            .destinations("inbound", &self.inbound, limit)
             .map_err(|e| e.to_string())?;
         if destinations.is_empty() {
             self.inbound.clear();
@@ -471,6 +588,20 @@ impl Cursors {
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
+fn confirm_start_configuration(
+    path: &std::path::Path,
+    expected: &super::telegram_config::ServiceConfig,
+) -> Result<()> {
+    let current = super::telegram_config::ServiceConfig::load(path)?;
+    if serde_json::to_value(current).map_err(|_| "Invalid service configuration")?
+        != serde_json::to_value(expected).map_err(|_| "Invalid expected service configuration")?
+    {
+        return Err(
+            "Service configuration changed during startup; review and start it again".into(),
+        );
+    }
+    Ok(())
+}
 #[cfg(unix)]
 extern "C" fn stop_signal(_: libc::c_int) {
     STOP.store(true, Ordering::Release);
@@ -480,16 +611,26 @@ extern "C" fn stop_signal(_: libc::c_int) {
 /// effect of setup, diagnostics or a TUI read operation.
 /// Only getMe is retried here: it is read-only and cannot duplicate a send.
 /// Ownership remains held and the service stays Starting until identity matches.
+#[cfg(test)]
 fn start_engine(
     engine: &mut Engine,
     api: &mut impl Api,
+    wait: impl FnMut(std::time::Duration) -> Result<bool>,
+) -> Result<bool> {
+    start_engine_configured(engine, api, &Default::default(), wait)
+}
+fn start_engine_configured(
+    engine: &mut Engine,
+    api: &mut impl Api,
+    settings: &super::telegram_runtime::Settings,
     mut wait: impl FnMut(std::time::Duration) -> Result<bool>,
 ) -> Result<bool> {
     use std::time::Duration;
     if !wait(Duration::ZERO)? {
         return Ok(false);
     }
-    let mut backoff = 1u64;
+    settings.validate()?;
+    let mut backoff = settings.startup_retry_initial_ms;
     loop {
         match api.get_me() {
             Ok(identity) => {
@@ -499,14 +640,14 @@ fn start_engine(
             Err(error) => {
                 let delay = match error {
                     Error::NotSent | Error::Uncertain | Error::Rejected(500..=599) => backoff,
-                    Error::RateLimited(delay) => delay.max(1),
+                    Error::RateLimited(delay) => delay.max(1).saturating_mul(1000),
                     error => return Err(error.to_string()),
                 };
-                backoff = backoff.saturating_mul(2).min(60);
+                backoff = backoff.saturating_mul(2).min(settings.startup_retry_max_ms);
                 eprintln!(
-                    "Telegram identity verification temporarily unavailable; retrying in {delay}s"
+                    "Telegram identity verification temporarily unavailable; retrying in {delay} ms"
                 );
-                if !wait(Duration::from_secs(delay))? {
+                if !wait(Duration::from_millis(delay))? {
                     return Ok(false);
                 }
             }
@@ -562,6 +703,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     let token = config.read_token()?;
     let global = global_directory()?;
     let owner = Owner::acquire(&directory, &global, config.bot_id)?;
+    confirm_start_configuration(&path, &config)?;
     // Revalidate under ownership: a concurrent cutover may have retired this
     // source after the early read-only check.
     super::cutover::activation_check(&directory)?;
@@ -586,20 +728,34 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         &directory.join("routes.sqlite3"),
     )?)
     .map_err(|e| e.to_string())?;
-    let mut engine = Engine::new(journal, routes, &config.instance, config.bot_id)?;
+    let mut engine = Engine::configured(
+        journal,
+        routes,
+        &config.instance,
+        config.bot_id,
+        &config.runtime,
+    )?;
     engine.configure_hooks(
         registrations.iter().map(|(_, r)| r.clone()).collect(),
         &config.hook_bindings,
     )?;
     apply_grants(&mut engine, &config)?;
-    let mut api = BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?;
+    let mut api = BotApi::configured(
+        &token,
+        &config.runtime,
+        crate::adapters::telegram::Purpose::Service,
+    )
+    .map_err(|e| e.to_string())?;
     // Persist before the first network request, so rollback can never replay
     // an imported cursor after this destination may have contacted Telegram.
     super::cutover::mark_activation(&directory)?;
-    engine.streams = Some(super::telegram_stream::Store::open(&directory)?);
+    engine.streams = Some(super::telegram_stream::Store::open_configured(
+        &directory,
+        &config.runtime,
+    )?);
     STOP.store(false, Ordering::Release);
     let _signals = ServiceSignals::install()?;
-    let started = start_engine(&mut engine, &mut api, |delay| {
+    let started = start_engine_configured(&mut engine, &mut api, &config.runtime, |delay| {
         let began = std::time::Instant::now();
         loop {
             if STOP.load(Ordering::Acquire)
@@ -611,7 +767,9 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
             if remaining.is_zero() {
                 return Ok(true);
             }
-            thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+            thread::sleep(remaining.min(std::time::Duration::from_millis(
+                config.runtime.stop_poll_ms,
+            )));
         }
     })?;
     if !started {
@@ -623,37 +781,60 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
         return Ok(());
     }
     let mut dispatcher = Dispatcher {
-        callbacks: CallbackStore::from_connection(telegram_config::private_connection(
-            &directory.join("telegram-controls.sqlite3"),
-        )?)?,
+        callbacks: CallbackStore::from_connection_configured(
+            telegram_config::private_connection(&directory.join("telegram-controls.sqlite3"))?,
+            &config.runtime,
+        )?,
     };
+    let terminals = Terminals::default().configured(&control.runtime)?;
     let mut operations = NativeOperations {
         instance: config.instance.clone(),
         directory: directory.clone(),
         config: control,
-        terminals: Terminals::default(),
+        terminals: terminals.clone(),
         environment: crate::platform::environment(),
     };
     let mut feeder = NativeFeeder {
+        runtime: config.runtime.clone(),
         instance: config.instance.clone(),
         registrations: config.registrations.clone(),
-        terminals: Terminals::default(),
+        terminals,
     };
     let mut files = super::telegram::PrivateFiles {
         directory: directory.join("attachments"),
     };
-    let mut poller =
-        Poller::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
-    let mut sender =
-        Sender::spawn(BotApi::new(&token, "https://api.telegram.org").map_err(|e| e.to_string())?)?;
-    let mut feedback = super::telegram_feedback::Feedback::spawn(
-        BotApi::feedback(&token).map_err(|e| e.to_string())?,
+    let mut poller = Poller::spawn_configured(
+        BotApi::configured(
+            &token,
+            &config.runtime,
+            crate::adapters::telegram::Purpose::Service,
+        )
+        .map_err(|e| e.to_string())?,
+        &config.runtime,
+    )?;
+    let mut sender = Sender::spawn_configured(
+        BotApi::configured(
+            &token,
+            &config.runtime,
+            crate::adapters::telegram::Purpose::Service,
+        )
+        .map_err(|e| e.to_string())?,
+        &config.runtime,
+    )?;
+    let mut feedback = super::telegram_feedback::Feedback::spawn_configured(
+        BotApi::configured(
+            &token,
+            &config.runtime,
+            crate::adapters::telegram::Purpose::Feedback,
+        )
+        .map_err(|e| e.to_string())?,
+        &config.runtime,
     )?;
     feedback.register_commands();
     drop(token);
     let mut cursors = Cursors::default();
     let mut progress = super::hook_dispatch::Progress::default();
-    let mut checked = 0.0;
+    let mut policy_reload: Option<Delay> = None;
     #[cfg(windows)]
     let mut handoff: Option<std::path::PathBuf> = None;
     let result = (|| -> Result<()> {
@@ -669,7 +850,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                 break;
             }
             let now = clock();
-            if now - checked >= 1.0 {
+            if policy_reload.is_none_or(|delay| delay.ready(Instant::now())) {
                 #[cfg(windows)]
                 if let Some(executable) =
                     super::telegram_supervisor::replacement_for(&running_image)?
@@ -689,13 +870,24 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                         "Instance identity changed; restart with the reviewed configuration".into(),
                     );
                 }
+                operations
+                    .terminals
+                    .apply_settings(&updated_control.runtime)?;
+                feeder.terminals.apply_settings(&updated_control.runtime)?;
                 operations.config = updated_control;
                 config = next;
-                checked = now;
+                policy_reload = Some(Delay::new(
+                    Instant::now(),
+                    Duration::from_millis(config.runtime.policy_reload_ms),
+                ));
             }
             // Durable queued input is independent of Telegram connectivity.
             // Drain it before scheduling network work or processing new updates.
-            cursors.feed(&mut engine, &mut feeder)?;
+            cursors.feed(
+                &mut engine,
+                &mut feeder,
+                config.runtime.inbound_batch_limit as usize,
+            )?;
             poller.tick(&mut engine, now)?;
             engine.stage_controls(&mut dispatcher, &mut operations, &mut api, clock())?;
             engine.stage(&mut api, &mut feeder, &mut files, clock())?;
@@ -708,7 +900,7 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                     clock(),
                 )?;
             }
-            feedback.tick(&mut engine, &config, &registrations, clock());
+            feedback.tick(&mut engine, &config, &registrations);
             sender.tick(&mut engine, config.bot_id, clock())?;
             cursors.hooks(&mut engine, &config, &registrations, clock())?;
             progress.tick(
@@ -718,7 +910,9 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
                 &registrations,
                 clock(),
             )?;
-            thread::sleep(std::time::Duration::from_millis(100));
+            thread::sleep(std::time::Duration::from_millis(
+                config.runtime.loop_interval_ms,
+            ));
         }
         Ok(())
     })();
@@ -746,10 +940,8 @@ pub fn run(args: &[String], out: &mut impl std::io::Write) -> Result<()> {
     // Release the image and the owner lock before any replacement process starts.
     drop(owner);
     #[cfg(windows)]
-    if restart {
-        if let Some(executable) = handoff {
-            super::telegram_supervisor::spawn_installed_service(&directory, &executable)?;
-        }
+    if restart && let Some(executable) = handoff {
+        super::telegram_supervisor::spawn_installed_service(&directory, &executable)?;
     }
     result?;
     poll_result?;
@@ -785,8 +977,8 @@ fn open_service_lock(path: &std::path::Path, create: bool) -> std::io::Result<st
     use windows_sys::Win32::{
         Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
         },
     };
     if create && !path.exists() {
@@ -940,13 +1132,17 @@ impl Drop for ServiceSignals {
 #[cfg(windows)]
 unsafe extern "system" fn console_stop(event: u32) -> windows_sys::core::BOOL {
     use windows_sys::Win32::System::Console::{
-        CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     };
     // Logoff and shutdown are how Windows updates ask a detached console
     // process to leave. Cooperative stop only; this handler never terminates.
     if matches!(
         event,
-        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+        CTRL_C_EVENT
+            | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT
+            | CTRL_LOGOFF_EVENT
+            | CTRL_SHUTDOWN_EVENT
     ) {
         STOP.store(true, Ordering::Release);
         1
@@ -1098,6 +1294,7 @@ mod tests {
         )
         .unwrap();
         let config = ServiceConfig {
+            runtime: Default::default(),
             version: 1,
             instance: "example".into(),
             bot_id: 123,
@@ -1117,6 +1314,7 @@ mod tests {
         )
         .unwrap();
         let mut feeder = NativeFeeder {
+            runtime: Default::default(),
             instance: "example".into(),
             registrations: vec![],
             terminals: Terminals::default(),
@@ -1157,6 +1355,7 @@ mod tests {
             core::routes::{Permission, Scope},
         };
         let config = ServiceConfig {
+            runtime: Default::default(),
             version: 1,
             instance: "example".into(),
             bot_id: 123,
@@ -1180,6 +1379,7 @@ mod tests {
         )
         .unwrap();
         let mut feeder = super::super::telegram_feeder::NativeFeeder {
+            runtime: Default::default(),
             instance: "example".into(),
             registrations: vec![],
             terminals: Terminals::default(),
@@ -1300,6 +1500,157 @@ mod tests {
         sender.shutdown(&mut engine, || 101.0).unwrap();
     }
     #[test]
+    fn send_retry_waits_survive_clock_changes_and_keep_utc_records() {
+        for (outcome, seconds) in [
+            (Error::NotSent, 5),
+            (Error::RateLimited(10), 10),
+            (Error::RateLimited(0), 1),
+        ] {
+            let (started, observed) = mpsc::sync_channel(1);
+            let (complete, response) = mpsc::sync_channel(1);
+            let mut api = SendMock {
+                started,
+                complete: response,
+            };
+            let mut engine = Engine::new(
+                Journal::memory().unwrap(),
+                Registry::memory().unwrap(),
+                "fixture",
+                123,
+            )
+            .unwrap();
+            engine.start(&mut api).unwrap();
+            let mut sender = Sender::spawn(api).unwrap();
+            let start = Instant::now();
+            engine
+                .enqueue_text(42, "first", None, "first", 100.0)
+                .unwrap();
+            sender.tick_at(&mut engine, 123, 100.0, start).unwrap();
+            observed.recv_timeout(Duration::from_secs(2)).unwrap();
+            complete.send(Err(outcome)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let failed_at = start + Duration::from_secs(1);
+            while sender.pending.is_some() {
+                assert!(Instant::now() < deadline);
+                sender.tick_at(&mut engine, 123, 101.0, failed_at).unwrap();
+                thread::yield_now();
+            }
+            assert_eq!(engine.journal.rows().unwrap()[0].state, "retryable");
+            // A forward jump must not bypass the elapsed wait, even though the
+            // durable UTC deadline is now far in the past.
+            for _ in 0..3 {
+                sender
+                    .tick_at(
+                        &mut engine,
+                        123,
+                        1_000_000.0,
+                        failed_at + Duration::from_secs(seconds) - Duration::from_millis(1),
+                    )
+                    .unwrap();
+            }
+            assert!(observed.try_recv().is_err());
+            assert_eq!(engine.journal.rows().unwrap()[0].attempts, 1);
+            // A backward jump must not extend the wait through the durable gate.
+            let ready = failed_at + Duration::from_secs(seconds);
+            for _ in 0..3 {
+                sender.tick_at(&mut engine, 123, 1.0, ready).unwrap();
+                if sender.pending.is_some() {
+                    break;
+                }
+            }
+            observed.recv_timeout(Duration::from_secs(2)).unwrap();
+            let row = &engine.journal.rows().unwrap()[0];
+            assert_eq!(row.attempts, 2);
+            assert_eq!(row.created_at, 100.0);
+            assert_eq!(row.lease_until, Some(91.0));
+            complete
+                .send(Ok(json!({"chat_id":42,"message_id":9})))
+                .unwrap();
+            sender.shutdown(&mut engine, || 2.0).unwrap();
+            assert_eq!(engine.journal.rows().unwrap()[0].state, "delivered");
+        }
+    }
+    #[test]
+    fn rate_limit_wait_covers_other_chats_and_unknown_sends_never_retry() {
+        let (started, observed) = mpsc::sync_channel(1);
+        let (complete, response) = mpsc::sync_channel(1);
+        let mut api = SendMock {
+            started,
+            complete: response,
+        };
+        let mut engine = Engine::new(
+            Journal::memory().unwrap(),
+            Registry::memory().unwrap(),
+            "fixture",
+            123,
+        )
+        .unwrap();
+        engine.start(&mut api).unwrap();
+        let mut sender = Sender::spawn(api).unwrap();
+        let start = Instant::now();
+        engine
+            .enqueue_text(42, "first", None, "first", 100.0)
+            .unwrap();
+        sender.tick_at(&mut engine, 123, 100.0, start).unwrap();
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        complete.send(Err(Error::RateLimited(10))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while sender.pending.is_some() {
+            assert!(Instant::now() < deadline);
+            sender.tick_at(&mut engine, 123, 101.0, start).unwrap();
+            thread::yield_now();
+        }
+        engine
+            .enqueue_text(43, "other", None, "other", 102.0)
+            .unwrap();
+        sender
+            .tick_at(
+                &mut engine,
+                123,
+                1_000_000.0,
+                start + Duration::from_secs(9),
+            )
+            .unwrap();
+        assert!(observed.try_recv().is_err());
+        // Cancellation during the wait must not be undone by delay release.
+        let first = engine.journal.rows().unwrap()[0].delivery_id.clone();
+        engine
+            .journal
+            .abandon(&first, "operator cancelled")
+            .unwrap();
+        sender
+            .tick_at(&mut engine, 123, 1.0, start + Duration::from_secs(10))
+            .unwrap();
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(sender.pending.as_ref().unwrap().payload["chat"], 43);
+        complete.send(Err(Error::Uncertain)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while sender.pending.is_some() {
+            assert!(Instant::now() < deadline);
+            sender
+                .tick_at(&mut engine, 123, 2.0, start + Duration::from_secs(10))
+                .unwrap();
+            thread::yield_now();
+        }
+        for _ in 0..3 {
+            sender
+                .tick_at(
+                    &mut engine,
+                    123,
+                    1_000_000.0,
+                    start + Duration::from_secs(100),
+                )
+                .unwrap();
+        }
+        assert!(observed.try_recv().is_err());
+        let rows = engine.journal.rows().unwrap();
+        assert_eq!(rows[0].state, "cancelled");
+        assert_eq!(rows[1].state, "unknown");
+        assert_eq!(rows[1].attempts, 1);
+        assert!(sender.retries.is_empty());
+        sender.shutdown(&mut engine, || 1_000_000.0).unwrap();
+    }
+    #[test]
     fn ownership_excludes_same_bot_across_instances_and_releases_partial_acquisition() {
         let root = std::env::temp_dir().join(format!(
             "daedalus-owner-{}-{}",
@@ -1384,15 +1735,15 @@ mod tests {
         );
     }
     struct Mock {
-        calls: SyncSender<i64>,
+        calls: SyncSender<(i64, u64)>,
         replies: Receiver<Batch>,
     }
     impl Api for Mock {
         fn get_me(&mut self) -> std::result::Result<Value, Error> {
             Ok(json!({"id":123,"is_bot":true,"username":"example_bot"}))
         }
-        fn updates(&mut self, offset: i64, _: u64) -> Batch {
-            self.calls.send(offset).unwrap();
+        fn updates(&mut self, offset: i64, timeout: u64) -> Batch {
+            self.calls.send((offset, timeout)).unwrap();
             self.replies
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap_or(Err(Error::Uncertain))
@@ -1511,6 +1862,144 @@ mod tests {
         assert_eq!(api.calls, 1);
     }
     #[test]
+    fn configured_poll_wait_and_retry_are_effective_without_advancing_the_cursor() {
+        let (calls, observed) = mpsc::sync_channel(1);
+        let (replies, batches) = mpsc::sync_channel(1);
+        let mut api = Mock {
+            calls,
+            replies: batches,
+        };
+        let mut engine = Engine::new(
+            Journal::memory().unwrap(),
+            Registry::memory().unwrap(),
+            "fixture",
+            123,
+        )
+        .unwrap();
+        engine.start(&mut api).unwrap();
+        let settings = super::super::telegram_runtime::Settings {
+            poll_timeout_seconds: 3,
+            poll_retry_ms: 700,
+            ..Default::default()
+        };
+        let mut poller = Poller::spawn_configured(api, &settings).unwrap();
+        let start = Instant::now();
+        poller.tick_at(&mut engine, 1.0, start).unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 3)
+        );
+        replies.send(Err(Error::Uncertain)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while poller.pending {
+            assert!(Instant::now() < deadline);
+            poller.tick_at(&mut engine, 2.0, start).unwrap();
+            thread::yield_now();
+        }
+        poller
+            .tick_at(&mut engine, 1_000_000.0, start + Duration::from_millis(699))
+            .unwrap();
+        assert!(observed.try_recv().is_err());
+        assert_eq!(engine.cursor().unwrap(), 0);
+        poller
+            .tick_at(&mut engine, 0.0, start + Duration::from_millis(700))
+            .unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 3)
+        );
+        replies.send(Ok(vec![json!({"update_id":7})])).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while engine.cursor().unwrap() != 8 {
+            assert!(Instant::now() < deadline);
+            poller
+                .tick_at(&mut engine, 3.0, start + Duration::from_millis(700))
+                .unwrap();
+            thread::yield_now();
+        }
+        assert_eq!(
+            engine
+                .journal
+                .events("telegram", "123", &["admitted"])
+                .unwrap()[0]
+                .created_at,
+            3.0
+        );
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (8, 3)
+        );
+        replies.send(Ok(vec![])).unwrap();
+        poller.shutdown().unwrap();
+    }
+    #[test]
+    fn configured_startup_backoff_is_bounded_and_server_retry_after_takes_priority() {
+        let mut engine = Engine::new(
+            Journal::memory().unwrap(),
+            Registry::memory().unwrap(),
+            "fixture",
+            123,
+        )
+        .unwrap();
+        let settings = super::super::telegram_runtime::Settings {
+            startup_retry_initial_ms: 250,
+            startup_retry_max_ms: 500,
+            ..Default::default()
+        };
+        let mut api = IdentityApi {
+            replies: [
+                Err(Error::NotSent),
+                Err(Error::Uncertain),
+                Err(Error::Rejected(503)),
+                Err(Error::RateLimited(3)),
+                Ok(json!({"id":123,"is_bot":true,"username":"fixture_bot"})),
+            ]
+            .into(),
+            calls: 0,
+        };
+        let mut waits = Vec::new();
+        assert!(
+            start_engine_configured(&mut engine, &mut api, &settings, |delay| {
+                waits.push(delay.as_millis());
+                Ok(true)
+            })
+            .unwrap()
+        );
+        assert_eq!(waits, [0, 250, 500, 500, 3000]);
+        assert_eq!(api.calls, 5);
+    }
+    #[test]
+    fn startup_refuses_a_changed_configuration_before_connecting() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-start-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let path = root.join("telegram-service.json");
+        let config: super::super::telegram_config::ServiceConfig = serde_json::from_value(
+            json!({"version":1,"instance":"fixture","bot_id":123,"token_file":root.join("token")}),
+        )
+        .unwrap();
+        crate::core::layouts::write_private(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+        confirm_start_configuration(&path, &config).unwrap();
+        let mut changed = config.clone();
+        changed.runtime.loop_interval_ms = 250;
+        crate::core::layouts::write_private(&path, &serde_json::to_vec(&changed).unwrap()).unwrap();
+        let _owner = Owner::acquire(&root, &root.join("locks"), 123).unwrap();
+        assert!(confirm_start_configuration(&path, &config).is_err());
+        assert!(!root.join("telegram-runtime.json").exists());
+    }
+    #[test]
     fn polling_is_nonblocking_and_only_acknowledges_durable_admission() {
         let (calls, observed) = mpsc::sync_channel(1);
         let (replies, batches) = mpsc::sync_channel(1);
@@ -1528,7 +2017,10 @@ mod tests {
         engine.start(&mut api).unwrap();
         let mut poller = Poller::spawn(api).unwrap();
         poller.tick(&mut engine, 1.0).unwrap();
-        assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 50)
+        );
         // HTTP remains blocked on the fixture; owner can still inspect state.
         assert_eq!(poller.tick(&mut engine, 1.0).unwrap(), 0);
         assert_eq!(engine.cursor().unwrap(), 0);
@@ -1539,7 +2031,10 @@ mod tests {
             poller.tick(&mut engine, 2.0).unwrap();
             thread::yield_now();
         }
-        assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 8);
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (8, 50)
+        );
         replies.send(Ok(vec![])).unwrap();
         poller.shutdown().unwrap();
     }
@@ -1560,21 +2055,42 @@ mod tests {
         .unwrap();
         engine.start(&mut api).unwrap();
         let mut poller = Poller::spawn(api).unwrap();
-        poller.tick(&mut engine, 1.0).unwrap();
-        assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        let start = Instant::now();
+        poller.tick_at(&mut engine, 1.0, start).unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 50)
+        );
         replies.send(Err(Error::RateLimited(20))).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while poller.pending {
             assert!(Instant::now() < deadline);
-            poller.tick(&mut engine, 2.0).unwrap();
+            poller.tick_at(&mut engine, 2.0, start).unwrap();
             thread::yield_now();
         }
-        poller.tick(&mut engine, 21.0).unwrap();
+        poller
+            .tick_at(&mut engine, 1_000_000.0, start + Duration::from_secs(19))
+            .unwrap();
         assert!(observed.try_recv().is_err());
         assert_eq!(engine.cursor().unwrap(), 0);
-        poller.tick(&mut engine, 22.0).unwrap();
-        assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        poller
+            .tick_at(&mut engine, 0.0, start + Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 50)
+        );
         replies.send(Ok(vec![])).unwrap();
         poller.shutdown().unwrap();
+    }
+    #[test]
+    fn elapsed_delay_handles_boundaries_and_unbounded_server_waits() {
+        let start = Instant::now();
+        let policy_reload = Delay::new(start, Duration::from_millis(1000));
+        assert!(!policy_reload.ready(start + Duration::from_millis(999)));
+        assert!(policy_reload.ready(start + Duration::from_millis(1000)));
+        assert!(!policy_reload.ready(start - Duration::from_secs(1)));
+        let max_server_wait = Delay::new(start, Duration::from_secs(u64::MAX));
+        assert!(!max_server_wait.ready(start + Duration::from_secs(86400)));
     }
 }

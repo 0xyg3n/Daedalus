@@ -1,10 +1,11 @@
 //! One bounded discovery pass shared by local interfaces.
+use super::discovery_budget::Budget;
 use crate::{
     adapters::terminals::{self, Terminals},
     app::config::ControlConfig,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, path::PathBuf, thread};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, thread};
 
 pub fn run(args: &[String], output: &mut impl std::io::Write) -> Result<(), String> {
     if args == ["--help"] || args == ["-h"] {
@@ -32,7 +33,14 @@ pub fn run(args: &[String], output: &mut impl std::io::Write) -> Result<(), Stri
     let bytes = crate::core::layouts::read_private(&directory.join("control.json"))?
         .ok_or("Configuration missing; run config init or config import")?;
     let config = ControlConfig::parse(&bytes)?;
-    let result = collect(&config, &Terminals::default(), &socket_roots());
+    let mut adapter = Terminals::default().configured(&config.runtime)?;
+    let budget = Arc::new(Budget::new(&config.runtime)?);
+    adapter.discovery_budget = Some(budget.clone());
+    let mut result = collect_with_budget(&config, &adapter, &socket_roots(), &budget);
+    if super::session_actions::enrich_sessions(&directory, &mut result, &adapter).is_err() {
+        result["errors"].as_array_mut().expect("inventory errors").push(json!({"backend":"sessions", "error":"Some harness session metadata could not be verified"}));
+    }
+    budget.finish(&mut result);
     serde_json::to_writer(&mut *output, &result).map_err(|_| "Cannot write inventory")?;
     writeln!(output).map_err(|_| "Cannot write inventory".into())
 }
@@ -57,8 +65,28 @@ enum Endpoint {
 }
 
 pub fn collect(config: &ControlConfig, terminals: &Terminals, socket_roots: &[PathBuf]) -> Value {
-    let (native, warnings) = if config.discovery.automatic {
-        match super::native_terminal::discover() {
+    let budget = match Budget::new(&config.runtime) {
+        Ok(budget) => Arc::new(budget),
+        Err(_) => {
+            return json!({"panes":[],"clients":[],"errors":["Invalid local runtime settings"]});
+        }
+    };
+    collect_with_budget(config, terminals, socket_roots, &budget)
+}
+pub(crate) fn collect_with_budget(
+    config: &ControlConfig,
+    terminals: &Terminals,
+    socket_roots: &[PathBuf],
+    budget: &Arc<Budget>,
+) -> Value {
+    let mut terminals = terminals.clone();
+    if terminals.apply_settings(&config.runtime).is_err() {
+        return json!({"panes":[],"clients":[],"errors":["Invalid local runtime settings"]});
+    }
+    terminals.discovery_budget = Some(budget.clone());
+    let terminals = &terminals;
+    let (native, warnings) = if config.discovery.native_enabled() {
+        match super::native_terminal::discover_with(&config.runtime, budget) {
             Ok((sessions, warnings)) => (
                 sessions
                     .iter()
@@ -71,40 +99,84 @@ pub fn collect(config: &ControlConfig, terminals: &Terminals, socket_roots: &[Pa
     } else {
         (Vec::new(), Vec::new())
     };
-    let mut snapshot = collect_with_socket(
+    let mut snapshot = collect_scoped(
         config,
         terminals,
         socket_roots,
         std::env::var("TMUX").ok().as_deref(),
         &native,
+        budget,
     );
     for error in warnings {
-        snapshot["errors"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"backend":"native", "error":error}));
+        budget.error(&mut snapshot, json!({"backend":"native", "error":error}));
     }
     if config.discovery.automatic {
-        match crate::adapters::standalone::collect(
+        match crate::adapters::standalone::collect_with(
             &terminals.proc_root,
             snapshot["panes"]
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
+            &config.runtime,
+            budget,
         ) {
             Ok(rows) => snapshot["external_terminals"] = rows.into(),
-            Err(error) => snapshot["external_errors"] = json!([error]),
+            Err(error) => {
+                budget.error(&mut snapshot, json!({"backend":"external", "error":error}));
+                if budget.admit_value(&json!(error)).is_ok() {
+                    snapshot["external_errors"] = json!([error]);
+                }
+            }
         }
     }
+    budget.finish(&mut snapshot);
     snapshot
+}
+
+/// Workers take the next available endpoint, while results keep discovery order.
+/// Every worker is joined; a failed endpoint never abandons the remaining queue.
+fn query_endpoints(
+    jobs: &[Endpoint],
+    workers: usize,
+    query: impl Fn(&Endpoint) -> Result<Value, String> + Sync,
+) -> Vec<Result<Value, String>> {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(vec![None; jobs.len()]);
+    thread::scope(|scope| {
+        for _ in 0..jobs.len().min(workers.max(1)) {
+            let next = &next;
+            let results = &results;
+            let query = &query;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(endpoint) = jobs.get(index) else {
+                        break;
+                    };
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| query(endpoint)))
+                            .unwrap_or_else(|_| Err("Discovery worker failed".into()));
+                    results.lock().expect("discovery results lock")[index] = Some(result);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .expect("discovery results lock")
+        .into_iter()
+        .map(|row| row.unwrap_or_else(|| Err("Discovery worker failed".into())))
+        .collect()
 }
 
 fn socket_candidates(config: &ControlConfig, current_tmux: Option<&str>) -> Vec<PathBuf> {
     let mut sockets: Vec<PathBuf> = config.tmux_sockets.iter().map(PathBuf::from).collect();
     if config.discovery.automatic
-        && let Some(socket) = current_tmux.and_then(|value| value.split(',').next())
-        && std::path::Path::new(socket).is_absolute()
-        && !socket.chars().any(char::is_control)
+        && let Some(socket) = current_tmux.and_then(terminals::active_tmux_socket)
     {
         sockets.push(socket.into());
     }
@@ -159,16 +231,47 @@ fn stale_tmux_socket(path: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 fn collect_with_socket(
+    config: &ControlConfig,
+    terminals: &Terminals,
+    roots: &[PathBuf],
+    current: Option<&str>,
+    native: &[Value],
+) -> Value {
+    let budget = match Budget::new(&config.runtime) {
+        Ok(budget) => Arc::new(budget),
+        Err(error) => {
+            return json!({"panes":[],"clients":[],"errors":[{"backend":"discovery","error":error}]});
+        }
+    };
+    let mut snapshot = collect_scoped(config, terminals, roots, current, native, &budget);
+    budget.finish(&mut snapshot);
+    snapshot
+}
+fn collect_scoped(
     config: &ControlConfig,
     terminals: &Terminals,
     socket_roots: &[PathBuf],
     current_tmux: Option<&str>,
     native_panes: &[Value],
+    budget: &Arc<Budget>,
 ) -> Value {
     let mut snapshot = json!({"panes":[], "clients":[], "workspaces":[], "tabs":[], "layouts":[], "herdr_sessions":[], "tmux_sessions":[], "herdr_focus":[], "errors":[], "unavailable":[], "stale_sockets":[]});
-    if config.discovery.automatic {
-        snapshot["panes"] = native_panes.to_vec().into();
+    let mut terminals = match terminals.configured(&config.runtime) {
+        Ok(terminals) => terminals,
+        Err(error) => {
+            snapshot["errors"] = json!([{"backend":"discovery", "error":error}]);
+            return snapshot;
+        }
+    };
+    terminals.discovery_budget = Some(budget.clone());
+    if config.discovery.native_enabled() {
+        for pane in native_panes {
+            if budget.admit_value(pane).is_ok() {
+                snapshot["panes"].as_array_mut().unwrap().push(pane.clone());
+            }
+        }
     }
     let sockets = socket_candidates(config, current_tmux);
     let roots = if config.discovery.automatic {
@@ -180,103 +283,117 @@ fn collect_with_socket(
     let uid = unsafe { libc::geteuid() };
     #[cfg(windows)]
     let uid = 0; // tmux socket discovery is Unix-only.
-    let sockets = terminals::discover_sockets(&sockets, roots, uid);
-    let mut jobs: Vec<Endpoint> = sockets
-        .into_iter()
-        .filter_map(|p| p.to_str().map(|s| Endpoint::Tmux(s.into())))
-        .collect();
+    let sockets = terminals::discover_sockets_with(
+        &sockets,
+        roots,
+        uid,
+        config.runtime.discovery_socket_scan_limit as usize,
+        Some(budget.deadline),
+    );
+    for error in sockets.errors {
+        budget.error(&mut snapshot, json!({"backend":"discovery", "error":error}));
+    }
+    let mut jobs = Vec::new();
+    for path in sockets.paths {
+        if let Some(path) = path.to_str() {
+            jobs.push(Endpoint::Tmux(path.into()));
+        } else {
+            budget.error(
+                &mut snapshot,
+                json!({"backend":"discovery", "error":"Socket path is not UTF-8"}),
+            );
+        }
+    }
     let mut sessions: BTreeSet<String> = config.discovery.herdr_sessions.iter().cloned().collect();
     if config.discovery.automatic && terminals::binary_available(&terminals.herdr) {
-        match terminals.herdr_sessions() {
+        match terminals.herdr_sessions(config.runtime.discovery_endpoint_limit as usize) {
             Ok(discovered) => sessions.extend(discovered),
-            Err(error) => snapshot["errors"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"backend":"herdr", "error":error})),
+            Err(error) => budget.error(&mut snapshot, json!({"backend":"herdr", "error":error})),
         }
     }
     jobs.extend(sessions.into_iter().map(Endpoint::Herdr));
-    // At most eight owned queries; joining also prevents detached discovery
-    // workers from surviving the request that created them.
-    for chunk in jobs.chunks(8) {
-        thread::scope(|scope| {
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|endpoint| {
-                    (
-                        endpoint,
-                        scope.spawn(move || match endpoint {
-                            Endpoint::Tmux(socket) => terminals.tmux_inventory(socket),
-                            Endpoint::Herdr(server) => terminals.herdr_inventory(server),
-                        }),
-                    )
-                })
-                .collect();
-            for (endpoint, handle) in handles {
-                let result = handle
-                    .join()
-                    .unwrap_or_else(|_| Err("Discovery worker failed".into()));
-                match result {
-                    Ok(data) => {
-                        for key in [
-                            "panes",
-                            "clients",
-                            "workspaces",
-                            "tabs",
-                            "layouts",
-                            "herdr_focus",
-                        ] {
-                            if let Some(rows) = data[key].as_array() {
-                                snapshot[key]
-                                    .as_array_mut()
-                                    .unwrap()
-                                    .extend(rows.iter().cloned());
-                            }
-                        }
-                        match endpoint {
-                            Endpoint::Herdr(server) => snapshot["herdr_sessions"]
-                                .as_array_mut()
-                                .unwrap()
-                                .push(json!(server)),
-                            Endpoint::Tmux(socket) => {
-                                let names: BTreeSet<_> = data["panes"]
-                                    .as_array()
-                                    .into_iter()
-                                    .flatten()
-                                    .filter_map(|p| p["session"].as_str())
-                                    .collect();
-                                for name in names {
-                                    snapshot["tmux_sessions"]
-                                        .as_array_mut()
-                                        .unwrap()
-                                        .push(json!({"socket":socket,"session":name}));
-                                }
-                            }
+    if jobs.len() > config.runtime.discovery_endpoint_limit as usize {
+        jobs.truncate(config.runtime.discovery_endpoint_limit as usize);
+        budget.error(&mut snapshot, json!({"backend":"discovery", "error":"Terminal endpoint limit reached; raise runtime.discovery_endpoint_limit or reduce discovery scope"}));
+    }
+    let results = query_endpoints(
+        &jobs,
+        config.runtime.discovery_workers as usize,
+        |endpoint| {
+            budget.time_left()?;
+            let data = match endpoint {
+                Endpoint::Tmux(socket) => terminals.tmux_inventory(socket),
+                Endpoint::Herdr(server) => terminals.herdr_inventory(server),
+            }?;
+            budget.admit_value(&data)?;
+            Ok(data)
+        },
+    );
+    for (endpoint, result) in jobs.iter().zip(results) {
+        match result {
+            Ok(mut data) => {
+                let tmux_names: BTreeSet<String> = data["panes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p["session"].as_str().map(str::to_owned))
+                    .collect();
+                for key in [
+                    "panes",
+                    "clients",
+                    "workspaces",
+                    "tabs",
+                    "layouts",
+                    "herdr_focus",
+                ] {
+                    if let Some(Value::Array(rows)) = data.get_mut(key) {
+                        snapshot[key].as_array_mut().unwrap().append(rows);
+                    }
+                }
+                match endpoint {
+                    Endpoint::Herdr(server) => {
+                        let row = json!(server);
+                        if budget.admit_value(&row).is_ok() {
+                            snapshot["herdr_sessions"].as_array_mut().unwrap().push(row);
                         }
                     }
-                    Err(error) => {
-                        #[cfg(unix)]
-                        if let Endpoint::Tmux(socket) = endpoint
-                            && stale_tmux_socket(socket)
-                        {
-                            snapshot["stale_sockets"]
-                                .as_array_mut()
-                                .unwrap()
-                                .push(json!({"backend":"tmux","endpoint":socket,"error":error}));
-                            continue;
+                    Endpoint::Tmux(socket) => {
+                        for name in tmux_names {
+                            let row = json!({"socket":socket,"session":name});
+                            if budget.admit_value(&row).is_ok() {
+                                snapshot["tmux_sessions"].as_array_mut().unwrap().push(row);
+                            }
                         }
-                        let (backend, endpoint) = match endpoint {
-                            Endpoint::Tmux(s) => ("tmux", s),
-                            Endpoint::Herdr(s) => ("herdr", s),
-                        };
-                        snapshot["errors"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(json!({"backend":backend,"endpoint":endpoint,"error":error}));
                     }
                 }
             }
-        });
+            Err(error) => {
+                #[cfg(unix)]
+                if let Endpoint::Tmux(socket) = endpoint
+                    && stale_tmux_socket(socket)
+                {
+                    let row = json!({"backend":"tmux","endpoint":socket,"error":error});
+                    if budget.admit_value(&row).is_ok() {
+                        snapshot["stale_sockets"].as_array_mut().unwrap().push(row);
+                    }
+                    continue;
+                }
+                let (backend, endpoint) = match endpoint {
+                    Endpoint::Tmux(s) => ("tmux", s),
+                    Endpoint::Herdr(s) => ("herdr", s),
+                };
+                budget.error(
+                    &mut snapshot,
+                    json!({"backend":backend,"endpoint":endpoint,"error":error}),
+                );
+            }
+        }
+    }
+    if crate::adapters::pane_observations::normalize(&mut snapshot) > 0 {
+        budget.error(
+            &mut snapshot,
+            json!({"backend":"discovery","error":crate::adapters::pane_observations::WARNING}),
+        );
     }
     snapshot["external_terminals"] = json!([]);
     snapshot["external_errors"] = json!([]);
@@ -292,6 +409,112 @@ fn collect_with_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workers_advance_past_a_slow_endpoint_join_every_job_and_keep_result_order() {
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        let jobs: Vec<_> = (0..6).map(|n| Endpoint::Herdr(n.to_string())).collect();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let calls: Vec<_> = jobs.iter().map(|_| AtomicUsize::new(0)).collect();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let started_rx = Mutex::new(started_rx);
+        let release_rx = Mutex::new(release_rx);
+        struct Active<'a>(&'a AtomicUsize);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let rows = query_endpoints(&jobs, 2, |endpoint| {
+            let Endpoint::Herdr(n) = endpoint else {
+                unreachable!()
+            };
+            let n: usize = n.parse().unwrap();
+            calls[n].fetch_add(1, Ordering::SeqCst);
+            peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            let _guard = Active(&active);
+            match n {
+                0 => {
+                    started_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "later endpoint was blocked behind the first batch")?;
+                }
+                2 => {
+                    started_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "first endpoint never started")?;
+                    release_tx.send(()).unwrap();
+                }
+                3 => return Err("endpoint refused".into()),
+                4 => panic!("isolated worker fixture"),
+                _ => {}
+            }
+            Ok(json!(n))
+        });
+        assert_eq!(
+            rows,
+            vec![
+                Ok(json!(0)),
+                Ok(json!(1)),
+                Ok(json!(2)),
+                Err("endpoint refused".into()),
+                Err("Discovery worker failed".into()),
+                Ok(json!(5))
+            ]
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert!(calls.iter().all(|n| n.load(Ordering::SeqCst) == 1));
+        assert!(query_endpoints(&[], 2, |_| unreachable!()).is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_socket_scan_is_reported_as_incomplete() {
+        let root = std::env::temp_dir().join(format!(
+            "dd-inventory-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let uid = unsafe { libc::geteuid() };
+        // A regular file is deterministic even when the tests run as root.
+        crate::core::layouts::write_private(&root.join(format!("tmux-{uid}")), b"not a directory")
+            .unwrap();
+        let config = ControlConfig::fresh(&root).unwrap();
+        let terminals = Terminals {
+            herdr: root.join("missing-herdr"),
+            ..Terminals::default()
+        };
+        let snapshot = collect_with_socket(&config, &terminals, &[root], None, &[]);
+        assert!(
+            snapshot["errors"].as_array().unwrap().iter().any(|error| {
+                error["error"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("socket directory"))
+            }),
+            "a failed scan must not claim complete discovery: {snapshot}"
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn stale_socket_does_not_hide_live_query_failure_or_delete_endpoints() {
@@ -404,6 +627,18 @@ mod tests {
         assert!(socket_candidates(&config, Some("/custom/server.sock,123,0")).is_empty());
         config.discovery.automatic = true;
         assert!(socket_candidates(&config, Some("relative,123,0")).is_empty());
+    }
+    #[test]
+    fn active_tmux_socket_keeps_commas_before_pid_and_index() {
+        let config = ControlConfig::fresh(std::path::Path::new(crate::test_support::path(
+            "/tmp/project",
+        )))
+        .unwrap();
+        let socket = crate::test_support::path("/custom/server, work.sock");
+        assert_eq!(
+            socket_candidates(&config, Some(&format!("{socket},123,0"))),
+            [PathBuf::from(socket)]
+        );
     }
     #[test]
     fn disabled_discovery_does_not_probe_unconfigured_endpoints() {

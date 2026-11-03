@@ -1,6 +1,6 @@
 //! Bounded discovery of private native instances. Process names and saved PID
 //! records are candidates only; the supervisor proves ownership and incarnation.
-use super::{config::ControlConfig, telegram_config, telegram_supervisor};
+use super::{config::ControlConfig, dashboard, telegram_config, telegram_supervisor};
 use crate::core::layouts;
 use serde_json::{Value, json};
 use std::{
@@ -18,9 +18,6 @@ use std::{
     },
 };
 type Result<T> = std::result::Result<T, String>;
-const MAX_INSTANCES: usize = 128;
-#[cfg(unix)]
-const MAX_PROCESSES: usize = 4096;
 
 #[cfg(unix)]
 fn private_directory(path: &Path) -> Result<()> {
@@ -31,7 +28,7 @@ fn private_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn configuration(path: &Path) -> Result<ControlConfig> {
+pub(crate) fn configuration(path: &Path) -> Result<ControlConfig> {
     private_directory(path)?;
     ControlConfig::parse(
         &telegram_config::read_private(&path.join("control.json"), 1024 * 1024)?
@@ -39,36 +36,15 @@ fn configuration(path: &Path) -> Result<ControlConfig> {
     )
 }
 fn preferences(directory: &Path) -> Result<Value> {
-    let Some(bytes) = layouts::read_private_limit(&directory.join("dashboard.json"), 64 * 1024)?
-    else {
-        return Ok(json!({}));
-    };
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid dashboard preferences")?;
-    if !value.is_object() {
-        return Err("Invalid dashboard preferences".into());
-    }
-    Ok(value)
+    Ok(dashboard::State::load(directory)?.value)
 }
 /// Explicitly configured instance roots, without process or home-tree scanning.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(crate) fn saved_directories(preference_directory: &Path) -> Result<BTreeSet<PathBuf>> {
-    let mut paths = BTreeSet::from([preference_directory.to_path_buf()]);
-    let value = preferences(preference_directory)?;
-    for path in value["instances"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(std::iter::once(&value["last_instance"]))
-    {
-        if let Some(path) = path.as_str() {
-            let path = PathBuf::from(path);
-            layouts::check_path(&path)?;
-            paths.insert(path);
-            if paths.len() > MAX_INSTANCES {
-                return Err("Saved instance limit reached".into());
-            }
-        }
+    let state = dashboard::State::load(preference_directory)?;
+    let paths = dashboard::saved_paths(preference_directory, &state.value)?;
+    if paths.len() as u64 > state.settings.instance_limit {
+        return Err("Saved instance limit reached".into());
     }
     Ok(paths)
 }
@@ -88,14 +64,11 @@ pub fn remember(preference_directory: &Path, selected: &Path) -> Result<()> {
         }
     }
     paths.insert(selected.into());
-    if paths.len() > MAX_INSTANCES {
-        return Err("Saved instance limit reached".into());
-    }
     value["last_instance"] = json!(selected);
     value["instances"] = json!(paths);
     layouts::write_private(
         &preference_directory.join("dashboard.json"),
-        &serde_json::to_vec_pretty(&value).map_err(|_| "Cannot encode dashboard preferences")?,
+        &dashboard::encode(preference_directory, &value)?,
     )
 }
 /// A saved selection never turns a deleted or malformed configuration into a
@@ -109,7 +82,7 @@ pub fn remembered(preference_directory: &Path) -> Result<Option<PathBuf>> {
     Ok(configuration(&path).is_ok().then_some(path))
 }
 #[cfg(unix)]
-fn process_candidate(process: &Path) -> Result<Option<PathBuf>> {
+fn process_candidate(process: &Path, argv_limit: u64) -> Result<Option<PathBuf>> {
     let meta = fs::symlink_metadata(process).map_err(|_| "Process unavailable")?;
     if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
         return Ok(None);
@@ -123,10 +96,10 @@ fn process_candidate(process: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let mut bytes = Vec::new();
-    file.take(8193)
+    file.take(argv_limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "Process unavailable")?;
-    if bytes.len() > 8192 {
+    if bytes.len() as u64 > argv_limit {
         return Ok(None);
     }
     let args = bytes
@@ -156,26 +129,52 @@ pub fn discover(
 ) -> Result<Value> {
     let mut candidates = BTreeSet::from([current.to_path_buf()]);
     let mut warnings = Vec::new();
-    match preferences(preference_directory) {
-        Ok(value) => {
-            for path in value["instances"]
+    let mut preferences_available = true;
+    let mut settings = dashboard::Settings {
+        scan_default_roots: false,
+        scan_processes: false,
+        ..Default::default()
+    };
+    match dashboard::State::load(preference_directory) {
+        Ok(state) => {
+            settings = state.settings;
+            for path in state.value["instances"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .chain(std::iter::once(&value["last_instance"]))
+                .chain(std::iter::once(&state.value["last_instance"]))
             {
                 if let Some(path) = path.as_str() {
-                    if candidates.len() >= MAX_INSTANCES {
+                    let path = PathBuf::from(path);
+                    if !candidates.contains(&path)
+                        && candidates.len() as u64 >= settings.instance_limit
+                    {
                         warnings.push("Saved instance limit reached");
                         break;
                     }
-                    candidates.insert(path.into());
+                    candidates.insert(path);
                 }
             }
         }
-        Err(_) => warnings.push("Saved instance preferences could not be read"),
+        Err(_) => {
+            preferences_available = false;
+            warnings.push(
+                "Saved instance preferences could not be read; automatic discovery is disabled",
+            );
+        }
     }
-    for root in config_roots.iter().take(16) {
+    let mut roots = settings.search_roots.clone();
+    if settings.scan_default_roots {
+        for root in config_roots {
+            if !roots.contains(root) {
+                roots.push(root.clone());
+            }
+        }
+    }
+    if roots.len() as u64 > settings.root_limit {
+        warnings.push("Configuration search root limit reached");
+    }
+    for root in roots.iter().take(settings.root_limit as usize) {
         if layouts::check_path(root).is_err() {
             warnings.push("Unsafe configuration search root skipped");
             continue;
@@ -184,7 +183,9 @@ pub fn discover(
             continue;
         };
         for (index, entry) in entries.enumerate() {
-            if index >= 1024 || candidates.len() >= MAX_INSTANCES {
+            if index as u64 >= settings.entries_per_root
+                || candidates.len() as u64 >= settings.instance_limit
+            {
                 warnings.push("Configuration discovery limit reached");
                 break;
             }
@@ -199,11 +200,11 @@ pub fn discover(
         }
     }
     #[cfg(unix)]
-    {
+    if settings.scan_processes {
         let mut process_candidates = Vec::new();
         if let Ok(entries) = fs::read_dir(proc_root) {
             for (index, entry) in entries.enumerate() {
-                if index >= MAX_PROCESSES {
+                if index as u64 >= settings.process_limit {
                     warnings.push("Process discovery limit reached");
                     break;
                 }
@@ -217,8 +218,9 @@ pub fn discover(
                 else {
                     continue;
                 };
-                if let Ok(Some(path)) = process_candidate(&entry.path()) {
-                    if process_candidates.len() >= MAX_INSTANCES {
+                if let Ok(Some(path)) = process_candidate(&entry.path(), settings.argv_limit_bytes)
+                {
+                    if process_candidates.len() as u64 >= settings.instance_limit {
                         warnings.push("Process instance limit reached");
                         break;
                     }
@@ -230,7 +232,8 @@ pub fn discover(
         }
         // Outside known roots, only verified native owners may introduce a candidate.
         for (path, pid) in process_candidates {
-            if candidates.len() >= MAX_INSTANCES {
+            if candidates.len() as u64 >= settings.instance_limit {
+                warnings.push("Process instance candidate limit reached");
                 break;
             }
             if telegram_supervisor::inspect_at(&path, proc_root).is_ok_and(|status| {
@@ -241,7 +244,9 @@ pub fn discover(
         }
     }
     #[cfg(windows)]
-    warnings.push("Arbitrary Windows process discovery is unavailable; configured and saved instance directories are checked explicitly");
+    if settings.scan_processes {
+        warnings.push("Arbitrary Windows process discovery is unavailable; configured and saved instance directories are checked explicitly");
+    }
     let mut instances = Vec::new();
     for path in candidates {
         let Ok(config) = configuration(&path) else {
@@ -272,7 +277,9 @@ pub fn discover(
     instances.sort_by(|a, b| a["directory"].as_str().cmp(&b["directory"].as_str()));
     warnings.sort();
     warnings.dedup();
-    Ok(json!({"instances":instances,"warnings":warnings}))
+    Ok(
+        json!({"instances":instances,"warnings":warnings,"dashboard_preferences_available":preferences_available}),
+    )
 }
 
 #[cfg(windows)]
@@ -314,6 +321,7 @@ mod tests {
         }
         fn service(&self, directory: &Path) -> super::super::telegram_service::Owner {
             let config = telegram_config::ServiceConfig {
+                runtime: Default::default(),
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 123,
@@ -450,6 +458,201 @@ mod tests {
             .unwrap();
         assert_eq!(saved["service_status"], "stopped");
         assert_eq!(saved["services"], json!([]));
+    }
+    #[test]
+    fn saved_directory_quota_includes_default_and_duplicate_selections_consistently() {
+        let f = Fixture::new();
+        let base = f.config("base");
+        let selected = f.config("selected");
+        let other = f.config("other");
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            br#"{"discovery":{"instance_limit":2}}"#,
+        )
+        .unwrap();
+        remember(&base, &selected).unwrap();
+        remember(&base, &selected).unwrap();
+        assert_eq!(
+            saved_directories(&base).unwrap(),
+            BTreeSet::from([base.clone(), selected.clone()])
+        );
+        let before = fs::read(base.join("dashboard.json")).unwrap();
+        assert!(remember(&base, &other).is_err());
+        assert_eq!(fs::read(base.join("dashboard.json")).unwrap(), before);
+    }
+    #[test]
+    fn configured_root_entry_process_and_candidate_limits_report_partial_discovery() {
+        let f = Fixture::new();
+        let base = f.config("base");
+        f.config("first/a");
+        f.config("first/b");
+        f.config("second/a");
+        let proc = f.0.join("proc");
+        let settings = dashboard::Settings {
+            scan_processes: false,
+            root_limit: 1,
+            entries_per_root: 1,
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":settings}).to_string().into_bytes(),
+        )
+        .unwrap();
+        let report = discover(
+            &base,
+            &base,
+            &[f.0.join("first"), f.0.join("second")],
+            &proc,
+        )
+        .unwrap();
+        assert_eq!(report["instances"].as_array().unwrap().len(), 2);
+        let warnings = report["warnings"].to_string();
+        assert!(warnings.contains("search root limit"));
+        assert!(warnings.contains("Configuration discovery limit"));
+        let settings = dashboard::Settings {
+            instance_limit: 1,
+            scan_processes: false,
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":settings}).to_string().into_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            discover(&base, &base, &[f.0.join("first")], &proc).unwrap()["instances"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        layouts::write_private(&proc.join("1/cmdline"), b"not-a-service\0").unwrap();
+        layouts::write_private(&proc.join("2/cmdline"), b"not-a-service\0").unwrap();
+        let settings = dashboard::Settings {
+            scan_default_roots: false,
+            process_limit: 1,
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":settings}).to_string().into_bytes(),
+        )
+        .unwrap();
+        let report = discover(&base, &base, &[], &proc).unwrap();
+        assert_eq!(report["instances"].as_array().unwrap().len(), 1);
+        assert!(
+            report["warnings"]
+                .to_string()
+                .contains("Process discovery limit")
+        );
+    }
+    #[test]
+    fn configured_sources_and_budgets_change_discovery_without_inventing_owners() {
+        let f = Fixture::new();
+        let base = f.config("base");
+        let explicit = f.config("explicit/found");
+        let implicit = f.config("implicit/found");
+        let external = f.config("external");
+        let _owner = f.service(&external);
+        let settings = dashboard::Settings {
+            scan_default_roots: false,
+            scan_processes: false,
+            search_roots: vec![f.0.join("explicit")],
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":settings}).to_string().into_bytes(),
+        )
+        .unwrap();
+        let report = discover(&base, &base, &[f.0.join("implicit")], &f.0.join("proc")).unwrap();
+        assert_eq!(report["instances"].as_array().unwrap().len(), 2);
+        assert!(
+            report["instances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["directory"] == json!(explicit))
+        );
+        assert!(!report.to_string().contains(implicit.to_str().unwrap()));
+        assert!(!report.to_string().contains(external.to_str().unwrap()));
+        let settings = dashboard::Settings {
+            scan_default_roots: false,
+            scan_processes: true,
+            argv_limit_bytes: 1024,
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":settings}).to_string().into_bytes(),
+        )
+        .unwrap();
+        let argv = f.0.join("proc/17/cmdline");
+        let before = fs::read(&argv).unwrap();
+        let mut long = before.clone();
+        long.extend(vec![0; 1024]);
+        layouts::write_private(&argv, &long).unwrap();
+        assert_eq!(
+            discover(&base, &base, &[], &f.0.join("proc")).unwrap()["instances"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        layouts::write_private(&argv, &before).unwrap();
+        assert_eq!(
+            discover(&base, &base, &[], &f.0.join("proc")).unwrap()["instances"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let limited = dashboard::Settings {
+            scan_default_roots: false,
+            instance_limit: 1,
+            ..Default::default()
+        };
+        layouts::write_private(
+            &base.join("dashboard.json"),
+            &json!({"discovery":limited}).to_string().into_bytes(),
+        )
+        .unwrap();
+        let limited = discover(&base, &base, &[], &f.0.join("proc")).unwrap();
+        assert_eq!(limited["dashboard_preferences_available"], true);
+        assert_eq!(limited["instances"].as_array().unwrap().len(), 1);
+        assert!(
+            limited["warnings"]
+                .to_string()
+                .contains("Process instance candidate limit")
+        );
+        layouts::write_private(&base.join("dashboard.json"), b"{invalid").unwrap();
+        let report = discover(&base, &base, &[f.0.join("implicit")], &f.0.join("proc")).unwrap();
+        assert_eq!(report["dashboard_preferences_available"], false);
+        assert_eq!(report["instances"].as_array().unwrap().len(), 1);
+        assert!(!report["warnings"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn compact_preferences_expansion_is_refused_before_replacing_readable_bytes() {
+        let f = Fixture::new();
+        let base = f.config("base");
+        let selected = f.config("selected");
+        let value = json!({"preserved":vec![0;10000]});
+        let before = serde_json::to_vec(&value).unwrap();
+        assert!(before.len() < 64 * 1024);
+        layouts::write_private(&base.join("dashboard.json"), &before).unwrap();
+        assert!(preferences(&base).is_ok());
+        let result = remember(&base, &selected);
+        let after = fs::read(base.join("dashboard.json")).unwrap();
+        assert!(
+            result.is_err(),
+            "Save wrote {} bytes from a readable {}-byte fixture; reload succeeded={}",
+            after.len(),
+            before.len(),
+            preferences(&base).is_ok()
+        );
+        assert!(result.unwrap_err().contains("64 KiB"));
+        assert_eq!(after, before);
     }
     #[test]
     fn preferences_preserve_other_keys_and_deleted_selection_does_not_redirect_startup() {

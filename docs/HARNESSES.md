@@ -28,6 +28,29 @@ the needed option. Pi uses its session file and header. A resumed or forked proc
 needs its own hook registration. Handoff passes reviewed context to another tool; it
 does not copy the first tool's internal state.
 
+Checkpoint capture and Codex hook binding distinguish launch selectors from
+conversation IDs. Known Codex options may precede `resume` or `fork`; a canonical
+UUID can identify the selected conversation. A resume name needs a reported native
+ID. Literal arguments after `--` are not session flags. Forks need an explicit
+parent UUID and a distinct reported child ID; uncertain parent selections remain
+unresolved. Unrecognized options stop argument inference. An already identified
+`resume` command can still use its reported native ID. See the
+[Codex CLI reference](https://developers.openai.com/codex/cli/reference).
+
+Claude Code and Grok resume names also need reported native IDs. Their canonical
+UUID selectors, long `=value` forms and supported short selectors are recognized
+separately from prompt, model, optional and list option values. OpenCode uses
+`--session`/`-s` and `--fork`; a nonforking current native selection supersedes its
+launch selection. A fork parent is never saved as the child. Unknown option arity,
+conflicting selectors or an unproven parent cannot establish a conversation ID.
+The selector grammar is checked against Claude Code2.1.317, Grok1.0.70 and
+OpenCode1.19.5 help, plus their
+[Claude](https://code.claude.com/docs/en/cli-reference),
+[Grok](https://docs.x.ai/build/cli/reference) and
+[OpenCode](https://dev.opencode.ai/docs/cli/) references. This does not certify
+live-provider behavior or every CLI spelling. Other provider selector grammars
+remain under review.
+
 ## Readiness
 
 Daedalus marks an agent idle only from verified events: Cursor and Hermes from

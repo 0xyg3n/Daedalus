@@ -524,6 +524,12 @@ pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
     Ok(())
 }
 fn process_snapshot() -> io::Result<Vec<(u32, u32, String)>> {
+    process_snapshot_with(65536, None)
+}
+fn process_snapshot_with(
+    limit: usize,
+    deadline: Option<std::time::Instant>,
+) -> io::Result<Vec<(u32, u32, String)>> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
@@ -538,7 +544,13 @@ fn process_snapshot() -> io::Result<Vec<(u32, u32, String)>> {
             return Err(last());
         }
         while more != 0 {
-            if result.len() >= 65536 {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Process snapshot deadline reached",
+                ));
+            }
+            if result.len() >= limit {
                 return Err(io::Error::other("Process snapshot exceeds bound"));
             }
             let length = entry
@@ -570,8 +582,12 @@ pub struct TerminalProcesses {
     pub parents: std::collections::BTreeMap<u32, u32>,
 }
 /// Owned shell/host process observations only: no console attachment or argument reads.
-pub fn terminal_processes() -> io::Result<TerminalProcesses> {
-    let snapshot = process_snapshot()?;
+pub fn terminal_processes(
+    entry_limit: usize,
+    query_limit: usize,
+    deadline: std::time::Instant,
+) -> io::Result<TerminalProcesses> {
+    let snapshot = process_snapshot_with(entry_limit, Some(deadline))?;
     let parents = snapshot
         .iter()
         .map(|(pid, parent, _)| (*pid, *parent))
@@ -579,9 +595,8 @@ pub fn terminal_processes() -> io::Result<TerminalProcesses> {
     let owner = current_identity()?;
     let mut processes = Vec::new();
     let mut queried = 0;
-    let started = std::time::Instant::now();
     for (pid, parent, name) in snapshot {
-        if started.elapsed() > std::time::Duration::from_secs(2) {
+        if std::time::Instant::now() >= deadline {
             return Err(io::Error::other(
                 "Terminal process discovery exceeded its time bound",
             ));
@@ -612,7 +627,7 @@ pub fn terminal_processes() -> io::Result<TerminalProcesses> {
             continue;
         }
         queried += 1;
-        if queried > 512 {
+        if queried > query_limit {
             return Err(io::Error::other("Terminal process snapshot exceeds bound"));
         }
         let Ok(process) = process_identity_with_parent(pid, Some(parent)) else {
@@ -621,6 +636,12 @@ pub fn terminal_processes() -> io::Result<TerminalProcesses> {
         if process.owner == owner {
             processes.push(process);
         }
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Terminal process discovery deadline reached",
+        ));
     }
     Ok(TerminalProcesses { processes, parents })
 }
@@ -666,6 +687,16 @@ pub fn descendant_processes(root_pid: u32) -> io::Result<Vec<ProcessIdentity>> {
     }
     Ok(result)
 }
+fn require_running_process(handle: HANDLE) -> io::Result<()> {
+    match unsafe { WaitForSingleObject(handle, 0) } {
+        WAIT_TIMEOUT => Ok(()),
+        WAIT_OBJECT_0 => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Process no longer active",
+        )),
+        _ => Err(last()),
+    }
+}
 fn process_identity_with_parent(
     pid: u32,
     known_parent: Option<u32>,
@@ -675,49 +706,50 @@ fn process_identity_with_parent(
         if handle.is_null() {
             return Err(last());
         }
-        let process = File::from_raw_handle(handle);
-        let (_token, user) = token_user(handle)?;
-        let owner = sid_string((*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid)?;
-        let mut created: FILETIME = std::mem::zeroed();
-        let mut exited = created;
-        let mut kernel = created;
-        let mut usertime = created;
-        if GetProcessTimes(
-            handle,
-            &mut created,
-            &mut exited,
-            &mut kernel,
-            &mut usertime,
-        ) == 0
-        {
-            return Err(last());
-        }
-        let mut name = vec![0u16; 32768];
-        let mut size = name.len() as u32;
-        if QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut size) == 0 {
-            return Err(last());
-        }
-        let executable = PathBuf::from(String::from_utf16_lossy(&name[..size as usize]));
-        let parent = match known_parent {
-            Some(parent) => parent,
-            None => *process_parents()?
-                .get(&pid)
-                .ok_or_else(|| io::Error::other("Process no longer observed"))?,
-        };
-        if WaitForSingleObject(process.as_raw_handle(), 0) != WAIT_TIMEOUT {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Process no longer active",
-            ));
-        }
-        let _keep_alive = process;
-        Ok(ProcessIdentity {
-            pid,
-            parent_pid: parent,
-            creation_time: ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
-            executable,
-            owner,
-        })
+        let _process = File::from_raw_handle(handle);
+        require_running_process(handle)?;
+        let observed = (|| -> io::Result<ProcessIdentity> {
+            let (_token, user) = token_user(handle)?;
+            let owner = sid_string((*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid)?;
+            let mut created: FILETIME = std::mem::zeroed();
+            let mut exited = created;
+            let mut kernel = created;
+            let mut usertime = created;
+            if GetProcessTimes(
+                handle,
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut usertime,
+            ) == 0
+            {
+                return Err(last());
+            }
+            let mut name = vec![0u16; 32768];
+            let mut size = name.len() as u32;
+            if QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut size) == 0 {
+                return Err(last());
+            }
+            let executable = PathBuf::from(String::from_utf16_lossy(&name[..size as usize]));
+            let parent = match known_parent {
+                Some(parent) => parent,
+                None => *process_parents()?
+                    .get(&pid)
+                    .ok_or_else(|| io::Error::other("Process no longer observed"))?,
+            };
+            Ok(ProcessIdentity {
+                pid,
+                parent_pid: parent,
+                creation_time: ((created.dwHighDateTime as u64) << 32)
+                    | created.dwLowDateTime as u64,
+                executable,
+                owner,
+            })
+        })();
+        // The same held handle distinguishes an exited process from a live
+        // process whose metadata is inaccessible. Keep live failures closed.
+        require_running_process(handle)?;
+        observed
     }
 }
 pub fn create_private_new(path: &Path) -> io::Result<File> {
@@ -1397,6 +1429,20 @@ mod tests {
             ERROR_INVALID_PARAMETER as i32,
         )));
         assert!(!exited_during_scan(&denied("Private state is in use")));
+    }
+    #[test]
+    fn exited_child_is_not_inaccessible_live_metadata_while_its_handle_is_held() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "exit /b 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        let error = process_identity_with_parent(pid, Some(std::process::id())).unwrap_err();
+        assert!(exited_during_scan(&error), "{error}");
+        drop(child);
     }
     #[test]
     fn process_identity_matches_current_user_and_is_stable() {

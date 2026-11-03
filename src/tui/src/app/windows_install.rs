@@ -58,7 +58,7 @@ fn prepare_uninstall_at(
     // Check that the image can actually be removed before NSIS deletes anything.
     // Never force-stop unrelated TUI, native terminal or agent processes.
     platform::check_executable_not_running(destination)
-        .map_err(|_| "Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved.".into())
+        .map_err(|error| format!("Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved. ({error})"))
 }
 
 /// The NSIS update waits for the parent TUI only. A Telegram service keeps the
@@ -181,8 +181,7 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
     let mut restart_telegram = Vec::new();
     if destination.exists() && !same_file {
         let cwd = std::env::current_dir().map_err(|_| "Cannot resolve configuration directory")?;
-        let preferences =
-            super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
+        let preferences = super::startup::preference_directory(&cwd, |key| std::env::var_os(key))?;
         restart_telegram = super::telegram_supervisor::stop_running_services_for_install(
             &preferences,
             &destination,
@@ -219,15 +218,15 @@ pub fn install_current(wait_pid: Option<u32>) -> Result<PathBuf, String> {
         })();
         if let Err(error) = result {
             let _ = fs::remove_file(&temporary);
-            if !restart_telegram.is_empty() {
-                if let Err(restart) = super::telegram_supervisor::restart_services_after_install(
+            if !restart_telegram.is_empty()
+                && let Err(restart) = super::telegram_supervisor::restart_services_after_install(
                     &destination,
                     &restart_telegram,
-                ) {
-                    return Err(format!(
-                        "{error}. Telegram was not started again: {restart}"
-                    ));
-                }
+                )
+            {
+                return Err(format!(
+                    "{error}. Telegram was not started again: {restart}"
+                ));
             }
             return Err(error);
         }
@@ -303,6 +302,7 @@ mod tests {
             )
             .unwrap();
             let config = super::super::telegram_config::ServiceConfig {
+                runtime: Default::default(),
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 123,
@@ -497,7 +497,10 @@ mod tests {
         platform::check_executable_not_running(&f.executable).unwrap();
         platform::replace_private(&next, &f.executable).unwrap();
         assert_eq!(fs::read(&f.executable).unwrap(), b"replacement-image");
-        assert_eq!(fs::read(f.root.join("install/install.json")).unwrap(), receipt);
+        assert_eq!(
+            fs::read(f.root.join("install/install.json")).unwrap(),
+            receipt
+        );
         f.assert_preserved();
     }
     #[test]
@@ -505,11 +508,8 @@ mod tests {
         let f = Fixture::new(false);
         let mut child = f.child(true);
         let before = fs::read(&f.executable).unwrap();
-        let result = release_mapped_installation(
-            &f.executable,
-            &f.preferences,
-            Duration::from_millis(50),
-        );
+        let result =
+            release_mapped_installation(&f.executable, &f.preferences, Duration::from_millis(50));
         let remained_running = child.try_wait().unwrap().is_none();
         child.kill().unwrap();
         child.wait().unwrap();
@@ -543,11 +543,8 @@ mod tests {
                 other => panic!("Mapped image was not observed: {other:?}"),
             }
         }
-        let result = release_mapped_installation(
-            &f.executable,
-            &f.preferences,
-            Duration::from_millis(50),
-        );
+        let result =
+            release_mapped_installation(&f.executable, &f.preferences, Duration::from_millis(50));
         let remained_running = child.try_wait().unwrap().is_none();
         child.kill().unwrap();
         child.wait().unwrap();

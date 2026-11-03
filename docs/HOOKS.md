@@ -6,6 +6,33 @@ Daedalus uses that journal to know when a turn ends, what to send to Telegram an
 whether a goal should continue. Hooks are not a sandbox and do not make tool output
 trusted.
 
+## Codex shared profiles and managed daemons
+
+Each Codex profile command names one registered conversation. Hooks for another
+conversation return an empty response before discovering or changing any binding.
+Malformed events still fail explicitly. An unrelated hook does not enroll a new
+terminal or copy Telegram permissions.
+
+On Linux with Herdr, the native runtime can refresh the process binding for that
+same conversation after a restart. A foreground client must be owned, on the
+registered terminal's TTY and identified by an exact `resume` argument or Herdr's
+selected conversation. Ambiguous clients and conflicting conversation metadata
+are rejected. A detached emitter additionally needs the native Codex managed
+`app-server`, whose process incarnation and executable file identity are pinned
+independently of the terminal client. Its inherited pane environment is ignored.
+The Herdr executable remains selectable through `DAEDALUS_HERDR_BIN`.
+
+Refresh preserves registration policy and fences previous readiness before
+publishing the new process or terminal generation. It does not retarget routes,
+copy grants or replay uncertain input. A changed generation can require reviewing
+the recipient binding or goal again. Other platforms and terminal backends retain
+their explicitly reviewed process/server bindings; automatic detached-daemon
+discovery is available only for Linux/Herdr.
+
+The regression suite uses private process tables and a real isolated PTY/native
+daemon fixture. Those tests establish the local routing contract; they do not
+establish compatibility with an untested provider version or a native Windows run.
+
 ## OpenCode conversations and relaunches
 
 Open or resume a conversation in OpenCode before connecting its pane to Telegram.
@@ -96,9 +123,41 @@ own trust and consent prompts. Run `daedalus hook --help` for every option.
 ## Hindsight memory
 
 [Hindsight](https://docs.hindsight.vectorize.io/) memory is optional and
-independent of Telegram. Configure it on the Hooks page; settings live in the
-private `hindsight.json`: endpoint, credential file, recall query and one bank per
-registration. A bank is never guessed from a project name or pane title.
+independent of Telegram. Open **Settings → Hindsight settings**, or choose
+**Configure Hindsight** after installing a hook. Settings live in the private
+`hindsight.json`: global enable state, endpoint, credential file, recall query,
+request timeout and exact registration banks. A bank is never guessed from a
+project name or pane title. New configurations start disabled; saving a bank does
+not enable memory or change a hook's own Hindsight switch.
+
+Each editor keeps a draft until **Review and save** and the final confirmation.
+All other registration bindings remain intact. Bank changes require the selected
+memory-enabled installed registration; a changed registration invalidates the
+save. Stale bindings can be removed without enabling them. A reviewed rebind
+shows the replaced scope alongside the new scope. Query entry accepts plain text
+or quoted text with escapes such as `\n`, preserving multiline and Unicode
+queries up to 8192 bytes. The timeout range is 100–8000 ms, also bounded by the
+hook deadline. Credential entry accepts a private absolute file path or `none`.
+
+The same offline operations are available from the CLI; add `--apply` to save a
+reviewed change with a private backup:
+
+```sh
+daedalus memory config show --config-dir /abs/instance
+daedalus memory config set --config-dir /abs/instance --key endpoint --value https://memory.example.invalid
+daedalus memory config set --config-dir /abs/instance --key timeout_ms --value 2500 --apply
+daedalus memory config bind --config-dir /abs/instance --registration /abs/instance/hooks/example.json --bank example-bank --apply
+daedalus memory config unbind --config-dir /abs/instance --registration-id example --apply
+```
+
+For a new configuration, save the endpoint first. CLI query values are literal
+text. The [memory example](../config/hindsight.example.json) lists every field.
+Configuration commands make no network requests.
+
+Configuration reviews include the recall query and request timeout. Saves,
+imports and cutover rewrites enforce the loader's 1 MiB file limit before
+writing the configuration. A reviewed save refuses a changed file and preserves
+the previous bytes in a private backup.
 
 - Recall runs at session start and adds bounded context. Recalled text is
   reference data, not instructions.
@@ -125,6 +184,12 @@ image as the running process. A different temporary updater image keeps the
 running path. Profiles installed by older releases can still contain a pinned
 binary path. Review and reinstall those profiles, trust changed commands in Codex
 `/hooks`, and resume already running Codex sessions so they load the new command.
+
+Several user messages can steer one running Codex turn. When that turn has no
+separate provider event ID, distinct prompt payloads receive distinct durable
+hook keys, while replaying the same payload reuses its key. The first prompt
+keeps its existing key across upgrades. Explicit and provider event IDs still
+reject conflicting content.
 
 ## Native Windows
 

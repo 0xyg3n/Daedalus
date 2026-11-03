@@ -5,6 +5,8 @@ use std::{
     path::Path,
 };
 
+pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
 pub const HARNESSES: [&str; 7] = [
     "claude", "codex", "grok", "hermes", "cursor", "pi", "opencode",
 ];
@@ -25,10 +27,17 @@ pub struct TelegramConfig {
 pub struct DiscoveryConfig {
     #[serde(default = "automatic_discovery")]
     pub automatic: bool,
+    /// None preserves the older automatic-discovery policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<bool>,
     #[serde(default)]
     pub herdr_sessions: Vec<String>,
     /// Explicit session-to-metadata-socket bindings; never infer private endpoints.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "super::control_settings::unique_strings"
+    )]
     pub herdr_sockets: BTreeMap<String, String>,
 }
 fn automatic_discovery() -> bool {
@@ -38,9 +47,15 @@ impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
             automatic: true,
+            native: None,
             herdr_sessions: Vec::new(),
             herdr_sockets: BTreeMap::new(),
         }
+    }
+}
+impl DiscoveryConfig {
+    pub(crate) fn native_enabled(&self) -> bool {
+        self.native.unwrap_or(self.automatic)
     }
 }
 
@@ -54,12 +69,16 @@ pub struct ControlConfig {
     pub subscriptions: Vec<String>,
     #[serde(default)]
     pub telegram: TelegramConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::control_settings::unique_strings")]
     pub profiles: BTreeMap<String, String>,
     #[serde(default)]
     pub tmux_sockets: Vec<String>,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
+    pub ui: super::interface_settings::InterfaceSettings,
+    #[serde(default)]
+    pub runtime: super::runtime_settings::Settings,
 }
 
 impl ControlConfig {
@@ -74,12 +93,17 @@ impl ControlConfig {
             profiles: BTreeMap::new(),
             tmux_sockets: Vec::new(),
             discovery: DiscoveryConfig::default(),
+            ui: super::interface_settings::InterfaceSettings::default(),
+            runtime: super::runtime_settings::Settings::default(),
         };
         config.validate()?;
         Ok(config)
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_CONFIG_BYTES {
+            return Err("Configuration exceeds the 1 MiB size limit".into());
+        }
         // Do not include parser errors: malformed input may contain credentials.
         let config: Self =
             serde_json::from_slice(bytes).map_err(|_| "Invalid configuration structure")?;
@@ -88,6 +112,8 @@ impl ControlConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.ui.validate()?;
+        self.runtime.validate()?;
         if self.version != 1 {
             return Err("Unsupported configuration version".into());
         }
@@ -175,7 +201,67 @@ impl ControlConfig {
         let mut bytes =
             serde_json::to_vec_pretty(self).map_err(|_| "Cannot serialize configuration")?;
         bytes.push(b'\n');
+        if bytes.len() > MAX_CONFIG_BYTES {
+            return Err("Configuration exceeds the 1 MiB size limit".into());
+        }
         Ok(bytes)
+    }
+
+    pub fn setting_value(&self, key: &str) -> Result<serde_json::Value, String> {
+        if super::control_settings::field(key).is_ok() {
+            super::control_settings::value(self, key)
+        } else if key.starts_with("ui.") {
+            self.ui.value(key)
+        } else if key.starts_with("runtime.") {
+            self.runtime.value(key)
+        } else if let Some(tool) = key.strip_prefix("profiles.") {
+            if !HARNESSES.contains(&tool) {
+                return Err("Unknown native profile tool".into());
+            }
+            Ok(self
+                .profiles
+                .get(tool)
+                .map_or(serde_json::Value::Null, |value| {
+                    serde_json::Value::String(value.clone())
+                }))
+        } else {
+            Err("Use a listed instance, ui., runtime. or profiles. setting; config show lists editable settings".into())
+        }
+    }
+
+    pub fn with_setting(&self, key: &str, value: &str) -> Result<Self, String> {
+        self.setting_value(key)?;
+        if super::control_settings::field(key).is_ok() {
+            return super::control_settings::set(self, key, value);
+        }
+        let mut updated = self.clone();
+        if key.starts_with("ui.") {
+            updated.ui = self.ui.set(key, value)?;
+        } else if key.starts_with("runtime.") {
+            updated.runtime = self.runtime.set(key, value)?;
+        } else {
+            let tool = key
+                .strip_prefix("profiles.")
+                .ok_or("Unknown native profile setting")?;
+            if value == "inherit" {
+                updated.profiles.remove(tool);
+            } else {
+                let path = super::hooks::windows_native_path(Path::new(value));
+                crate::core::layouts::check_path(&path)
+                    .map_err(|_| "Profile directory must be absolute and symlink-free")?;
+                if !path.is_dir() {
+                    return Err("Profile directory does not exist".into());
+                }
+                updated.profiles.insert(
+                    tool.into(),
+                    path.to_str()
+                        .ok_or("Profile directory must be UTF-8")?
+                        .into(),
+                );
+            }
+        }
+        updated.validate()?;
+        Ok(updated)
     }
 }
 
@@ -191,6 +277,80 @@ fn validate_path(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audit_configuration_duplicate_profile_or_endpoint_is_not_ambiguous() {
+        let original =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
+        let value = serde_json::to_string(crate::test_support::path("/tmp/profile")).unwrap();
+        let encoded = serde_json::to_string(&original).unwrap();
+        let profiles = encoded.replace(
+            r#""profiles":{}"#,
+            &format!(r#""profiles":{{"codex":{value},"codex":{value}}}"#),
+        );
+        assert_ne!(profiles, encoded);
+        assert!(ControlConfig::parse(profiles.as_bytes()).is_err());
+        let endpoints = encoded.replace(
+            r#""herdr_sessions":[]"#,
+            &format!(
+                r#""herdr_sessions":[],"herdr_sockets":{{"example":{value},"example":{value}}}"#
+            ),
+        );
+        assert_ne!(endpoints, encoded);
+        assert!(ControlConfig::parse(endpoints.as_bytes()).is_err());
+    }
+    #[test]
+    fn legacy_runtime_defaults_partial_updates_and_size_limits_are_consistent() {
+        let original =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
+        let mut value = serde_json::to_value(&original).unwrap();
+        value.as_object_mut().unwrap().remove("runtime");
+        assert_eq!(
+            ControlConfig::parse(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            original
+        );
+        value["runtime"] = serde_json::json!({"native_launch_cols":90});
+        let parsed = ControlConfig::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(parsed.runtime.native_launch_cols, 90);
+        assert_eq!(parsed.runtime.native_launch_rows, 32);
+        value["runtime"]["native_launch_rows"] = serde_json::json!(0);
+        assert!(ControlConfig::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        let mut oversized = original;
+        oversized.profiles.insert(
+            "codex".into(),
+            format!(
+                "{}{}",
+                crate::test_support::path("/tmp/"),
+                "x".repeat(MAX_CONFIG_BYTES)
+            ),
+        );
+        oversized.validate().unwrap();
+        assert!(oversized.encode().unwrap_err().contains("size limit"));
+        assert!(
+            ControlConfig::parse(&serde_json::to_vec(&oversized).unwrap())
+                .unwrap_err()
+                .contains("size limit")
+        );
+    }
+    #[test]
+    fn configurations_without_interface_settings_keep_existing_defaults() {
+        let original =
+            ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy.as_object_mut().unwrap().remove("ui");
+        assert_eq!(
+            ControlConfig::parse(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
+            original
+        );
+        legacy["ui"] = serde_json::json!({"splash":false});
+        let loaded = ControlConfig::parse(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(!loaded.ui.splash);
+        assert_eq!(
+            loaded.ui.preview_interval_ms,
+            original.ui.preview_interval_ms
+        );
+        legacy["ui"]["input_batch_limit"] = serde_json::json!(0);
+        assert!(ControlConfig::parse(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    }
     #[test]
     fn fresh_round_trip() {
         let config =
@@ -218,6 +378,34 @@ mod tests {
         );
         config.discovery.herdr_sessions.push("../escape".into());
         assert!(config.validate().is_err());
+    }
+    #[test]
+    fn native_discovery_override_preserves_legacy_inheritance_and_explicit_choices() {
+        for automatic in [false, true] {
+            let legacy: DiscoveryConfig =
+                serde_json::from_value(serde_json::json!({"automatic":automatic})).unwrap();
+            assert_eq!(legacy.native, None);
+            assert_eq!(legacy.native_enabled(), automatic);
+            let mut config = ControlConfig::fresh(&std::env::temp_dir()).unwrap();
+            config.discovery = legacy;
+            for (value, expected) in [
+                ("true", Some(true)),
+                ("false", Some(false)),
+                ("inherit", None),
+            ] {
+                config = config.with_setting("discovery.native", value).unwrap();
+                assert_eq!(config.discovery.native, expected);
+                assert_eq!(
+                    config.discovery.native_enabled(),
+                    expected.unwrap_or(automatic)
+                );
+                assert_eq!(
+                    ControlConfig::parse(&config.encode().unwrap()).unwrap(),
+                    config
+                );
+            }
+            assert!(config.with_setting("discovery.native", "yes").is_err());
+        }
     }
     #[test]
     fn metadata_socket_mappings_reject_relative_paths_and_ambiguous_sessions() {

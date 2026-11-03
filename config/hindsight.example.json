@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "enabled": false,
+  "endpoint": "https://memory.example.invalid",
+  "credential_file": null,
+  "bindings": [],
+  "recall_query": "Relevant context for this agent conversation",
+  "timeout_ms": 5000
+}

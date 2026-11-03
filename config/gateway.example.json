@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "enabled": false,
+  "format": "anthropic_messages",
+  "endpoint": "https://gateway.example.invalid",
+  "model": "explicit-model-id",
+  "credential_file": "/absolute/private/gateway-token.txt",
+  "harness": "claude"
+}

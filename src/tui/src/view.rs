@@ -1,4 +1,5 @@
 mod workspaces;
+pub(crate) use workspaces::agent_session_label;
 #[cfg(test)]
 use workspaces::{
     TILE_HEIGHT, TILE_WIDTH, WALL_CELL, cube_color, cube_faces, cube_slide, cube_turn, grid_shape,
@@ -88,7 +89,9 @@ fn page_hint(page: usize) -> &'static str {
         1 => "Select a terminal to watch, attach, save a checkpoint or assign a chat.",
         2 => "Save a checkpoint from a terminal, then resume, fork or hand off its context.",
         3 => "Connect a bot, authorize a chat, choose its pane and start the connection.",
-        4 => "Manage connections and harness profiles here. Display preferences are in Options.",
+        4 => {
+            "Manage interface behavior, connections and harness profiles. View shortcuts are in Options."
+        }
         5 => "Install a profile for a running harness, then activate its native hooks.",
         6 => "Inspect action receipts, delivery outcomes and component diagnostics.",
         7 => "Choose the configuration to manage. Each instance keeps its own connections.",
@@ -423,7 +426,7 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         );
         return;
     }
-    // Zoomed Focus is the terminal. A header, key bar or border would hide rows.
+    // Focus owns the pane; its optional identity strip reserves a real row.
     if ui.page == WORKSPACES && ui.view == View::Focus && ui.zoomed {
         let cursor = focus_panel(f, area, ui);
         present(f, ui, area, area, cursor, None);
@@ -497,7 +500,7 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         // window is large enough that the screen still shows every column.
         let show_tree = !ui.zoomed && content.width >= 120 && content.height >= 36;
         if show_tree {
-            let width = (content.width / 5).clamp(24, 36);
+            let width = (content.width / 5).clamp(30, 36);
             let columns = split(
                 content,
                 Direction::Horizontal,
@@ -694,7 +697,7 @@ fn side_terminals(ui: &Ui) -> (Vec<SideTerminal>, Vec<SideTerminal>) {
         tone: terminal_status(node).1,
         age: ui.ago(node),
         status: terminal_status(node).0.into(),
-        detail: session_meta(node),
+        detail: session_meta(node, ui.settings.agent_session_ids),
     };
     let find = |id: &str| {
         ui.snapshot
@@ -1930,7 +1933,7 @@ fn node_icon(theme: &Theme, kind: &str, state: &str) -> &'static str {
 
 /// Shared node presentation for Tree and Focus: identical role colours and labels.
 fn tree_node_spans(
-    theme: &Theme,
+    ui: &Ui,
     row: &Row,
     node: Option<&Node>,
     base: Style,
@@ -1938,6 +1941,7 @@ fn tree_node_spans(
     w: usize,
     tone: Tone,
 ) -> Vec<Span<'static>> {
+    let theme = &ui.theme;
     let bar = Span::styled(
         if active { theme.glyph("▌", ">") } else { " " },
         base.fg(theme.rgb(tone.rgb())),
@@ -2019,7 +2023,38 @@ fn tree_node_spans(
         ));
         first.push(Span::styled(rest.to_owned(), text(theme.fg(Tone::Text))));
     } else if let Some(parts) = node.map(|n| &n.parts).filter(|p| !p.is_empty()) {
-        first.extend(part_spans(theme, parts, room.max(8), &text));
+        let identified = if ui.settings.agent_session_ids && kind == "agent session" {
+            node.and_then(agent_session_label)
+                .or_else(|| {
+                    parts
+                        .iter()
+                        .find(|(_, role)| role == "sid")
+                        .map(|(part, _)| format!("SID: {}{}", clean(part), theme.glyph("…", "~")))
+                })
+                .map(|label| {
+                    parts
+                        .iter()
+                        .map(|(part, role)| {
+                            (
+                                if role == "sid" {
+                                    label.clone()
+                                } else {
+                                    part.clone()
+                                },
+                                role.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+        } else {
+            None
+        };
+        first.extend(part_spans(
+            theme,
+            identified.as_ref().unwrap_or(parts),
+            room.max(8),
+            &text,
+        ));
     } else {
         first.push(Span::styled(label, text(theme.fg(Tone::Text))));
     }
@@ -2185,14 +2220,14 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
             match row.kind {
                 Kind::Node => {
                     let node = ui.snapshot.tree.get(row.source);
-                    first = tree_node_spans(&theme, row, node, base, active, w, tone);
+                    first = tree_node_spans(ui, row, node, base, active, w, tone);
                     if detail_row == Some(i)
                         && let Some(node) = node
                     {
                         let folder = session_field(node, "Folder").unwrap_or("");
                         let detail = format!(
                             "{}{}",
-                            session_meta(node),
+                            session_meta(node, ui.settings.agent_session_ids),
                             if folder.is_empty() {
                                 String::new()
                             } else {
@@ -2454,19 +2489,37 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
             "Input paused · selected pane is not visible · Ctrl+] then D detaches"
         }
         Some(embed) if ui.page == WORKSPACES && !ui.status_error => {
-            match (&embed.phase, embed.mode) {
+            match (&embed.phase, embed.mode, embed.scroll_notice) {
                 // Say what it is waiting on (a retry, another client), if anything.
-                (Phase::Connecting, _) if !embed.notice.is_empty() => embed.notice.as_str(),
-                (Phase::Connecting, _) => "Connecting to the terminal…",
-                (Phase::Ended(reason), _) if !reason.is_empty() => {
+                (Phase::Connecting, _, _) if !embed.notice.is_empty() => embed.notice.as_str(),
+                (Phase::Connecting, _, _) => "Connecting to the terminal…",
+                (Phase::Ended(reason), _, _) if !reason.is_empty() => {
                     held = format!("{reason} The terminal itself was not touched.");
                     held.as_str()
                 }
-                (Phase::Ended(_), _) => "Stream ended. The terminal itself was not touched.",
-                (Phase::Live, Mode::Control) => {
+                (Phase::Ended(_), _, _) => "Stream ended. The terminal itself was not touched.",
+                (Phase::Live, _, Some(notice)) => notice,
+                (Phase::Live, _, _) if embed.scrollback_rows > 0 => {
+                    held = format!(
+                        "History: {} {} up · wheel down returns to live{}",
+                        embed.scrollback_rows,
+                        if embed.scrollback_rows == 1 {
+                            "row"
+                        } else {
+                            "rows"
+                        },
+                        if embed.mode == Mode::Control {
+                            "; typing returns to live"
+                        } else {
+                            " · read-only"
+                        }
+                    );
+                    held.as_str()
+                }
+                (Phase::Live, Mode::Control, _) => {
                     "Attached: keys go to the terminal. Ctrl+] then D detaches; it keeps running."
                 }
-                (Phase::Live, Mode::Observe) => match &embed.held {
+                (Phase::Live, Mode::Observe, _) => match &embed.held {
                     Some(by) => {
                         held = format!(
                             "Watching: input is held by {by}. Ctrl+] then T takes over; Esc returns."
@@ -2478,6 +2531,26 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
             }
         }
         _ => ui.status.as_str(),
+    };
+    let identity_status;
+    let status = if ui.page == WORKSPACES
+        && ui.settings.agent_session_ids
+        && !ui.status_error
+        && !ui.busy
+        && ui.dialog.is_none()
+        && let Some(label) = ui
+            .selected_terminal()
+            .and_then(|id| ui.terminal_node(&id))
+            .and_then(agent_session_label)
+    {
+        identity_status = if status.is_empty() {
+            label
+        } else {
+            format!("{label} · {status}")
+        };
+        identity_status.as_str()
+    } else {
+        status
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
@@ -3688,7 +3761,15 @@ mod tests {
             let actions: Vec<_> = ui
                 .quick_hits
                 .iter()
-                .filter(|(_, id)| id == "more" || id == "detach" || id.starts_with("terminal."))
+                .filter(|(_, id)| {
+                    id == "more"
+                        || id == "detach"
+                        || ui
+                            .snapshot
+                            .terminal_actions
+                            .iter()
+                            .any(|action| action.id == *id)
+                })
                 .collect();
             assert!(!actions.is_empty(), "{view:?}");
             assert!(actions.iter().all(|(rect, _)| rect.y == 39), "{view:?}");
@@ -3697,11 +3778,14 @@ mod tests {
             assert!(!footer.contains("Menu"), "{view:?}");
             ui.hide_keys = true;
             render(&mut ui, 190, 40);
-            assert!(
-                !ui.quick_hits
-                    .iter()
-                    .any(|(_, id)| id == "more" || id.starts_with("terminal."))
-            );
+            assert!(!ui.quick_hits.iter().any(|(_, id)| {
+                id == "more"
+                    || ui
+                        .snapshot
+                        .terminal_actions
+                        .iter()
+                        .any(|action| action.id == *id)
+            }));
         }
     }
     #[test]
@@ -3897,6 +3981,52 @@ mod tests {
         let mut framed = workspace(Theme::default(), View::Focus);
         let framed = text(&render(&mut framed, 66, 23));
         assert!(framed.contains("DAEDALUS"), "{framed}");
+        #[cfg(unix)]
+        {
+            ui.theme.reduced_motion = true;
+            ui.snapshot
+                .tree
+                .iter_mut()
+                .find(|n| n.id == "a")
+                .unwrap()
+                .fields = vec![Field::new("Agent session", "live-agent-session", "id")];
+            let plan = crate::embed::Plan {
+                adapter: "native-session".into(),
+                mode: "observe".into(),
+                node: "a".into(),
+                argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/cat".into()],
+                ..crate::embed::Plan::default()
+            };
+            let mut stream = crate::embed::Embed::start(plan, 22, 66).unwrap();
+            stream.phase = Phase::Live;
+            stream
+                .parser
+                .process(b"FIRST_PROGRAM_ROW\x1b[22;1HLAST_PROGRAM_ROW");
+            ui.embed = Some(stream);
+            let buffer = render(&mut ui, 66, 23);
+            let row = |y| (0..66).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            assert!(row(0).contains("SID: live-agent-session"));
+            assert!(row(1).contains("FIRST_PROGRAM_ROW"));
+            assert!(row(22).contains("LAST_PROGRAM_ROW"));
+            assert_eq!(ui.inline_screen, Some(Rect::new(0, 1, 66, 22)));
+            assert_eq!(ui.embed.as_ref().unwrap().origin, Some((0, 1, 66, 22)));
+            ui.snapshot
+                .tree
+                .iter_mut()
+                .find(|n| n.id == "a")
+                .unwrap()
+                .fields[0]
+                .value = "next-agent-session".into();
+            ui.snapshot.freshness = "STALE".into();
+            let updated = render(&mut ui, 66, 23);
+            let heading: String = (0..66).map(|x| updated[(x, 0)].symbol()).collect();
+            assert!(heading.contains("STALE") && heading.contains("SID: next-agent-session"));
+            assert!(!heading.contains("SID: live-agent-session"));
+            ui.settings.agent_session_ids = false;
+            let buffer = render(&mut ui, 66, 23);
+            assert!(!text(&buffer).contains("SID:"));
+            assert_eq!(ui.inline_screen, Some(Rect::new(0, 0, 66, 23)));
+        }
     }
     #[test]
     fn details_map_a_split_tab_with_the_selected_terminal_bright() {
@@ -4232,6 +4362,123 @@ mod tests {
         );
     }
     #[test]
+    fn agent_conversation_ids_are_labeled_in_every_workspace_view() {
+        for view in [View::Tree, View::Tiles, View::Wall, View::Cube, View::Focus] {
+            let mut ui = workspace(
+                Theme {
+                    reduced_motion: true,
+                    ..Theme::default()
+                },
+                view,
+            );
+            let node = ui.snapshot.tree.iter_mut().find(|n| n.id == "a").unwrap();
+            node.fields = vec![
+                Field::new("Agent session", "agent-conversation-0123456789", "id"),
+                Field::new("Terminal", "different-terminal-generation", "id"),
+            ];
+            node.tile.as_mut().unwrap().harness = "codex".into();
+            ui.focus_target = "a".into();
+            ui.select_id("a");
+            let index = ui.tiles().iter().position(|r| r.id == "a").unwrap();
+            ui.select_tile(index);
+            let rendered = text(&render(&mut ui, 160, 44));
+            assert!(
+                rendered.contains("SID: agent-conversation-0123456789"),
+                "Missing agent session identity in {view:?}: {rendered}"
+            );
+            assert!(!rendered.contains("SID: different-terminal-generation"));
+            for width in [44, 80, 110] {
+                let rendered = text(&render(&mut ui, width, 24));
+                assert!(
+                    rendered.contains("SID:"),
+                    "Missing identity label in {view:?} at {width} columns"
+                );
+            }
+        }
+    }
+    #[test]
+    fn visible_cards_keep_each_agents_conversation_id_with_its_own_terminal() {
+        for view in [View::Tiles, View::Wall, View::Cube] {
+            let mut ui = workspace(
+                Theme {
+                    reduced_motion: true,
+                    ..Theme::default()
+                },
+                view,
+            );
+            for (id, session) in [("a", "sid-a-0123456789"), ("b", "sid-b-9876543210")] {
+                let node = ui.snapshot.tree.iter_mut().find(|n| n.id == id).unwrap();
+                node.fields = vec![Field::new("Agent session", session, "id")];
+                node.tile.as_mut().unwrap().harness = "codex".into();
+            }
+            let buffer = render(&mut ui, 160, 44);
+            let rows = ui.tiles();
+            let mut checked = std::collections::HashSet::new();
+            for (rect, index) in &ui.tile_hits {
+                let id = rows[*index].id.as_str();
+                if !matches!(id, "a" | "b") {
+                    continue;
+                }
+                let rendered: String = (rect.top()..rect.bottom())
+                    .flat_map(|y| (rect.left()..rect.right()).map(move |x| (x, y)))
+                    .map(|p| buffer[p].symbol())
+                    .collect();
+                assert!(
+                    rendered.contains(&format!("SID: sid-{id}-")),
+                    "Missing own SID in {view:?} card {id}: {rendered}"
+                );
+                assert!(!rendered.contains(if id == "a" {
+                    "SID: sid-b-"
+                } else {
+                    "SID: sid-a-"
+                }));
+                checked.insert(id.to_owned());
+            }
+            assert_eq!(checked.len(), 2);
+        }
+    }
+    #[test]
+    fn missing_session_ids_stay_in_details_and_never_substitute_terminal_ids() {
+        let mut ui = workspace(
+            Theme {
+                reduced_motion: true,
+                ..Theme::default()
+            },
+            View::Tiles,
+        );
+        let node = ui.snapshot.tree.iter_mut().find(|n| n.id == "a").unwrap();
+        node.tile.as_mut().unwrap().harness = "codex".into();
+        node.fields = vec![Field::new("Terminal", "terminal-generation-only", "id")];
+        assert_eq!(agent_session_label(node), None);
+        node.fields.push(Field::new(
+            "Agent session",
+            "not reported · hooks missing",
+            "faint",
+        ));
+        assert_eq!(agent_session_label(node), None);
+        let rendered = text(&render(&mut ui, 160, 44));
+        assert!(!rendered.contains("SID: not reported"));
+        assert!(!rendered.contains("SID: terminal-generation-only"));
+        let node = ui.snapshot.tree.iter_mut().find(|n| n.id == "a").unwrap();
+        node.fields[1] = Field::new("Agent session", "fresh-agent-conversation", "id");
+        let rendered = text(&render(&mut ui, 160, 44));
+        assert!(rendered.contains("SID: fresh-agent-conversation"));
+        assert!(!rendered.contains("SID: not reported"));
+        ui.settings.agent_session_ids = false;
+        let rendered = text(&render(&mut ui, 160, 44));
+        assert!(!rendered.contains("SID:"));
+        assert_eq!(
+            ui.snapshot
+                .tree
+                .iter()
+                .find(|n| n.id == "a")
+                .unwrap()
+                .fields[1]
+                .value,
+            "fresh-agent-conversation"
+        );
+    }
+    #[test]
     fn focus_details_separate_name_identity_and_topic_without_overlapping_rows() {
         let mut ui = workspace(Theme::default(), View::Focus);
         let node = ui.snapshot.tree.iter_mut().find(|n| n.id == "a").unwrap();
@@ -4248,7 +4495,10 @@ mod tests {
         ];
         node.tile.as_mut().unwrap().harness = "codex".into();
         assert_eq!(session_name(node), "Release planning");
-        assert_eq!(session_meta(node), "codex · w1:p2 · #abcdef12 · team");
+        assert_eq!(
+            session_meta(node, true),
+            "SID: abcdef12-3456-7890 · codex · w1:p2 · team"
+        );
         let buffer = render(&mut ui, 160, 44);
         let hit = ui
             .focus_tree_hits
@@ -4265,7 +4515,7 @@ mod tests {
         let rendered = text(&buffer);
         for expected in [
             "Release planning",
-            "#abcdef12",
+            "SID: abcdef12",
             "Review workspace navigation",
             "~/projects/release",
         ] {
@@ -4276,12 +4526,16 @@ mod tests {
         assert!(rendered.contains("team"));
         for (w, h) in [(80, 24), (110, 30), (160, 44)] {
             render(&mut ui, w, h);
-            let area = ui.focus_tree_area.unwrap();
-            assert!(
-                ui.focus_tree_hits
-                    .iter()
-                    .all(|(r, _, _)| r.bottom() < area.bottom() && r.right() < area.right())
-            );
+            if let Some(area) = ui.focus_tree_area {
+                assert!(
+                    ui.focus_tree_hits
+                        .iter()
+                        .all(|(r, _, _)| r.bottom() < area.bottom() && r.right() < area.right())
+                );
+            } else {
+                assert!(ui.focus_tree_hits.is_empty());
+                assert!(text(&render(&mut ui, w, h)).contains("Release planning"));
+            }
         }
     }
     #[test]
@@ -4294,7 +4548,8 @@ mod tests {
             ui.snapshot.tree.push(n);
         }
         ui.reveal("session-39");
-        render(&mut ui, 140, 30);
+        // The outline appears only when it leaves a useful terminal viewport.
+        render(&mut ui, 140, 42);
         assert!(ui.focus_tree_offset > 0);
         let area = ui.focus_tree_area.unwrap();
         let hit = ui
@@ -4306,6 +4561,8 @@ mod tests {
         assert_eq!(hit.height, 2);
         assert!(hit.bottom() < area.bottom());
         assert!(!ui.collapsed.contains("server"));
+        render(&mut ui, 140, 30);
+        assert!(ui.focus_tree_area.is_none());
     }
     #[test]
     fn focus_uses_every_tree_node_in_the_same_order_and_collapse_state() {

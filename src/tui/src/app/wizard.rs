@@ -38,7 +38,11 @@ impl Wizard {
         environment: Environment,
         selection: Selection,
     ) -> Result<Self> {
+        let gateway = config.subscriptions.iter().any(|tool| tool == "gateway");
         config.subscriptions = selection.harnesses.clone();
+        if gateway {
+            config.subscriptions.push("gateway".into());
+        }
         Self::prepare(SetupPlan::edit(directory, config)?, environment, selection)
     }
 

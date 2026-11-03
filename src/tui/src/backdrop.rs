@@ -1000,7 +1000,12 @@ mod tests {
         assert!(Theme::from_vars(vars(&[])).backdrop);
         assert!(!Theme::from_vars(vars(&[("DAEDALUS_BACKDROP", "0")])).backdrop);
         assert!(!Theme::from_vars(vars(&[("NO_COLOR", "1")])).backdrop);
-        assert!(!Theme::from_vars(vars(&[("COLORTERM", "")])).backdrop);
+        // Native Windows supports truecolor without COLORTERM; the explicit
+        // backdrop, ASCII and NO_COLOR controls still disable it on both hosts.
+        assert_eq!(
+            Theme::from_vars(vars(&[("COLORTERM", "")])).backdrop,
+            cfg!(windows)
+        );
         assert!(!Theme::from_vars(vars(&[("DAEDALUS_ICONS", "ascii")])).backdrop);
     }
     #[test]

@@ -20,10 +20,7 @@ fn live_hook_pane(pane: &Value) -> bool {
         Some(Value::Number(value)) if value.as_u64() == Some(1) => return false,
         _ => {}
     }
-    match pane.get("exited") {
-        Some(value) if !value.is_null() => false,
-        _ => true,
-    }
+    !matches!(pane.get("exited"), Some(value) if !value.is_null())
 }
 
 fn native_profile_path(text: &str) -> PathBuf {
@@ -36,12 +33,6 @@ pub struct Spec {
     pub transcript: Option<PathBuf>,
     pub options: Options,
     pub goal_id: Option<String>,
-}
-struct MemorySpec {
-    receipt: Receipt,
-    registration: super::hook_runtime::Registration,
-    config: super::memory::Config,
-    expected: Option<super::memory::Config>,
 }
 enum Stage {
     Reload(super::hook_reload::Plan),
@@ -69,11 +60,6 @@ enum Stage {
     },
     BindingReview(Box<super::telegram_admin::Plan>, Receipt),
     BindingApply(Box<super::telegram_admin::Plan>, Receipt),
-    MemoryEndpoint(Box<MemorySpec>),
-    MemoryCredential(Box<MemorySpec>),
-    MemoryBank(Box<MemorySpec>),
-    MemoryReview(Box<super::memory::Plan>, Receipt),
-    MemoryApply(Box<super::memory::Plan>, Receipt),
 }
 struct Pending {
     id: u64,
@@ -84,6 +70,8 @@ struct Pending {
 }
 #[derive(Default)]
 pub struct Menu {
+    memory: super::memory_menu::Menu,
+    memory_receipt: Option<Receipt>,
     pending: Option<Pending>,
     batch: VecDeque<Value>,
     batch_active: bool,
@@ -91,9 +79,11 @@ pub struct Menu {
 }
 impl Menu {
     pub fn pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.memory.pending()
     }
     pub fn cancel(&mut self) {
+        self.memory.cancel();
+        self.memory_receipt = None;
         self.pending = None;
         self.telegram_recipient = None;
         self.batch.clear();
@@ -157,7 +147,7 @@ impl Menu {
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|pane| live_hook_pane(pane))
+            .filter(live_hook_pane)
             .collect::<Vec<_>>();
         if panes.is_empty() {
             return Err("No live terminal is available for hook registration".into());
@@ -277,7 +267,10 @@ impl Menu {
         seq: &mut u64,
     ) -> Result<Outcome> {
         let (detected, note) = match source.default_hook_spec(config, &pane) {
-            Ok(Some(spec)) => (Some(hooks::windows_native_path(&spec.profile)), String::new()),
+            Ok(Some(spec)) => (
+                Some(hooks::windows_native_path(&spec.profile)),
+                String::new(),
+            ),
             Ok(None) => (
                 None,
                 "No default hook profile was detected for this terminal.".to_owned(),
@@ -426,82 +419,10 @@ impl Menu {
         receipt: Receipt,
         seq: &mut u64,
     ) -> Result<Outcome> {
-        let (registration, current) = source.memory_settings(&receipt.registration)?;
-        let existing = current.is_some();
-        let expected = current.clone();
-        let config = current.unwrap_or(super::memory::Config {
-            version: 1,
-            enabled: true,
-            endpoint: String::new(),
-            credential_file: None,
-            bindings: vec![],
-            recall_query: "Relevant context for this agent conversation".into(),
-            timeout_ms: 5000,
-        });
-        let spec = Box::new(MemorySpec {
-            receipt,
-            registration,
-            config,
-            expected,
-        });
-        if existing {
-            self.frame(
-                seq,
-                "input",
-                "Hindsight bank for this registration",
-                json!({
-                    "secret": false,
-                    "description": "Existing endpoint, credential file and other memory bindings are retained."
-                }),
-                Stage::MemoryBank(spec),
-            )
-        } else {
-            self.frame(
-                seq,
-                "input",
-                "Hindsight API endpoint",
-                json!({"secret": false}),
-                Stage::MemoryEndpoint(spec),
-            )
-        }
-    }
-
-    fn review_memory<S: Source>(
-        &mut self,
-        source: &mut S,
-        mut spec: MemorySpec,
-        bank: &str,
-        seq: &mut u64,
-    ) -> Result<Outcome> {
-        let (registration, current) = source.memory_settings(&spec.receipt.registration)?;
-        if serde_json::to_value(&registration).map_err(|_| "Invalid registration")?
-            != serde_json::to_value(&spec.registration).map_err(|_| "Invalid registration")?
-        {
-            return Err("Hook registration changed; reopen memory setup".into());
-        }
-        // Preserve other registrations and endpoint settings; refuse a concurrent edit.
-        if serde_json::to_value(&current).ok() != serde_json::to_value(&spec.expected).ok() {
-            return Err("Memory settings changed; reopen setup".into());
-        }
-        spec.config.enabled = true;
-        spec.config
-            .bindings
-            .retain(|binding| binding.registration_id != registration.id);
-        spec.config.bindings.push(super::memory::Binding {
-            registration_id: registration.id,
-            scope: registration.scope,
-            bank: bank.into(),
-        });
-        let plan = source.prepare_memory(spec.expected, spec.config)?;
-        let text = super::dialog_text::format(&plan.review())
-            .map_err(|_| "Cannot format memory review")?;
-        self.frame(
-            seq,
-            "output",
-            "Review Hindsight configuration",
-            json!({"text": text}),
-            Stage::MemoryReview(Box::new(plan), spec.receipt),
-        )
+        let (_, current) = source.memory_settings(&receipt.registration)?;
+        let outcome = self.memory.open(current, seq)?;
+        self.memory_receipt = Some(receipt);
+        Ok(outcome)
     }
 
     fn start_recipients<S: Source>(
@@ -704,6 +625,17 @@ impl Menu {
         config: &ControlConfig,
         seq: &mut u64,
     ) -> Result<Outcome> {
+        if self.memory.pending() {
+            let outcome = self.memory.reply(request, source, seq)?;
+            if !self.memory.pending() {
+                let receipt = self
+                    .memory_receipt
+                    .take()
+                    .ok_or("Memory hook context disappeared")?;
+                return self.installed(receipt, seq, &outcome.message);
+            }
+            return Ok(outcome);
+        }
         let pending = self.pending.as_ref().ok_or("No hook dialog is pending")?;
         if request["op"] != "reply" || request["id"].as_u64() != Some(pending.id) {
             return Err("Unexpected hook reply".into());
@@ -732,10 +664,7 @@ impl Menu {
                     "Use at most 4096 characters without control characters.",
                 );
             }
-            let path_input = matches!(
-                pending.stage,
-                Stage::Profile(_) | Stage::Transcript(_) | Stage::MemoryCredential(_)
-            );
+            let path_input = matches!(pending.stage, Stage::Profile(_) | Stage::Transcript(_));
             let skip =
                 text == "skip" && matches!(pending.stage, Stage::Profile(_) | Stage::Transcript(_));
             let none = text == "none" && !matches!(pending.stage, Stage::Profile(_));
@@ -955,55 +884,6 @@ impl Menu {
             Stage::Recipients { receipt, choices } => {
                 self.review_recipient(source, receipt, &choices, text, seq)
             }
-            Stage::MemoryEndpoint(mut spec) => {
-                spec.config.endpoint = text.into();
-                self.frame(
-                    seq,
-                    "input",
-                    "Private credential file (absolute path), or none",
-                    json!({
-                        "secret": false,
-                        "description": "Enter a private file path, never paste the token here."
-                    }),
-                    Stage::MemoryCredential(spec),
-                )
-            }
-            Stage::MemoryCredential(mut spec) => {
-                spec.config.credential_file = if text == "none" {
-                    None
-                } else {
-                    let path = native_profile_path(text);
-                    crate::core::layouts::check_path(&path)?;
-                    Some(path)
-                };
-                self.frame(
-                    seq,
-                    "input",
-                    "Hindsight bank for this registration",
-                    json!({"secret": false}),
-                    Stage::MemoryBank(spec),
-                )
-            }
-            Stage::MemoryBank(spec) => self.review_memory(source, *spec, text, seq),
-            Stage::MemoryReview(plan, receipt) => self.frame(
-                seq,
-                "choose",
-                "Confirm Hindsight configuration",
-                json!({
-                    "options": [
-                        ["cancel", "Cancel", "Keep memory configuration unchanged"],
-                        ["yes", "Save", "Enable the reviewed endpoint and exact registration bank"]
-                    ]
-                }),
-                Stage::MemoryApply(plan, receipt),
-            ),
-            Stage::MemoryApply(plan, receipt) => {
-                if text == "cancel" {
-                    return Ok(Outcome::default());
-                }
-                source.apply_memory(*plan)?;
-                self.installed(receipt, seq, "Hindsight configuration saved. Network connectivity has not been tested.")
-            }
             Stage::BindingReview(plan, receipt) => self.frame(
                 seq,
                 "choose",
@@ -1143,6 +1023,16 @@ mod tests {
             })
         }
 
+        fn memory_registrations(
+            &mut self,
+        ) -> Result<Vec<super::super::hook_runtime::Registration>> {
+            let (registration, _) = self.memory_settings(&self.dir.join("registration"))?;
+            crate::core::layouts::write_private(
+                &registration.path(),
+                &serde_json::to_vec(&registration).unwrap(),
+            )?;
+            Ok(vec![registration])
+        }
         fn memory_settings(
             &mut self,
             _: &std::path::Path,
@@ -1405,9 +1295,15 @@ mod tests {
         assert!(!description.contains("ended"));
         assert!(description.contains("claude"));
         let mut selected = view();
-        selected.selected = Some(json!({"backend":"herdr","pane_id":"gone","terminal_id":"gone","agent":"claude","dead":true}));
+        selected.selected = Some(
+            json!({"backend":"herdr","pane_id":"gone","terminal_id":"gone","agent":"claude","dead":true}),
+        );
         let config = ControlConfig::fresh(&mock.dir).unwrap();
-        assert!(Menu::default().start(selected, &mut mock, &config, &mut seq).is_err());
+        assert!(
+            Menu::default()
+                .start(selected, &mut mock, &config, &mut seq)
+                .is_err()
+        );
     }
     #[test]
     fn fleet_setup_requires_separate_review_for_each_session() {
@@ -1540,6 +1436,7 @@ mod tests {
         reviewed(&mut menu, &mut mock, &mut seq);
         reply(&mut menu, &mut mock, &mut seq, json!("yes")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("memory")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("endpoint")).unwrap();
         reply(
             &mut menu,
             &mut mock,
@@ -1547,16 +1444,26 @@ mod tests {
             json!("http://127.0.0.1:8888"),
         )
         .unwrap();
-        reply(&mut menu, &mut mock, &mut seq, json!("none")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("bindings")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("add")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("0")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("project-bank")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("back")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("review")).unwrap();
         assert!(!mock.dir.join("hindsight.json").exists());
         reply(&mut menu, &mut mock, &mut seq, json!("close")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("yes")).unwrap();
         let config = super::super::memory::load(&mock.dir).unwrap().unwrap();
         assert_eq!(config.bindings[0].bank, "project-bank");
+        assert!(!config.enabled);
         assert!(menu.pending());
         reply(&mut menu, &mut mock, &mut seq, json!("memory")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("bindings")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("binding:0")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("bank")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("replacement-bank")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("back")).unwrap();
+        reply(&mut menu, &mut mock, &mut seq, json!("review")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("close")).unwrap();
         reply(&mut menu, &mut mock, &mut seq, json!("cancel")).unwrap();
         assert_eq!(

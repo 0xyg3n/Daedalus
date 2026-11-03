@@ -1,0 +1,85 @@
+name: Native checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust tools
+        shell: bash
+        run: rustup update stable --no-self-update && rustup component add clippy rustfmt
+      - name: Windows SDK resource compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = Get-Command rc.exe -ErrorAction SilentlyContinue
+          if (-not $compiler) {
+            $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+            $compiler = Get-ChildItem "$sdk/*/x64/rc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $compiler) { throw 'Install the Windows SDK resource compiler before building.' }
+            $compiler.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Linux checks
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/check.sh
+      - name: Windows checks including native ConPTY
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows.ps1
+      - name: Linux executable and checksum
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version="$(cat VERSION)"
+          mkdir dist
+          cp src/tui/target/release/daedalus-tui "dist/daedalus-$version-x86_64-linux"
+          cd dist
+          sha256sum "daedalus-$version-x86_64-linux" > "daedalus-$version-x86_64-linux.sha256"
+      - name: Windows executable, installer and checksums
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item src/tui/target/release/daedalus-tui.exe "dist/daedalus-$version-x86_64-windows.exe"
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path $nsis)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          $binaryPath = (Resolve-Path -LiteralPath "dist/daedalus-$version-x86_64-windows.exe").ProviderPath
+          $iconPath = (Resolve-Path -LiteralPath assets/daedalus.ico).ProviderPath
+          $scriptPath = (Resolve-Path -LiteralPath scripts/windows-installer.nsi).ProviderPath
+          $outputPath = Join-Path (Resolve-Path -LiteralPath dist).ProviderPath "Daedalus-$version-setup.exe"
+          & $nsis "/DPRODUCT_VERSION=$version" "/DBINARY=$binaryPath" "/DOUTPUT=$outputPath" "/DICON=$iconPath" $scriptPath
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          @(Get-ChildItem dist -File -Filter '*.exe') | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText($_.FullName + '.sha256', "$hash  $($_.Name)`n", [Text.UTF8Encoding]::new($false))
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ runner.os }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

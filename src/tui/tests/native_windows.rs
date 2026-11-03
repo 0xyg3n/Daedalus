@@ -22,6 +22,7 @@ fn windows_launch_preflight_rejects_bad_dimensions_before_touching_user_state() 
         environment: Some(BTreeMap::from([("COMSPEC".into(), "cmd.exe".into())])),
         cols: 0,
         rows: 24,
+        scrollback_rows: native_terminal::DEFAULT_SCROLLBACK_ROWS,
     })
     .unwrap_err();
     assert!(error.starts_with("Terminal size must be"));
@@ -86,7 +87,14 @@ fn startup_rebinds_temporary_hook_commands_and_does_not_touch_telegram() {
     assert!(text.contains(&installed.display().to_string().replace('\\', "\\\\")));
     assert!(!text.contains("nsA1B2.tmp"));
     assert!(text.contains(r"C:\\Users\\Public\\hooks.json"));
-    assert!(config.join("hook-reloads").read_dir().unwrap().next().is_some());
+    assert!(
+        config
+            .join("hook-reloads")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some()
+    );
     assert_eq!(
         startup::rebind_temporary_hook_commands(&config, &installed).unwrap(),
         0
@@ -111,11 +119,13 @@ fn startup_rebinds_temporary_hook_commands_and_does_not_touch_telegram() {
     );
     let error = startup::rebind_temporary_hook_commands(&config, &installed).unwrap_err();
     assert!(error.contains("outside"));
-    assert!(startup::rebind_temporary_hook_commands(
-        &config,
-        Path::new(r"C:\Users\Public\AppData\Local\Temp\nsA1B2.tmp\daedalus.exe")
-    )
-    .is_err());
+    assert!(
+        startup::rebind_temporary_hook_commands(
+            &config,
+            Path::new(r"C:\Users\Public\AppData\Local\Temp\nsA1B2.tmp\daedalus.exe")
+        )
+        .is_err()
+    );
 }
 
 #[test]

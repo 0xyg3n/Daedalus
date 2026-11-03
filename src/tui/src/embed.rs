@@ -386,6 +386,8 @@ pub struct Embed {
     /// tmux only: this client sizes the window (explicit, affects other viewers).
     pub fit: bool,
     pub notice: String,
+    pub scrollback_rows: usize,
+    pub scroll_notice: Option<&'static str>,
     /// Display area of the last frame (rows, cols).
     pub viewport: (u16, u16),
     /// Where the terminal's top-left cell was drawn, for mouse mapping.
@@ -468,6 +470,8 @@ impl Embed {
                 .map(|holder| held_notice(holder, plan.takeover))
                 .unwrap_or_default(),
             held,
+            scrollback_rows: 0,
+            scroll_notice: None,
             plan,
             mode,
             phase: Phase::Connecting,
@@ -517,6 +521,8 @@ impl Embed {
                 self.retry_at = None;
                 // Callers explain why they restarted; otherwise the first frame does.
                 self.notice.clear();
+                self.scrollback_rows = 0;
+                self.scroll_notice = None;
                 self.requested = (rows, cols);
                 self.respawn = false;
                 self.fit = false;
@@ -815,6 +821,11 @@ impl Embed {
                 let Some(bytes) = value["bytes"].as_str().and_then(b64_decode) else {
                     return false;
                 };
+                self.scrollback_rows =
+                    value["scrollback_rows"].as_u64().unwrap_or(0).min(65536) as usize;
+                if value["scrollback_rows"].is_u64() {
+                    self.scroll_notice = None;
+                }
                 let (w, h) = (w.clamp(1, 1000) as u16, h.clamp(1, 1000) as u16);
                 if value["full"].as_bool() == Some(true) && self.parser.screen().size() != (h, w) {
                     self.parser = vt100::Parser::new(h, w, 0);
@@ -831,6 +842,12 @@ impl Embed {
                         };
                     }
                 }
+                true
+            }
+            Some("terminal.notice") if value["code"] == "scrollback_unavailable" => {
+                self.scroll_notice = Some(
+                    "History scrolling is unavailable in this older native terminal daemon. The live stream remains connected.",
+                );
                 true
             }
             Some("terminal.closed") => {
@@ -914,7 +931,7 @@ impl Embed {
 
     /// Forward a mouse event if the application asked for mouse reporting.
     /// Returns false when the event is outside the terminal or unused by it.
-    pub fn mouse(&mut self, event: MouseEvent) -> bool {
+    pub fn mouse(&mut self, event: MouseEvent, scroll_rows: u64) -> bool {
         let Some((x, y, w, h)) = self.origin else {
             return false;
         };
@@ -928,9 +945,10 @@ impl Embed {
                 MouseEventKind::ScrollDown => "down",
                 _ => return false,
             };
-            if self.mode == Mode::Control && self.live() {
+            if (self.mode == Mode::Control || self.plan.adapter == "native-session") && self.live()
+            {
                 self.herdr_line(&format!(
-                    r#"{{"type":"terminal.scroll","direction":"{direction}","lines":3}}"#
+                    r#"{{"type":"terminal.scroll","direction":"{direction}","lines":{scroll_rows}}}"#
                 ));
             }
             return true;
@@ -1061,9 +1079,10 @@ impl Embed {
         if area.width >= 2 && cols > area.width {
             return self.paint_wrapped(area, buf, theme);
         }
-        // Show every column. Extra rows keep the latest lines, until resize
-        // makes the source the same size as this view.
-        let top = rows.saturating_sub(area.height);
+        // Unused rows below the prompt must not push real output out of a
+        // smaller tile while its source is still waiting to resize.
+        let end = screen_content_end(self.parser.screen());
+        let top = end.saturating_sub(area.height);
         let left = 0;
         self.scroll = (top, left);
         let shown_w = cols.saturating_sub(left).min(area.width);
@@ -1104,7 +1123,7 @@ impl Embed {
             let screen = self.parser.screen();
             let (rows, cols) = screen.size();
             let mut all = Vec::new();
-            for row in 0..rows {
+            for row in 0..screen_content_end(screen).min(rows) {
                 let end = (0..cols)
                     .rev()
                     .find(|&col| {
@@ -1156,19 +1175,18 @@ impl Embed {
             );
         }
         let visible = !screen.hide_cursor() && self.live();
-        let at = segments.iter().enumerate().find_map(|(index, &(row, left, length))| {
-            let on_row = row == cursor_row
-                && (length == 0 || (cursor_col >= left && cursor_col < left + length));
-            if !on_row || index < start || index >= end {
-                return None;
-            }
-            let x = if length == 0 {
-                0
-            } else {
-                cursor_col - left
-            };
-            Some((area.x + x, area.y + (index - start) as u16))
-        });
+        let at = segments
+            .iter()
+            .enumerate()
+            .find_map(|(index, &(row, left, length))| {
+                let on_row = row == cursor_row
+                    && (length == 0 || (cursor_col >= left && cursor_col < left + length));
+                if !on_row || index < start || index >= end {
+                    return None;
+                }
+                let x = if length == 0 { 0 } else { cursor_col - left };
+                Some((area.x + x, area.y + (index - start) as u16))
+            });
         if !visible {
             return None;
         }
@@ -1182,19 +1200,31 @@ impl Embed {
     }
 }
 
-/// First segment to draw. Blank rows do not push a visible line out of the
-/// view. A line is kept whole unless that one line is taller than the view.
+/// Last meaningful source row, including the current input line. Physical
+/// padding below it is not output and must not displace the prompt.
+fn screen_content_end(screen: &vt100::Screen) -> u16 {
+    let (rows, cols) = screen.size();
+    let cursor_end = screen.cursor_position().0.saturating_add(1).min(rows);
+    (cursor_end..rows)
+        .rev()
+        .find(|&row| {
+            (0..cols).any(|col| {
+                screen.cell(row, col).is_some_and(|cell| {
+                    cell.is_wide_continuation()
+                        || cell.contents().chars().any(|c| !c.is_whitespace())
+                })
+            })
+        })
+        .map_or(cursor_end, |row| row + 1)
+}
+
+/// First segment to draw. The caller has removed unused trailing screen rows.
+/// A source line is kept whole unless that one line is taller than the view.
 fn wrapped_window(segments: &[(u16, u16, u16)], height: usize) -> (usize, usize) {
     if height == 0 || segments.is_empty() {
         return (0, 0);
     }
-    let mut end = segments.len();
-    while end > 0 && segments[end - 1].2 == 0 {
-        end -= 1;
-    }
-    if end < segments.len() && end < height {
-        end = segments.len().min(height);
-    }
+    let end = segments.len();
     if end <= height {
         return (0, end);
     }
@@ -1542,6 +1572,25 @@ mod tests {
     }
 
     #[test]
+    fn trailing_screen_padding_does_not_hide_output_but_cursor_rows_are_kept() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"INLINE");
+        assert_eq!(screen_content_end(parser.screen()), 1);
+        parser.process(b"\x1b[8;1H");
+        assert_eq!(screen_content_end(parser.screen()), 8);
+        parser.process(b"\x1b[24;1Hlast row\x1b[1;1H");
+        assert_eq!(screen_content_end(parser.screen()), 24);
+    }
+
+    #[test]
+    fn wrapped_input_keeps_its_blank_cursor_row_and_whole_source_lines() {
+        let segments = [(0, 0, 3), (1, 0, 0), (2, 0, 0), (3, 0, 0)];
+        assert_eq!(wrapped_window(&segments, 2), (2, 4));
+        let segments = [(0, 0, 8), (0, 8, 8), (1, 0, 4), (2, 0, 4)];
+        assert_eq!(wrapped_window(&segments, 3), (2, 4));
+    }
+
+    #[test]
     fn prefix_accepts_legacy_control_five() {
         assert!(is_prefix(&key(KeyCode::Char(']'), KeyModifiers::CONTROL)));
         assert!(is_prefix(&key(KeyCode::Char('5'), KeyModifiers::CONTROL)));
@@ -1861,6 +1910,60 @@ fn main() {
     }
 
     #[test]
+    fn native_observer_wheel_uses_saved_rows_and_keeps_history_notices_local() {
+        let dir = scratch("native-wheel");
+        let fake = fake_herdr(&dir);
+        let mut plan = herdr_plan(&fake, "observe", &[]);
+        plan.adapter = "native-session".into();
+        let mut embed = Embed::start(plan, 5, 40).unwrap();
+        assert!(pump_until(&mut embed, |e| e.live()));
+        embed.origin = Some((0, 0, 40, 5));
+        assert!(embed.mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            7
+        ));
+        let log = dir.join("log");
+        assert!(pump_until(&mut embed, |_| std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("terminal.scroll")));
+        let values: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let scroll = values
+            .iter()
+            .find(|v| v["type"] == "terminal.scroll")
+            .unwrap();
+        assert_eq!(scroll["lines"], 7);
+        assert!(!values.iter().any(|v| v["type"] == "terminal.input"));
+        let frame = serde_json::json!({"type":"terminal.frame","width":40,"height":5,
+            "bytes":b64_encode(b"history"),"full":true,"scrollback_rows":7});
+        embed.on_frame(&serde_json::to_vec(&frame).unwrap());
+        assert_eq!(embed.scrollback_rows, 7);
+        embed.on_frame(br#"{"type":"terminal.notice","code":"scrollback_unavailable"}"#);
+        assert!(
+            embed
+                .scroll_notice
+                .unwrap()
+                .contains("older native terminal")
+        );
+        assert!(embed.live());
+        let mut live = frame;
+        live["scrollback_rows"] = serde_json::json!(0);
+        embed.on_frame(&serde_json::to_vec(&live).unwrap());
+        assert_eq!(embed.scrollback_rows, 0);
+        assert!(embed.scroll_notice.is_none());
+        embed.detach();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_wide_line_wraps_instead_of_losing_its_end() {
         let dir = scratch("wrap-line");
         let fake = fake_herdr(&dir);
@@ -2003,9 +2106,14 @@ fn main() {
     #[test]
     fn no_screen_ends_with_a_reason_instead_of_connecting_forever() {
         #[cfg(unix)]
-        let silent: Vec<String> = [crate::test_support::path("/bin/sleep"), "30"]
-            .map(String::from)
-            .to_vec();
+        let silent: Vec<String> = [
+            crate::test_support::path("/bin/sh"),
+            "-c",
+            "exec /bin/sleep 30",
+            "fixture",
+        ]
+        .map(String::from)
+        .to_vec();
         #[cfg(windows)]
         let silent: Vec<String> = ["cmd.exe", "/d", "/c", "set /p wait="]
             .map(String::from)

@@ -1,0 +1,13 @@
+{
+  "discovery": {
+    "scan_default_roots": true,
+    "scan_processes": true,
+    "instance_limit": 128,
+    "root_limit": 16,
+    "entries_per_root": 1024,
+    "process_limit": 4096,
+    "argv_limit_bytes": 8192,
+    "search_roots": []
+  },
+  "instances": []
+}

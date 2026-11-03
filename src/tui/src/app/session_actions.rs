@@ -57,6 +57,35 @@ pub struct LaunchRequest<'a> {
 pub struct SessionStore {
     pub directory: PathBuf,
 }
+#[derive(Serialize)]
+struct NewView<'a> {
+    version: u32,
+    source: &'a TerminalId,
+    viewer: &'a TerminalId,
+    source_label: String,
+    server_pid: &'a str,
+    mechanism: &'a str,
+    created_at: String,
+}
+#[derive(Serialize)]
+struct LiveView<'a> {
+    version: u32,
+    source: &'a TerminalId,
+    viewer: &'a TerminalId,
+    backend: &'a Value,
+    server: &'a Value,
+    pane_id: &'a Value,
+    terminal_id: &'a Value,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mechanism: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_pid: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<&'a str>,
+}
 struct StoreLock(File);
 impl Drop for StoreLock {
     fn drop(&mut self) {
@@ -112,15 +141,15 @@ fn field(value: &Value, key: &str) -> String {
         .unwrap_or_default()
         .into()
 }
+fn harness_name(pane: &Value) -> String {
+    let name = field(pane, "agent").to_lowercase();
+    harnesses::canonical_id(&name).unwrap_or(&name).into()
+}
 fn first(value: &Value, keys: &[&str]) -> String {
     keys.iter()
         .map(|k| field(value, k))
         .find(|s| !s.is_empty())
         .unwrap_or_default()
-}
-fn key(checkpoint: &Checkpoint) -> Result<String> {
-    let encoded = serde_json::to_vec(checkpoint).map_err(|_| "Cannot encode checkpoint")?;
-    Ok(format!("checkpoint:{:x}", Sha256::digest(encoded)))
 }
 fn utc_now() -> String {
     let seconds = SystemTime::now()
@@ -151,13 +180,7 @@ fn utc_now() -> String {
     )
 }
 fn terminal_ref(pane: &Value) -> Result<TerminalRef> {
-    let id = terminals::identity(pane)?;
     Ok(TerminalRef {
-        backend: id.backend,
-        server: first(pane, &["server", "session", "socket"]),
-        pane_id: id.pane,
-        terminal_id: id.generation,
-        generation: String::new(),
         label: tree::title(pane, ""),
         place: [
             first(pane, &["session"]),
@@ -168,6 +191,7 @@ fn terminal_ref(pane: &Value) -> Result<TerminalRef> {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" / "),
+        ..terminals::reference(pane)?
     })
 }
 #[derive(Debug, Clone)]
@@ -214,14 +238,7 @@ fn read_process(adapter: &Terminals, pid: &str, harness: &str) -> Result<Option<
         && argv
             .get(1)
             .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "cli.js"));
-    if !managed_pi
-        && !argv.iter().take(4).any(|arg| {
-            Path::new(arg)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|name| tool.executables.contains(&name))
-        })
-    {
+    if !managed_pi && harnesses::conversation_argv(&argv, harness).is_none() {
         return Ok(None);
     }
     let cwd = fs::read_link(directory.join("cwd"))
@@ -271,6 +288,12 @@ fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option
         let info =
             adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
         if let Some(rows) = info["process_info"]["foreground_processes"].as_array() {
+            if rows.len() > 128
+                || (!rows.is_empty()
+                    && info["process_info"]["pane_id"].as_str() != Some(id.pane.as_str()))
+            {
+                return Err("Foreground pane metadata changed".into());
+            }
             for row in rows {
                 if let Some(pid) = row.get("pid") {
                     let pid = pid
@@ -383,19 +406,199 @@ fn check_process(
     Ok(())
 }
 
+/// Refresh conversation identity without reading terminal contents. Hook and
+/// transport observations take precedence over an explicit launch selector.
+pub fn enrich_sessions(
+    directory: &Path,
+    snapshot: &mut Value,
+    adapter: &Terminals,
+) -> Result<usize> {
+    if let Some(panes) = snapshot["panes"].as_array_mut() {
+        for pane in panes {
+            if pane["agent_session"]["source"] == "foreground" {
+                pane["agent_session"] = Value::Null;
+            }
+        }
+    }
+    let hooks = super::hook_runtime::enrich_native_sessions(directory, snapshot, adapter);
+    let mut enriched = 0;
+    if let Some(panes) = snapshot["panes"].as_array_mut() {
+        for pane in panes {
+            if terminals::reported_session(pane).is_some()
+                || crate::adapters::pane_observations::conflicted(pane)
+            {
+                continue;
+            }
+            let Some(harness) = pane["agent"].as_str().and_then(harnesses::canonical_id) else {
+                continue;
+            };
+            if let Some(budget) = &adapter.discovery_budget {
+                budget.time_left()?;
+            }
+            // Revalidate the terminal generation on both sides of discovery;
+            // process evidence must never cross a replaced pane or PID.
+            let Ok(actual) = adapter.verify(pane) else {
+                continue;
+            };
+            if actual["agent"].as_str().and_then(harnesses::canonical_id) != Some(harness) {
+                continue;
+            }
+            if let Some(sid) = terminals::reported_session(&actual) {
+                pane["agent_session"] = json!({"kind":"id","agent":harness,"value":sid});
+                enriched += 1;
+                continue;
+            }
+            let Ok(Some(sid)) = foreground_session_id(adapter, &actual, harness) else {
+                continue;
+            };
+            let Ok(again) = adapter.verify(&actual) else {
+                continue;
+            };
+            if again["agent"].as_str().and_then(harnesses::canonical_id) != Some(harness)
+                || again.get("agent_session") != actual.get("agent_session")
+            {
+                continue;
+            }
+            pane["agent"] = json!(harness);
+            pane["agent_session"] =
+                json!({"kind":"id","agent":harness,"value":sid,"source":"foreground"});
+            enriched += 1;
+        }
+    }
+    hooks
+        .map(|hooks| hooks + enriched)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn foreground_session_id(
+    adapter: &Terminals,
+    pane: &Value,
+    harness: &str,
+) -> Result<Option<String>> {
+    let Some(process) = foreground(adapter, pane, harness)? else {
+        return Ok(None);
+    };
+    let sid = harnesses::launch_conversation(&process.argv).map(|(_, sid)| sid);
+    check_process(adapter, &Some(process), harness)?;
+    Ok(sid)
+}
+
+#[cfg(any(windows, test))]
+fn structured_foreground(
+    info: &Value,
+    pane: &Value,
+    harness: &str,
+    mut verify: impl FnMut(u32, &str) -> Result<String>,
+) -> Result<Option<ProcessEvidence>> {
+    if info["pane_id"] != pane["pane_id"] {
+        return Err("Foreground pane changed".into());
+    }
+    let rows = info["foreground_processes"]
+        .as_array()
+        .ok_or("Missing foreground processes")?;
+    if rows.len() > 128 {
+        return Err("Too many foreground processes".into());
+    }
+    let mut seen = BTreeSet::new();
+    let mut found = None;
+    for row in rows {
+        let pid = row["pid"]
+            .as_u64()
+            .or_else(|| row["pid"].as_str()?.parse().ok())
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .ok_or("Invalid foreground PID")?;
+        if !seen.insert(pid) {
+            return Err("Ambiguous foreground PID".into());
+        }
+        // An argv array is structured evidence. A display cmdline is not a
+        // portable quoting grammar and can contain prompts or credentials.
+        let Some(values) = row["argv"].as_array() else {
+            continue;
+        };
+        let argv = values
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("Invalid foreground arguments")?;
+        if harnesses::conversation_argv(&argv, harness).is_none() {
+            continue;
+        }
+        let start = verify(pid, &argv[0])?;
+        if found.is_some() {
+            return Err("Foreground harness identity is ambiguous".into());
+        }
+        found = Some(ProcessEvidence {
+            pid: pid.to_string(),
+            start,
+            argv,
+            cwd: first(pane, &["foreground_cwd", "cwd"]),
+            profile: String::new(),
+        });
+    }
+    Ok(found)
+}
+
+#[cfg(windows)]
+fn foreground_session_id(
+    adapter: &Terminals,
+    pane: &Value,
+    harness: &str,
+) -> Result<Option<String>> {
+    let id = terminals::identity(pane)?;
+    if id.backend != Backend::Herdr {
+        return Ok(None);
+    }
+    let inspect = || -> Result<Option<ProcessEvidence>> {
+        let info =
+            adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
+        structured_foreground(&info["process_info"], pane, harness, |pid, executable| {
+            let process =
+                crate::platform::process_identity(pid).map_err(|_| "Foreground process changed")?;
+            if process.owner != crate::platform::current_identity().map_err(|e| e.to_string())?
+                || process
+                    .executable
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_none_or(|name| {
+                        !name.eq_ignore_ascii_case(
+                            executable.rsplit(['/', '\\']).next().unwrap_or_default(),
+                        )
+                    })
+            {
+                return Err("Foreground executable changed".into());
+            }
+            Ok(process.creation_time.to_string())
+        })
+    };
+    let before = inspect()?;
+    let after = inspect()?;
+    if process_fingerprint(&before) != process_fingerprint(&after) {
+        return Err("Foreground process changed during discovery".into());
+    }
+    let Some(process) = after else {
+        return Ok(None);
+    };
+    Ok(harnesses::launch_conversation(&process.argv).map(|(_, sid)| sid))
+}
+
 impl SessionStore {
     /// Native transport proves terminal identity; private hooks and current
     /// foreground processes independently establish harness/session metadata.
     fn verify_pane(&self, adapter: &Terminals, pane: &Value) -> Result<Value> {
         let actual = adapter.verify(pane)?;
-        if terminals::identity(&actual)?.backend != Backend::Native {
+        if terminals::identity(&actual)?.backend != Backend::Native
+            && terminals::reported_session(&actual).is_some()
+        {
             return Ok(actual);
         }
         let mut snapshot = json!({"panes":[actual]});
-        super::hook_runtime::enrich_native_sessions(&self.directory, &mut snapshot, adapter)
-            .map_err(|error| error.to_string())?;
+        enrich_sessions(&self.directory, &mut snapshot, adapter)?;
         let mut actual = snapshot["panes"][0].take();
-        if actual["agent_session"].is_null() {
+        if terminals::identity(&actual)?.backend == Backend::Native
+            && actual["agent_session"].is_null()
+        {
             let mut matches = Vec::new();
             for tool in harnesses::tools() {
                 #[cfg(unix)]
@@ -423,7 +626,14 @@ impl SessionStore {
     }
     /// Record only a confirmed new viewer terminal, never an uncertain pane
     /// creation. Registration failure must not retry the already submitted launch.
-    pub fn register_view(&self, source: &Value, receipt: &Receipt, mechanism: &str) -> Result<()> {
+    pub fn register_view(
+        &self,
+        source: &Value,
+        receipt: &Receipt,
+        mechanism: &str,
+        settings: &super::runtime_settings::Settings,
+    ) -> Result<()> {
+        settings.validate()?;
         if receipt.state != crate::adapters::terminal_actions::ReceiptState::Submitted {
             return Err("Viewer creation is unconfirmed; registration was skipped".into());
         }
@@ -431,88 +641,189 @@ impl SessionStore {
             .terminal
             .as_ref()
             .ok_or("Viewer terminal identity is missing")?;
-        terminals::identity(source)?;
-        terminals::identity(viewer)?;
-        let _lock = lock(&self.directory)?;
-        let path = self.directory.join("views.json");
-        let mut rows = match layouts::read_private(&path)? {
-            Some(bytes) => serde_json::from_slice::<Value>(&bytes)
-                .map_err(|_| "Invalid viewer registry")?["views"]
-                .as_array()
-                .cloned()
-                .ok_or("Invalid viewer registry")?,
-            None => Vec::new(),
-        };
-        let record = json!({
-            "source": (["backend", "server", "pane_id", "terminal_id"].map(|k| field(source,k)).join("/")),
-            "source_label": tree::title(source, "").chars().take(80).collect::<String>(),
-            "backend": field(viewer,"backend"), "server": first(viewer,&["server","session"]),
-            "server_pid": field(viewer,"server_pid"), "pane_id": field(viewer,"pane_id"),
-            "viewer_terminal": field(viewer,"terminal_id"), "mechanism": mechanism, "created_at": utc_now()
-        });
-        rows.retain(|row| {
-            !(row["backend"] == record["backend"]
-                && row["server"] == record["server"]
-                && row["pane_id"] == record["pane_id"])
-        });
-        rows.push(record);
-        if rows.len() > 200 {
-            rows.drain(..rows.len() - 200);
+        let source_id = terminals::identity(source)?;
+        let viewer_id = terminals::identity(viewer)?;
+        if source_id == viewer_id {
+            return Err("A terminal cannot be its own viewer".into());
         }
-        layouts::write_private(
-            &path,
-            &serde_json::to_vec(&json!({"views":rows}))
-                .map_err(|_| "Cannot encode viewer registry")?,
+        let _lock = lock(&self.directory)?;
+        let mut guard = super::view_history::Guard::new(settings)?;
+        let mut rows = super::view_history::read(&self.directory, &mut guard)?;
+        // Replace only this coordinate's previous viewer incarnation. Other
+        // histories, including unresolved legacy records, are left intact.
+        rows.retain(|row| {
+            !super::view_records::viewer(row).is_some_and(|id| {
+                id.backend == viewer_id.backend
+                    && id.endpoint == viewer_id.endpoint
+                    && id.pane == viewer_id.pane
+            })
+        });
+        let record = NewView {
+            version: 2,
+            source: &source_id,
+            viewer: &viewer_id,
+            source_label: tree::title(source, "").chars().take(80).collect(),
+            server_pid: viewer["server_pid"].as_str().unwrap_or(""),
+            mechanism,
+            created_at: utc_now(),
+        };
+        let record = guard.encode(&record)?;
+        rows.push(serde_json::from_slice(&record).map_err(|_| "Cannot decode new viewer record")?);
+        let limit = settings.terminal_view_history_limit as usize;
+        if rows.len() > limit {
+            rows.drain(..rows.len() - limit);
+        }
+        let bytes = guard.encode(&json!({"version":2,"views":rows}))?;
+        guard.time_left()?;
+        layouts::write_private_limit(
+            &self.directory.join("views.json"),
+            &bytes,
+            guard.file_limit as u64,
         )
     }
-    /// Only exact current viewer identities are projected into the tree. Missing
-    /// servers are not grounds for deleting private historical references.
-    pub fn live_views(&self, snapshot: &Value) -> Result<Vec<Value>> {
-        let Some(bytes) = layouts::read_private(&self.directory.join("views.json"))? else {
-            return Ok(Vec::new());
+    /// Project exact live viewers once. Historical/stale rows remain on disk;
+    /// ambiguous legacy encodings and conflicting identities require review.
+    pub fn live_views(
+        &self,
+        snapshot: &Value,
+        settings: &super::runtime_settings::Settings,
+        budget: &super::discovery_budget::Budget,
+    ) -> Result<super::view_records::Observation> {
+        let mut guard = super::view_history::Guard::new(settings)?;
+        let rows = super::view_history::read(&self.directory, &mut guard)?;
+        if rows.is_empty() {
+            return Ok(super::view_records::Observation::default());
+        }
+        let resolved = super::view_records::resolve(&rows, || {
+            guard.time_left().is_ok() && budget.time_left().is_ok()
+        });
+        guard.time_left()?;
+        budget.time_left()?;
+        let mut observation = super::view_records::Observation {
+            rows: Vec::new(),
+            unresolved: resolved.unresolved,
         };
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid viewer registry")?;
-        let rows = value["views"].as_array().ok_or("Invalid viewer registry")?;
-        let mut live = Vec::new();
-        for row in rows {
-            let matching: Vec<_> = snapshot
-                .get("panes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|pane| {
-                    pane.get("backend") == row.get("backend")
-                        && first(pane, &["server", "session"]) == field(row, "server")
-                        && pane.get("pane_id") == row.get("pane_id")
-                        && !field(row, "viewer_terminal").is_empty()
-                        && field(pane, "terminal_id") == field(row, "viewer_terminal")
-                        && (field(row, "server_pid").is_empty()
-                            || field(pane, "server_pid") == field(row, "server_pid"))
-                })
-                .collect();
-            if let Some(pane) = matching.first() {
-                let mut record = row.clone();
-                record["terminal_id"] = pane["terminal_id"].clone();
-                live.push(record);
+        let mut panes: std::collections::HashMap<TerminalId, Vec<&Value>> =
+            std::collections::HashMap::new();
+        let captured_rows = snapshot
+            .get("panes")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let captured = crate::adapters::pane_observations::index(captured_rows);
+        for pane in captured.panes.iter().map(|pane| pane.as_ref()) {
+            if let Ok(identity) = terminals::identity(pane) {
+                panes.entry(identity).or_default().push(pane);
             }
         }
-        Ok(live)
+        for record in resolved.records {
+            guard.time_left()?;
+            budget.time_left()?;
+            let Some(matching) = panes.get(&record.viewer) else {
+                continue;
+            };
+            if matching
+                .iter()
+                .any(|pane| crate::adapters::pane_observations::conflicted(pane))
+            {
+                observation.unresolved += 1;
+                continue;
+            }
+            if ["server_pid", "source_label", "mechanism", "created_at"]
+                .iter()
+                .any(|key| record.row.get(*key).is_some_and(|field| !field.is_string()))
+            {
+                observation.unresolved += 1;
+                continue;
+            }
+            let expected = record.row["server_pid"].as_str().unwrap_or("");
+            if !expected.is_empty()
+                && matching
+                    .iter()
+                    .any(|pane| pane["server_pid"].as_str().unwrap_or("") != expected)
+            {
+                continue;
+            }
+            let pane = matching[0];
+            let projected = LiveView {
+                version: 2,
+                source: &record.source,
+                viewer: &record.viewer,
+                backend: &pane["backend"],
+                server: &pane["server"],
+                pane_id: &pane["pane_id"],
+                terminal_id: &pane["terminal_id"],
+                label: tree::title(pane, ""),
+                source_label: record.row["source_label"].as_str(),
+                mechanism: record.row["mechanism"].as_str(),
+                server_pid: record.row["server_pid"].as_str(),
+                created_at: record.row["created_at"].as_str(),
+            };
+            if super::discovery_budget::json_size(&projected, budget.remaining_bytes()).is_err() {
+                let _ = budget.capacity_error();
+                observation.unresolved += 1;
+                continue;
+            }
+            let bytes =
+                serde_json::to_vec(&projected).map_err(|_| "Cannot encode viewer observation")?;
+            guard.check_json(&bytes)?;
+            if budget
+                .admit_json(&bytes)
+                .and_then(|()| budget.admit_text(1, 0))
+                .is_err()
+            {
+                observation.unresolved += 1;
+                continue;
+            }
+            observation.rows.push(
+                serde_json::from_slice(&bytes).map_err(|_| "Cannot decode viewer observation")?,
+            );
+        }
+        guard.time_left()?;
+        budget.time_left()?;
+        Ok(observation)
     }
-    fn removed(&self) -> Result<BTreeSet<String>> {
-        let Some(bytes) = layouts::read_private(&self.directory.join("checkpoint-removals.json"))?
-        else {
-            return Ok(BTreeSet::new());
-        };
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid checkpoint removal index".into())
+    #[cfg(all(test, unix))]
+    fn live_views_default(&self, snapshot: &Value) -> Result<super::view_records::Observation> {
+        let settings = super::runtime_settings::Settings::default();
+        self.live_views(
+            snapshot,
+            &settings,
+            &super::discovery_budget::Budget::new(&settings)?,
+        )
+    }
+    pub(crate) fn checkpoint_settings(&self) -> Result<super::runtime_settings::Settings> {
+        layouts::read_private(&self.directory.join("control.json"))?
+            .map(|bytes| ControlConfig::parse(&bytes).map(|config| config.runtime))
+            .transpose()
+            .map(|settings| settings.unwrap_or_default())
     }
     pub fn list(&self) -> Result<Vec<CheckpointRow>> {
-        let removed = self.removed()?;
-        Registry::load(&self.directory)?
+        self.list_with_settings(&self.checkpoint_settings()?)
+    }
+    pub fn list_with_settings(
+        &self,
+        settings: &super::runtime_settings::Settings,
+    ) -> Result<Vec<CheckpointRow>> {
+        settings.validate()?;
+        self.list_guard(&mut crate::core::checkpoint_budget::Guard::new(
+            settings.checkpoint_policy(),
+        )?)
+        .map(|(rows, _)| rows)
+    }
+    fn list_guard(
+        &self,
+        guard: &mut crate::core::checkpoint_budget::Guard<'_>,
+    ) -> Result<(Vec<CheckpointRow>, BTreeSet<String>)> {
+        let removed = checkpoints::removals(&self.directory, guard)?;
+        let rows = Registry::load_with(&self.directory, guard)?
             .checkpoints
             .into_iter()
             .map(|checkpoint| {
+                guard.time_left()?;
+                let bytes = guard.encode(&checkpoint)?;
                 Ok(CheckpointRow {
-                    key: key(&checkpoint)?,
+                    key: format!("checkpoint:{:x}", Sha256::digest(&bytes)),
                     checkpoint,
                     registry: self
                         .directory
@@ -526,10 +837,42 @@ impl SessionStore {
                     .as_ref()
                     .map_or(true, |row| !removed.contains(&row.key))
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        guard.time_left()?;
+        Ok((rows, removed))
+    }
+    pub fn observe_checkpoints(
+        &self,
+        settings: &super::runtime_settings::Settings,
+        budget: &super::discovery_budget::Budget,
+    ) -> Result<Vec<Value>> {
+        settings.validate()?;
+        let progress = || budget.time_left().map(|_| ());
+        let mut guard = crate::core::checkpoint_budget::Guard::new(settings.checkpoint_policy())?
+            .with_progress(&progress);
+        let (rows, _) = self.list_guard(&mut guard)?;
+        let mut result = Vec::new();
+        for row in rows {
+            let bytes = guard.encode(&row)?;
+            budget.admit_json(&bytes)?;
+            budget.admit_text(1, 0)?;
+            result.push(
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| "Cannot encode saved checkpoint observation")?,
+            );
+        }
+        guard.time_left()?;
+        Ok(result)
     }
     pub fn get(&self, key: &str) -> Result<CheckpointRow> {
-        self.list()?
+        self.get_with_settings(key, &self.checkpoint_settings()?)
+    }
+    pub fn get_with_settings(
+        &self,
+        key: &str,
+        settings: &super::runtime_settings::Settings,
+    ) -> Result<CheckpointRow> {
+        self.list_with_settings(settings)?
             .into_iter()
             .find(|row| row.key == key)
             .ok_or_else(|| "Checkpoint changed or was removed; select it again".into())
@@ -537,13 +880,28 @@ impl SessionStore {
     /// Removing a reference never deletes native history or terminal output files.
     /// Tombstones also suppress matching entries in untouched legacy registries.
     pub fn remove(&self, key: &str) -> Result<()> {
+        self.remove_with_settings(key, &self.checkpoint_settings()?)
+    }
+    pub fn remove_with_settings(
+        &self,
+        key: &str,
+        settings: &super::runtime_settings::Settings,
+    ) -> Result<()> {
+        settings.validate()?;
         let _lock = lock(&self.directory)?;
-        self.get(key)?;
-        let mut removed = self.removed()?;
+        let mut guard = crate::core::checkpoint_budget::Guard::new(settings.checkpoint_policy())?;
+        let (rows, mut removed) = self.list_guard(&mut guard)?;
+        if !rows.iter().any(|row| row.key == key) {
+            return Err("Checkpoint changed or was removed; select it again".into());
+        }
+        guard.entries(1)?;
         removed.insert(key.into());
-        layouts::write_private(
+        let bytes = guard.encode(&removed)?;
+        guard.time_left()?;
+        layouts::write_private_limit(
             &self.directory.join("checkpoint-removals.json"),
-            &serde_json::to_vec(&removed).map_err(|_| "Cannot encode checkpoint removal")?,
+            &bytes,
+            guard.policy.file_bytes,
         )
     }
     pub fn live_source(
@@ -555,7 +913,7 @@ impl SessionStore {
         supplied_sid: &str,
     ) -> Result<Checkpoint> {
         let actual = self.verify_pane(adapter, pane)?;
-        let observed_harness = field(&actual, "agent").to_lowercase();
+        let observed_harness = harness_name(&actual);
         let mut harness = observed_harness.clone();
         if matches!(harness.as_str(), "" | "node" | "nodejs") {
             let process = foreground(adapter, &actual, "pi")?
@@ -570,12 +928,9 @@ impl SessionStore {
             .ok_or("Terminal has no verified Pi session")?;
             harness = "pi".into();
         }
-        let native = &actual["agent_session"];
-        let reported = if native["kind"] == "id" && field(native, "agent") == harness {
-            field(native, "value")
-        } else {
-            String::new()
-        };
+        let reported = terminals::reported_session(&actual)
+            .unwrap_or_default()
+            .to_owned();
         let evidence = foreground(adapter, &actual, &harness)?;
         let discovered_pi = if harness == "pi" {
             evidence
@@ -613,17 +968,27 @@ impl SessionStore {
             .map(|session| session.0.clone())
             .unwrap_or(reported);
         let reported = if let Some(process) = &evidence {
-            checkpoints::resolve_sid(&process.argv, &harness, &reported)?.unwrap_or_default()
+            checkpoints::resolve_sid(
+                harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
+                &harness,
+                &reported,
+            )?
+            .unwrap_or_default()
         } else {
             reported
         };
         let supplied_sid = supplied_sid.trim();
         if !supplied_sid.is_empty()
             && let Some(process) = &evidence
-            && checkpoints::resolve_sid(&process.argv, &harness, supplied_sid)?.is_none()
+            && checkpoints::resolve_sid(
+                harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
+                &harness,
+                supplied_sid,
+            )?
+            .is_none()
         {
             return Err(
-                "A forking process still reports its parent ID; wait for the child session ID"
+                "Cannot confirm this conversation ID from the process launch; forks need a distinct child ID"
                     .into(),
             );
         }
@@ -675,7 +1040,7 @@ impl SessionStore {
             source: Some(terminal_ref(&actual)?),
         };
         let again = self.verify_pane(adapter, pane)?;
-        if field(&again, "agent").to_lowercase() != observed_harness
+        if harness_name(&again) != observed_harness
             || again.get("agent_session") != actual.get("agent_session")
         {
             return Err("Native harness metadata changed; refresh".into());
@@ -710,7 +1075,7 @@ impl SessionStore {
         supplied_sid: &str,
     ) -> Result<(Checkpoint, Value)> {
         let before = self.verify_pane(adapter, pane)?;
-        let harness = field(&before, "agent").to_lowercase();
+        let harness = harness_name(&before);
         let evidence = foreground(adapter, &before, &harness)?;
         let checkpoint = self.live_source(adapter, config, environment, pane, supplied_sid)?;
         check_process(adapter, &evidence, &harness)?;
@@ -739,8 +1104,12 @@ impl SessionStore {
         request: &SaveRequest,
     ) -> Result<CheckpointRow> {
         let _lock = lock(&self.directory)?;
+        let mut guard =
+            crate::core::checkpoint_budget::Guard::new(config.runtime.checkpoint_policy())?;
+        let saved_rows = self.list_guard(&mut guard)?.0;
+        guard.entries(1)?;
         let before = self.verify_pane(adapter, pane)?;
-        let observed = field(&before, "agent").to_lowercase();
+        let observed = harness_name(&before);
         // A terminal excerpt is useful even when no native conversation can be
         // identified. Never promote shell/Node metadata into a provider ID.
         let context_only = harnesses::tool(&observed).is_none()
@@ -785,12 +1154,12 @@ impl SessionStore {
             return Err("Harness changed while saving checkpoint".into());
         }
         let mut registry = Registry {
-            checkpoints: self.list()?.into_iter().map(|row| row.checkpoint).collect(),
+            checkpoints: saved_rows.into_iter().map(|row| row.checkpoint).collect(),
         };
         registry.add_verified(row.clone(), &terminal_ref(&before)?, &terminal_ref(&after)?)?;
-        registry.save(&self.directory)?;
+        registry.save_with(&self.directory, &mut guard)?;
         Ok(CheckpointRow {
-            key: key(&row)?,
+            key: checkpoints::key(&row)?,
             checkpoint: row,
             registry: self
                 .directory
@@ -853,18 +1222,21 @@ impl SessionStore {
         mut checkpoint: Checkpoint,
     ) -> Result<Checkpoint> {
         let before = self.verify_pane(adapter, pane)?;
-        if checkpoint.source.as_ref().is_some_and(|source| {
-            terminal_ref(&before).is_ok_and(|actual| !actual.same_identity(source))
-        }) {
+        let actual_reference = terminal_ref(&before)?;
+        if checkpoint
+            .source
+            .as_ref()
+            .is_some_and(|source| !actual_reference.same_identity(source))
+        {
             return Err("Handoff source changed; select it again".into());
         }
         // The pane can survive replacement of its foreground harness while the
         // confirmation dialog is open. Bind capture to the frozen conversation,
         // not just to the outer terminal's process generation.
-        let harness = field(&before, "agent").to_lowercase();
+        let harness = harness_name(&before);
         if harness != checkpoint.harness
             || before.get("agent_session") != pane.get("agent_session")
-            || field(pane, "agent").to_lowercase() != harness
+            || harness_name(pane) != harness
         {
             return Err("Handoff harness changed; select it again".into());
         }
@@ -884,15 +1256,16 @@ impl SessionStore {
                 "Handoff requires a native session ID or a verifiable foreground process".into(),
             );
         }
-        let reported = if before["agent_session"]["kind"] == "id"
-            && field(&before["agent_session"], "agent") == harness
-        {
-            field(&before["agent_session"], "value")
-        } else {
-            String::new()
-        };
+        let reported = terminals::reported_session(&before)
+            .unwrap_or_default()
+            .to_owned();
         let current_sid = if let Some(process) = &process {
-            checkpoints::resolve_sid(&process.argv, &harness, &reported)?.unwrap_or_default()
+            checkpoints::resolve_sid(
+                harnesses::conversation_argv(&process.argv, &harness).unwrap_or(&process.argv),
+                &harness,
+                &reported,
+            )?
+            .unwrap_or_default()
         } else {
             reported
         };
@@ -928,7 +1301,7 @@ impl SessionStore {
         config: &ControlConfig,
         environment: &BTreeMap<String, String>,
     ) -> Result<PreparedLaunch> {
-        let saved = self.get(key)?;
+        let saved = self.get_with_settings(key, &config.runtime)?;
         self.prepare_record(
             saved.checkpoint,
             Some(saved.key),
@@ -989,7 +1362,9 @@ impl SessionStore {
     pub fn apply(&self, adapter: &Terminals, prepared: PreparedLaunch) -> Result<Receipt> {
         if let Some(key) = &prepared.saved_key {
             let current = self.get(key)?;
-            if key != &self::key(&prepared.checkpoint)? || self::key(&current.checkpoint)? != *key {
+            if key != &checkpoints::key(&prepared.checkpoint)?
+                || checkpoints::key(&current.checkpoint)? != *key
+            {
                 return Err("Checkpoint changed before launch".into());
             }
         }
@@ -1049,7 +1424,7 @@ pub fn own_terminals(
         .unwrap_or(&[]);
     let socket = environment
         .get("TMUX")
-        .and_then(|s| s.split(',').next())
+        .and_then(|s| terminals::active_tmux_socket(s))
         .unwrap_or_default();
     let tmux_pane = environment
         .get("TMUX_PANE")
@@ -1156,29 +1531,42 @@ fn native_binary(path: &Path, environment: &BTreeMap<String, String>) -> Result<
         .ok_or_else(|| "Native terminal client is not installed".into())
 }
 fn view_facts(pane: &Value, snapshot: &Value) -> (usize, String) {
-    let same: Vec<_> = snapshot
+    let identity = terminals::identity(pane).ok();
+    let captured_rows = snapshot
         .get("panes")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|p| {
-            p.get("backend") == pane.get("backend")
-                && first(p, &["socket", "server"]) == first(pane, &["socket", "server"])
-                && p.get("terminal_id") == pane.get("terminal_id")
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let captured = crate::adapters::pane_observations::index(captured_rows);
+    let same: Vec<_> = captured
+        .panes
+        .iter()
+        .map(|pane| pane.as_ref())
+        .filter(|candidate| {
+            identity
+                .as_ref()
+                .is_some_and(|id| terminals::identity(candidate).ok().as_ref() == Some(id))
         })
         .collect();
-    let viewers = snapshot
+    let rows = snapshot
         .get("daedalus_views")
         .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let viewers = super::view_records::resolve(rows, || true)
+        .records
         .into_iter()
-        .flatten()
-        .filter(|v| {
-            field(v, "source")
-                == ["backend", "server", "pane_id", "terminal_id"]
-                    .map(|k| field(pane, k))
-                    .join("/")
-        })
+        .filter(|view| identity.as_ref() == Some(&view.source))
         .count();
+    if same
+        .iter()
+        .any(|pane| crate::adapters::pane_observations::conflicted(pane))
+    {
+        return (
+            same.len() + viewers,
+            crate::adapters::pane_observations::WARNING.into(),
+        );
+    }
     if pane["backend"] == "native" {
         return (same.len() + viewers, "One controller at a time; additional Daedalus windows can watch without taking input control.".into());
     }
@@ -1369,6 +1757,7 @@ fn runtime_environment(environment: &BTreeMap<String, String>) -> BTreeMap<Strin
         "TZ",
         "DISPLAY",
         "WAYLAND_DISPLAY",
+        "XDG_CONFIG_HOME",
         "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS",
         "SSH_AUTH_SOCK",
@@ -1418,6 +1807,7 @@ pub fn prepare_duplicate_view(
     if !Path::new(&cwd).is_dir() {
         return Err("Destination project directory is unavailable".into());
     }
+    let mut child_environment = runtime_environment(environment);
     let (binary, args, mechanism) = if source_id.backend == Backend::Tmux {
         let name = format!(
             "daedalus-view-{:x}-{:x}",
@@ -1470,6 +1860,9 @@ pub fn prepare_duplicate_view(
         if read_only {
             return Err("Herdr read-only observation is available through Watch; its native duplicate-view client does not advertise a read-only option".into());
         }
+        if let Some(config) = environment.get("HERDR_CONFIG_PATH") {
+            child_environment.insert("HERDR_CONFIG_PATH".into(), config.clone());
+        }
         (
             native_binary(&adapter.herdr, environment)?,
             vec![
@@ -1488,7 +1881,7 @@ pub fn prepare_duplicate_view(
         launch: LaunchPlan {
             binary,
             args,
-            environment: runtime_environment(environment),
+            environment: child_environment,
             cwd: cwd.into(),
             operation: Operation::Handoff,
         },
@@ -1627,11 +2020,7 @@ fn windows_native_process(adapter: &Terminals, pane: &Value, harness: &str) -> R
         if actual.owner != crate::platform::current_identity().map_err(|e| e.to_string())? {
             return Err("Foreground process belongs to another account".into());
         }
-        if actual
-            .executable
-            .file_stem()
-            .is_some_and(|name| name.eq_ignore_ascii_case(harness))
-        {
+        if actual.executable.to_str().and_then(harnesses::canonical_id) == Some(harness) {
             candidates.push(actual);
         }
     }
@@ -1745,6 +2134,56 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+    #[test]
+    fn checkpoint_save_refuses_ambiguity_and_capacity_before_capturing_terminal_output() {
+        let mut f = fixture();
+        save(&f, false);
+        let path = f.store.directory.join("dashboard-checkpoints.json");
+        let raw = fs::read(&path).unwrap();
+        let ambiguous = String::from_utf8(raw.clone()).unwrap().replacen(
+            "\"profile\":",
+            "\"profile\":\"/synthetic/ambiguous\",\"profile\":",
+            1,
+        );
+        fs::write(&path, ambiguous.as_bytes()).unwrap();
+        let adapter = f.adapter.herdr.clone();
+        f.adapter.herdr = f.dir.join("not-an-adapter");
+        let request = SaveRequest {
+            name: "Second checkpoint".into(),
+            sid: String::new(),
+            include_output: true,
+        };
+        assert!(
+            f.store
+                .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(!f.store.directory.join("checkpoints").exists());
+        assert_eq!(fs::read(&path).unwrap(), ambiguous.as_bytes());
+        fs::write(&path, &raw).unwrap();
+        f.config.runtime.checkpoint_entry_limit = 1;
+        assert!(
+            f.store
+                .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+                .unwrap_err()
+                .contains("entry limit")
+        );
+        assert_eq!(fs::read(&path).unwrap(), raw);
+        f.adapter.herdr = adapter;
+        f.config.runtime.checkpoint_entry_limit = 3;
+        let request = SaveRequest {
+            include_output: false,
+            ..request
+        };
+        f.store
+            .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+            .unwrap();
+        assert_eq!(
+            f.store.list_with_settings(&f.config.runtime).unwrap().len(),
+            2
+        );
     }
     fn capabilities(f: &Fixture) -> Capabilities {
         Capabilities {
@@ -1901,7 +2340,7 @@ mod tests {
             &serde_json::to_vec(&legacy).unwrap(),
         )
         .unwrap();
-        let second_key = key(&second).unwrap();
+        let second_key = checkpoints::key(&second).unwrap();
         assert_eq!(f.store.list().unwrap().len(), 2);
         f.store.remove(&saved.key).unwrap();
         let remaining = f.store.list().unwrap();
@@ -2060,19 +2499,184 @@ mod tests {
         assert!(matches!(result, Err(error) if error.contains("Watch in another Daedalus window")));
     }
     #[test]
+    fn inventory_recovers_explicit_foreground_ids_and_drops_expired_evidence() {
+        use std::os::unix::fs::symlink;
+        const SID: &str = "019a043e-1234-7000-8000-000000000001";
+        for (harness, args) in [
+            ("codex", vec!["/usr/bin/codex", "resume", SID]),
+            (
+                "codex",
+                vec!["/usr/bin/node", "/tools/codex.js", "resume", SID],
+            ),
+            ("claude", vec!["/usr/bin/claude", "--resume", SID]),
+            ("grok", vec!["/usr/bin/grok", "--session-id", SID]),
+            (
+                "opencode",
+                vec!["/usr/bin/opencode", "--session", "ses_fixture"],
+            ),
+        ] {
+            let mut f = fixture();
+            f.pane["agent"] = json!(harness);
+            f.pane["agent_session"] = Value::Null;
+            fs::write(
+                f.dir.join("pane.json"),
+                serde_json::to_vec(&json!({"pane":f.pane})).unwrap(),
+            )
+            .unwrap();
+            publish_script(
+                &f.adapter.herdr,
+                format!(
+                    "#!/bin/sh\ncase \"$4\" in\nget) /bin/cat '{}' ;;\nprocess-info) printf '%s\\n' '{{\"process_info\":{{\"pane_id\":\"pane\",\"foreground_processes\":[{{\"pid\":90}}]}}}}' ;;\n*) exit 79 ;;\nesac\n",
+                    f.dir.join("pane.json").display()
+                ),
+            );
+            let pid = f.adapter.proc_root.join("90");
+            fs::create_dir(&pid).unwrap();
+            let mut fields = vec!["0"; 20];
+            fields[0] = "S";
+            fields[2] = "90";
+            fields[4] = "99";
+            fields[5] = "90";
+            fields[19] = "500";
+            fs::write(
+                pid.join("stat"),
+                format!("90 (fixture) {}", fields.join(" ")),
+            )
+            .unwrap();
+            fs::write(pid.join("cmdline"), format!("{}\0", args.join("\0"))).unwrap();
+            fs::write(pid.join("environ"), format!("HOME={}\0", f.dir.display())).unwrap();
+            symlink(&f.dir, pid.join("cwd")).unwrap();
+            let mut snapshot = json!({"panes":[f.pane]});
+            assert_eq!(
+                enrich_sessions(&f.store.directory, &mut snapshot, &f.adapter).unwrap(),
+                1
+            );
+            let expected = if harness == "opencode" {
+                "ses_fixture"
+            } else {
+                SID
+            };
+            assert_eq!(
+                terminals::reported_session(&snapshot["panes"][0]),
+                Some(expected)
+            );
+            assert_eq!(
+                snapshot["panes"][0]["agent_session"]["source"],
+                "foreground"
+            );
+            snapshot["panes"][0]["agent_session"] =
+                json!({"kind":"id","agent":harness,"value":"new-current-selection"});
+            assert_eq!(
+                enrich_sessions(&f.store.directory, &mut snapshot, &f.adapter).unwrap(),
+                0
+            );
+            assert_eq!(
+                terminals::reported_session(&snapshot["panes"][0]),
+                Some("new-current-selection")
+            );
+            snapshot["panes"][0]["agent_session"]["source"] = json!("foreground");
+            // This adapter supports metadata only: a terminal-output read is a
+            // test failure, including while discarding vanished-process IDs.
+            fs::remove_dir_all(&pid).unwrap();
+            assert_eq!(
+                enrich_sessions(&f.store.directory, &mut snapshot, &f.adapter).unwrap(),
+                0
+            );
+            assert!(terminals::reported_session(&snapshot["panes"][0]).is_none());
+        }
+    }
+    #[test]
+    fn duplicate_view_keeps_native_configuration_roots_without_caller_scope_or_secrets() {
+        let mut f = fixture();
+        let mut destination = f.pane.clone();
+        destination["pane_id"] = json!("destination");
+        destination["terminal_id"] = json!("destination-generation");
+        fs::write(
+            f.dir.join("destination.json"),
+            serde_json::to_vec(&json!({"pane":destination})).unwrap(),
+        )
+        .unwrap();
+        publish_script(
+            &f.adapter.herdr,
+            r#"#!/usr/bin/python3
+from pathlib import Path
+import sys
+root=Path(__file__).parent
+if sys.argv[4]=='get':print((root/('pane.json' if sys.argv[5]=='pane' else 'destination.json')).read_text())
+elif sys.argv[4]=='process-info':print('{"process_info":{"foreground_processes":[]}}')
+else:sys.exit(2)
+"#,
+        );
+        for (key, value) in [
+            (
+                "XDG_CONFIG_HOME",
+                f.dir.join("custom config").to_string_lossy().into_owned(),
+            ),
+            (
+                "HERDR_CONFIG_PATH",
+                f.dir
+                    .join("herdr config.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("HERDR_SESSION", "another-session".into()),
+            ("HERDR_PANE_ID", "another-pane".into()),
+            (
+                "HERDR_SOCKET_PATH",
+                f.dir.join("another.sock").to_string_lossy().into_owned(),
+            ),
+            ("TMUX", "another-server".into()),
+        ] {
+            f.environment.insert(key.into(), value);
+        }
+        let prepared = prepare_duplicate_view(
+            &f.adapter,
+            &f.pane,
+            &destination,
+            false,
+            &f.environment,
+            &AttachContext::default(),
+        )
+        .unwrap();
+        for key in ["HOME", "PATH", "XDG_CONFIG_HOME", "HERDR_CONFIG_PATH"] {
+            assert_eq!(
+                prepared.launch.environment.get(key),
+                f.environment.get(key),
+                "{key}"
+            );
+        }
+        for key in [
+            "HERDR_SESSION",
+            "HERDR_PANE_ID",
+            "HERDR_SOCKET_PATH",
+            "TMUX",
+            "GROK_HOME",
+            "TELEGRAM_BOT_TOKEN",
+        ] {
+            assert!(!prepared.launch.environment.contains_key(key), "{key}");
+        }
+        assert_eq!(
+            prepared.launch.args,
+            ["--session", "work", "terminal", "attach", "uuid"]
+        );
+        assert!(!runtime_environment(&f.environment).contains_key("HERDR_CONFIG_PATH"));
+    }
+    #[test]
     fn own_detection_follows_nested_clients() {
         let pane = |socket: &str, pane: &str, session: &str| json!({"backend":"tmux","socket":socket,"server":socket,"pane_id":pane,"session_id":session,"terminal_id":format!("v2:{pane}")});
-        let inside = pane("/inner", "%1", "$1");
-        let outer = pane("/outer", "%2", "$2");
-        let snapshot = json!({"panes":[inside,outer],"clients":[{"socket":"/inner","session_id":"$1","outer_panes":[{"socket":"/outer","pane_id":"%2"}]}]});
-        let environment = BTreeMap::from([
-            ("TMUX".into(), "/inner,123,1".into()),
-            ("TMUX_PANE".into(), "%1".into()),
-        ]);
-        assert_eq!(
-            own_terminals(&snapshot, &environment, &BTreeSet::new(), &[]).len(),
-            2
-        );
+        for inner in ["/inner", "/inner, work"] {
+            let inside = pane(inner, "%1", "$1");
+            let outer = pane("/outer", "%2", "$2");
+            let snapshot = json!({"panes":[inside,outer],"clients":[{"socket":inner,"session_id":"$1","outer_panes":[{"socket":"/outer","pane_id":"%2"}]}]});
+            let environment = BTreeMap::from([
+                ("TMUX".into(), format!("{inner},123,1")),
+                ("TMUX_PANE".into(), "%1".into()),
+            ]);
+            assert_eq!(
+                own_terminals(&snapshot, &environment, &BTreeSet::new(), &[]).len(),
+                2
+            );
+        }
     }
     #[test]
     fn store_updates_refuse_concurrent_writer() {
@@ -2101,7 +2705,7 @@ mod tests {
         std::os::unix::fs::symlink(&f.dir, pid.join("cwd")).unwrap();
         let script = fs::read_to_string(&f.adapter.herdr).unwrap().replace(
             "\"foreground_processes\":[]",
-            "\"foreground_processes\":[{\"pid\":90}]",
+            "\"pane_id\":\"pane\",\"foreground_processes\":[{\"pid\":90}]",
         );
         publish_script(&f.adapter.herdr, script);
         let supplied = SaveRequest {
@@ -2117,6 +2721,105 @@ mod tests {
         let saved = save(&f, true);
         assert_eq!(saved.checkpoint.sid, "");
         assert!(!saved.checkpoint.context_file.is_empty());
+    }
+    #[test]
+    fn checkpoint_capture_keeps_native_ids_separate_from_names_and_fork_parents() {
+        let mut f = fixture();
+        let pid = f.adapter.proc_root.join("90");
+        fs::create_dir(&pid).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[19] = "100";
+        fs::write(
+            pid.join("stat"),
+            format!("90 (fixture) {}", fields.join(" ")),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&f.dir, pid.join("cwd")).unwrap();
+        let script = fs::read_to_string(&f.adapter.herdr).unwrap().replace(
+            "\"foreground_processes\":[]",
+            "\"pane_id\":\"pane\",\"foreground_processes\":[{\"pid\":90}]",
+        );
+        publish_script(&f.adapter.herdr, script);
+        for harness in ["claude", "grok", "opencode"] {
+            let (parent, child, selector, fork) = if harness == "opencode" {
+                ("ses_parent", "ses_child", "--session", "--fork")
+            } else {
+                (
+                    "019a043e-1234-7000-8000-000000000001",
+                    "019a043e-1234-7000-8000-000000000002",
+                    "--resume",
+                    "--fork-session",
+                )
+            };
+            let tool = harnesses::tool(harness).unwrap();
+            f.config.profiles.insert(
+                harness.into(),
+                f.dir.join("profile").to_string_lossy().into(),
+            );
+            fs::write(
+                pid.join("environ"),
+                format!(
+                    "HOME={}\0{}={}\0",
+                    f.dir.display(),
+                    tool.profile_variable,
+                    f.dir.join("profile").display()
+                ),
+            )
+            .unwrap();
+            let publish = |f: &mut Fixture, argv: &[&str], reported: Option<&str>| {
+                fs::write(pid.join("cmdline"), format!("{}\0", argv.join("\0"))).unwrap();
+                f.pane["agent"] = json!(harness);
+                f.pane["agent_session"] = reported
+                    .map(|id| json!({"agent":harness,"kind":"id","value":id}))
+                    .unwrap_or(Value::Null);
+                fs::write(f.dir.join("pane.json"), json!({"pane":f.pane}).to_string()).unwrap();
+            };
+            publish(&mut f, &[harness, selector, parent, fork], Some(parent));
+            let request = SaveRequest {
+                name: format!("{harness} source"),
+                sid: parent.into(),
+                include_output: false,
+            };
+            let before =
+                layouts::read_private(&f.store.directory.join("dashboard-checkpoints.json"))
+                    .unwrap();
+            let error = f
+                .store
+                .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+                .unwrap_err();
+            assert!(error.contains("distinct child ID"), "{harness}: {error}");
+            assert_eq!(
+                layouts::read_private(&f.store.directory.join("dashboard-checkpoints.json"))
+                    .unwrap(),
+                before
+            );
+            publish(&mut f, &[harness, selector, parent, fork], Some(child));
+            let saved = save(&f, false);
+            assert_eq!(saved.checkpoint.sid, child);
+            if harness != "opencode" {
+                publish(&mut f, &[harness, "--resume", "work"], Some(child));
+                assert_eq!(save(&f, false).checkpoint.sid, child);
+                publish(&mut f, &[harness, "--resume", "work"], None);
+                let before =
+                    fs::read(f.store.directory.join("dashboard-checkpoints.json")).unwrap();
+                let request = SaveRequest {
+                    sid: String::new(),
+                    ..request
+                };
+                assert!(
+                    f.store
+                        .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+                        .is_err()
+                );
+                assert_eq!(
+                    fs::read(f.store.directory.join("dashboard-checkpoints.json")).unwrap(),
+                    before
+                );
+            } else {
+                publish(&mut f, &[harness, selector, parent], Some(child));
+                assert_eq!(save(&f, false).checkpoint.sid, child);
+            }
+        }
     }
     #[test]
     fn handoff_uses_target_profile_and_never_claims_native_fork() {
@@ -2168,22 +2871,314 @@ mod tests {
             terminal: Some(viewer.clone()),
         };
         f.store
-            .register_view(&f.pane, &receipt, "Herdr native client")
+            .register_view(&f.pane, &receipt, "Herdr native client", &f.config.runtime)
             .unwrap();
         assert_eq!(
             f.store
-                .live_views(&json!({"panes":[viewer]}))
+                .live_views_default(&json!({"panes":[viewer]}))
                 .unwrap()
+                .rows
                 .len(),
             1
         );
         viewer["terminal_id"] = "replacement".into();
         assert!(
             f.store
-                .live_views(&json!({"panes":[viewer]}))
+                .live_views_default(&json!({"panes":[viewer]}))
                 .unwrap()
+                .rows
                 .is_empty()
         );
+    }
+    #[test]
+    fn viewer_projection_does_not_copy_unknown_saved_payloads_or_rewrite_history() {
+        let f = fixture();
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        let row = json!({"version":2,"source":terminals::identity(&f.pane).unwrap(),"viewer":terminals::identity(&viewer).unwrap(),"source_label":"source","extra":vec![0;10000]});
+        let bytes = serde_json::to_vec(&json!({"version":2,"views":[row]})).unwrap();
+        let path = f.store.directory.join("views.json");
+        layouts::write_private(&path, &bytes).unwrap();
+        let observed = f
+            .store
+            .live_views_default(&json!({"panes":[viewer]}))
+            .unwrap();
+        assert_eq!(observed.rows.len(), 1);
+        assert!(observed.rows[0].get("extra").is_none());
+        assert!(serde_json::to_vec(&observed.rows).unwrap().len() < 4096);
+        assert_eq!(layouts::read_private(&path).unwrap().unwrap(), bytes);
+    }
+    #[test]
+    fn saved_viewer_byte_and_value_limits_refuse_without_rewriting_and_recover_when_raised() {
+        let f = fixture();
+        let path = f.store.directory.join("views.json");
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        for values in [false, true] {
+            let mut row = json!({"version":2,"source":terminals::identity(&f.pane).unwrap(),"viewer":terminals::identity(&viewer).unwrap()});
+            if values {
+                row["extra"] = json!(vec![0; 200]);
+            } else {
+                row["mechanism"] = json!("x".repeat(5000));
+            }
+            let bytes = serde_json::to_vec(&json!({"version":2,"views":[row]})).unwrap();
+            layouts::write_private(&path, &bytes).unwrap();
+            let mut settings = super::super::runtime_settings::Settings {
+                terminal_view_history_limit_bytes: 4096,
+                terminal_view_history_value_limit: 128,
+                ..Default::default()
+            };
+            let result = f.store.live_views(
+                &json!({"panes":[viewer.clone()]}),
+                &settings,
+                &super::super::discovery_budget::Budget::new(&settings).unwrap(),
+            );
+            assert!(result.err().unwrap().contains(if values {
+                "value budget"
+            } else {
+                "byte budget"
+            }));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            settings.terminal_view_history_limit_bytes = 8192;
+            settings.terminal_view_history_value_limit = 1024;
+            let result = f
+                .store
+                .live_views(
+                    &json!({"panes":[viewer.clone()]}),
+                    &settings,
+                    &super::super::discovery_budget::Budget::new(&settings).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(result.rows.len(), 1);
+            assert!(result.rows[0].get("extra").is_none());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn viewer_projection_shares_remaining_inventory_capacity_and_refuses_an_expired_pass() {
+        let f = fixture();
+        let path = f.store.directory.join("views.json");
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        let bytes=serde_json::to_vec(&json!({"version":2,"views":[{"version":2,"source":terminals::identity(&f.pane).unwrap(),"viewer":terminals::identity(&viewer).unwrap()}]})).unwrap();
+        layouts::write_private(&path, &bytes).unwrap();
+        let settings = super::super::runtime_settings::Settings {
+            discovery_metadata_limit_bytes: 4096,
+            ..Default::default()
+        };
+        let budget = super::super::discovery_budget::Budget::new(&settings).unwrap();
+        budget
+            .admit_text(budget.remaining_bytes() - 100, 0)
+            .unwrap();
+        let result = f
+            .store
+            .live_views(&json!({"panes":[viewer.clone()]}), &settings, &budget)
+            .unwrap();
+        assert!(result.rows.is_empty());
+        assert_eq!(result.unresolved, 1);
+        let mut snapshot = json!({"errors":[]});
+        budget.finish(&mut snapshot);
+        budget.finish(&mut snapshot);
+        assert_eq!(snapshot["errors"].as_array().unwrap().len(), 1);
+        let mut expired = super::super::discovery_budget::Budget::new(&settings).unwrap();
+        expired.deadline = std::time::Instant::now();
+        assert!(
+            f.store
+                .live_views(&json!({"panes":[viewer]}), &settings, &expired)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    #[test]
+    fn confirmed_viewer_registration_preserves_history_when_read_or_write_policy_refuses() {
+        let f = fixture();
+        let path = f.store.directory.join("views.json");
+        let initial = br#"{"version":2,"views":[]}"#;
+        layouts::write_private(&path, initial).unwrap();
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        let receipt = Receipt {
+            state: crate::adapters::terminal_actions::ReceiptState::Submitted,
+            message: "Already submitted".into(),
+            terminal: Some(viewer),
+        };
+        let mut settings = super::super::runtime_settings::Settings {
+            terminal_view_history_limit_bytes: 4096,
+            ..Default::default()
+        };
+        assert!(
+            f.store
+                .register_view(&f.pane, &receipt, &"x".repeat(5000), &settings)
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), initial);
+        assert_eq!(receipt.message, "Already submitted");
+        settings.terminal_view_history_limit_bytes = 8192;
+        f.store
+            .register_view(&f.pane, &receipt, &"x".repeat(5000), &settings)
+            .unwrap();
+        let saved = fs::read(&path).unwrap();
+        assert!(saved.len() > 4096);
+        settings.terminal_view_history_limit_bytes = 4096;
+        assert!(
+            f.store
+                .register_view(
+                    &f.pane,
+                    &receipt,
+                    "second attempt after already submitted",
+                    &settings
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+    #[test]
+    fn duplicate_registry_keys_cannot_select_a_viewer_identity_or_rewrite_history() {
+        let f = fixture();
+        let path = f.store.directory.join("views.json");
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        let row = json!({"version":2,"source":terminals::identity(&f.pane).unwrap(),"viewer":terminals::identity(&viewer).unwrap()});
+        let bytes = format!("{{\"version\":3,\"version\":2,\"views\":[{row}]}}").into_bytes();
+        layouts::write_private(&path, &bytes).unwrap();
+        assert!(
+            f.store
+                .live_views_default(&json!({"panes":[viewer]}))
+                .is_err()
+        );
+        assert_eq!(layouts::read_private(&path).unwrap().unwrap(), bytes);
+    }
+    #[test]
+    fn viewer_registry_records_structured_source_identity_without_delimiter_collisions() {
+        let f = fixture();
+        let mut source = f.pane.clone();
+        source["pane_id"] = json!("a/b");
+        source["terminal_id"] = json!("c");
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        f.store
+            .register_view(
+                &source,
+                &Receipt {
+                    state: crate::adapters::terminal_actions::ReceiptState::Submitted,
+                    message: "Fixture".into(),
+                    terminal: Some(viewer),
+                },
+                "fixture",
+                &f.config.runtime,
+            )
+            .unwrap();
+        let bytes = layouts::read_private(&f.store.directory.join("views.json"))
+            .unwrap()
+            .unwrap();
+        let stored: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(stored["views"][0]["source"].is_object());
+        assert_eq!(
+            stored["views"][0]["source"],
+            serde_json::to_value(terminals::identity(&source).unwrap()).unwrap()
+        );
+    }
+    #[test]
+    fn attach_view_counts_require_the_exact_pane_identity() {
+        let pane = json!({"backend":"herdr","session":"fixture","server":"fixture","pane_id":"one","terminal_id":"shared-generation"});
+        let mut other = pane.clone();
+        other["pane_id"] = json!("two");
+        assert_eq!(view_facts(&pane, &json!({"panes":[pane,other]})).0, 1);
+    }
+    #[test]
+    fn legacy_view_read_preserves_ambiguous_history_and_deduplicates_linked_viewers() {
+        let f = fixture();
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer");
+        viewer["terminal_id"] = json!("viewer-generation");
+        let history=serde_json::to_vec(&json!({"views":[
+            {"source":"herdr/work/pane/uuid","backend":"herdr","server":"work","pane_id":"viewer","viewer_terminal":"viewer-generation"},
+            {"source":"herdr/work/a/b/c","backend":"herdr","server":"work","pane_id":"other","viewer_terminal":"other-generation"}
+        ]})).unwrap();
+        layouts::write_private(&f.store.directory.join("views.json"), &history).unwrap();
+        let observation = f
+            .store
+            .live_views_default(&json!({"panes":[viewer.clone(),viewer]}))
+            .unwrap();
+        assert_eq!(observation.rows.len(), 1);
+        assert_eq!(observation.unresolved, 1);
+        assert_eq!(
+            layouts::read_private(&f.store.directory.join("views.json"))
+                .unwrap()
+                .unwrap(),
+            history
+        );
+    }
+    #[test]
+    fn viewer_history_retention_is_saved_policy_and_unsupported_registry_is_preserved() {
+        let mut f = fixture();
+        f.config.runtime.terminal_view_history_limit = 1;
+        for name in ["viewer-one", "viewer-two"] {
+            let mut viewer = f.pane.clone();
+            viewer["pane_id"] = json!(name);
+            viewer["terminal_id"] = json!(name);
+            f.store
+                .register_view(
+                    &f.pane,
+                    &Receipt {
+                        state: crate::adapters::terminal_actions::ReceiptState::Submitted,
+                        message: "Fixture".into(),
+                        terminal: Some(viewer),
+                    },
+                    "fixture",
+                    &f.config.runtime,
+                )
+                .unwrap();
+        }
+        let path = f.store.directory.join("views.json");
+        let bytes = layouts::read_private(&path).unwrap().unwrap();
+        let stored: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored["version"], 2);
+        assert_eq!(stored["views"].as_array().unwrap().len(), 1);
+        assert_eq!(stored["views"][0]["viewer"]["pane"], "viewer-two");
+        let unsupported = br#"{"version":3,"views":[]}"#;
+        layouts::write_private(&path, unsupported).unwrap();
+        assert!(f.store.live_views_default(&json!({"panes":[]})).is_err());
+        let mut viewer = f.pane.clone();
+        viewer["pane_id"] = json!("viewer-three");
+        let receipt = Receipt {
+            state: crate::adapters::terminal_actions::ReceiptState::Submitted,
+            message: "Fixture".into(),
+            terminal: Some(viewer),
+        };
+        assert!(
+            f.store
+                .register_view(&f.pane, &receipt, "fixture", &f.config.runtime)
+                .is_err()
+        );
+        assert_eq!(layouts::read_private(&path).unwrap().unwrap(), unsupported);
+    }
+    #[test]
+    fn malformed_supplemental_generation_cannot_bypass_handoff_source_revalidation() {
+        let f = fixture();
+        let checkpoint = f
+            .store
+            .live_source(&f.adapter, &f.config, &f.environment, &f.pane, "")
+            .unwrap();
+        let mut changed = f.pane.clone();
+        changed["generation"] = json!(17);
+        fs::write(
+            f.dir.join("pane.json"),
+            serde_json::to_vec(&json!({"pane":changed})).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            f.store
+                .capture_handoff(&f.adapter, &f.pane, checkpoint)
+                .is_err()
+        );
+        assert!(!f.store.directory.join("checkpoints").exists());
     }
     #[test]
     fn handoff_rejects_conversation_or_harness_swapped_during_confirmation() {
@@ -2240,7 +3235,7 @@ mod tests {
         std::os::unix::fs::symlink(&f.dir, pid.join("cwd")).unwrap();
         let script = fs::read_to_string(&f.adapter.herdr).unwrap().replace(
             "\"foreground_processes\":[]",
-            "\"foreground_processes\":[{\"pid\":90}]",
+            "\"pane_id\":\"pane\",\"foreground_processes\":[{\"pid\":90}]",
         );
         publish_script(&f.adapter.herdr, script);
         let (checkpoint, frozen) = f
@@ -2300,6 +3295,58 @@ fn read_process(
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
+    const SID: &str = "019a043e-1234-7000-8000-000000000001";
+    #[test]
+    fn windows_structured_argv_recovers_conversation_without_parsing_cmdline() {
+        let pane = json!({"pane_id":"pane","agent":"CODEX.EXE","cwd":"C:\\Project"});
+        let info = json!({"pane_id":"pane","foreground_processes":[{
+            "pid":"42","argv":["C:\\Tools\\Codex.exe","resume",SID],
+            "cmdline":"misleading prompt and secrets are ignored"}]});
+        let process = structured_foreground(&info, &pane, "codex", |pid, executable| {
+            assert_eq!(pid, 42);
+            assert_eq!(executable, "C:\\Tools\\Codex.exe");
+            Ok("500".into())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(process.start, "500");
+        assert_eq!(
+            harnesses::launch_conversation(&process.argv),
+            Some(("codex", SID.into()))
+        );
+        let mut unstructured = info;
+        unstructured["foreground_processes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("argv");
+        assert!(
+            structured_foreground(&unstructured, &pane, "codex", |_, _| panic!(
+                "no argv proof"
+            ))
+            .unwrap()
+            .is_none()
+        );
+    }
+    #[test]
+    fn structured_foreground_rejects_replaced_panes_duplicate_pids_and_ambiguous_harnesses() {
+        let pane = json!({"pane_id":"pane"});
+        let row = json!({"pid":42,"argv":["Codex.exe","resume",SID]});
+        for info in [
+            json!({"pane_id":"replacement","foreground_processes":[row]}),
+            json!({"pane_id":"pane","foreground_processes":[row,row]}),
+            json!({"pane_id":"pane","foreground_processes":[row,{"pid":43,"argv":["codex.exe","resume",SID]}]}),
+            json!({"pane_id":"pane","foreground_processes":[{"pid":0,"argv":["codex.exe"]}]}),
+        ] {
+            assert!(structured_foreground(&info, &pane, "codex", |_, _| Ok("500".into())).is_err());
+        }
+        let info = json!({"pane_id":"pane","foreground_processes":[row]});
+        assert!(
+            structured_foreground(&info, &pane, "codex", |_, _| Err(
+                "PID reused or wrong owner".into()
+            ))
+            .is_err()
+        );
+    }
     #[test]
     fn windows_native_fingerprint_is_reused_for_capture_and_rejects_restart() {
         let native =

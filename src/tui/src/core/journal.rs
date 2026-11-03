@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+pub const MAX_DESTINATION_PAGE: usize = 1000;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS delivery_priority(delivery_id TEXT PRIMARY KEY,priority INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS delivery_retry(delivery_id TEXT PRIMARY KEY,next_at REAL NOT NULL);
@@ -21,6 +23,7 @@ CREATE TABLE IF NOT EXISTS callbacks(bot TEXT NOT NULL,token TEXT NOT NULL UNIQU
 CREATE TABLE IF NOT EXISTS inbox(id INTEGER PRIMARY KEY AUTOINCREMENT,channel TEXT NOT NULL,bot TEXT NOT NULL,event_id TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL,created_at REAL NOT NULL,error TEXT,UNIQUE(channel,bot,event_id));
 CREATE TABLE IF NOT EXISTS cursors(channel TEXT NOT NULL,bot TEXT NOT NULL,offset INTEGER NOT NULL,PRIMARY KEY(channel,bot));
 CREATE TABLE IF NOT EXISTS progress_heads(binding TEXT PRIMARY KEY,event_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS hook_binding_starts(instance TEXT NOT NULL,binding TEXT NOT NULL,event_id INTEGER NOT NULL,PRIMARY KEY(instance,binding));
 CREATE TABLE IF NOT EXISTS delivery(id INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL UNIQUE,direction TEXT NOT NULL,destination TEXT NOT NULL,payload TEXT NOT NULL,payload_sha TEXT NOT NULL,origin TEXT NOT NULL,dedup_key TEXT NOT NULL,state TEXT NOT NULL,created_at REAL NOT NULL,worker TEXT,lease_token TEXT,lease_until REAL,attempts INTEGER NOT NULL DEFAULT 0,receipt TEXT,error TEXT,UNIQUE(direction,dedup_key));
 CREATE TABLE IF NOT EXISTS quarantine(source TEXT NOT NULL,line_number INTEGER NOT NULL,raw TEXT NOT NULL,error TEXT,PRIMARY KEY(source,line_number,raw));
 CREATE INDEX IF NOT EXISTS delivery_ready ON delivery(direction,destination,state,id);
@@ -379,6 +382,54 @@ impl Journal {
             |row| row.get(0),
         )?)
     }
+    /// A newly enabled recipient starts at the current head, never historical inbox events.
+    /// Retain the boundary across restarts; removing and re-adding opts in afresh.
+    pub fn configure_hook_starts(&mut self, instance: &str, bindings: &[Value]) -> Result<()> {
+        let tx = self.con.transaction()?;
+        let head: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(id),0) FROM inbox WHERE channel='hooks' AND bot=?",
+            [instance],
+            |r| r.get(0),
+        )?;
+        let encoded = bindings
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let previous = {
+            let mut q = tx.prepare("SELECT binding FROM hook_binding_starts WHERE instance=?")?;
+            q.query_map([instance], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for key in previous {
+            if !encoded.contains(&key) {
+                tx.execute(
+                    "DELETE FROM hook_binding_starts WHERE instance=? AND binding=?",
+                    params![instance, key],
+                )?;
+            }
+        }
+        for key in encoded {
+            tx.execute("INSERT OR IGNORE INTO hook_binding_starts(instance,binding,event_id) VALUES(?,?,?)", params![instance,key,head])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn hook_after_binding_start(
+        &self,
+        instance: &str,
+        binding: &Value,
+        event: i64,
+    ) -> Result<bool> {
+        let start: Option<i64> = self
+            .con
+            .query_row(
+                "SELECT event_id FROM hook_binding_starts WHERE instance=? AND binding=?",
+                params![instance, serde_json::to_string(binding)?],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(start.is_some_and(|start| event > start))
+    }
     /// Latest real user prompt in one exact registered scope. Unrelated tool
     /// messages cannot reopen an older Telegram turn.
     pub fn latest_hook_prompt(&self, instance: &str, scope: &Value) -> Result<Option<Event>> {
@@ -599,6 +650,20 @@ impl Journal {
         tx.commit()?;
         Ok(())
     }
+    /// The owning Telegram sender has observed its monotonic retry wait elapse.
+    /// Clear only the matching known-not-sent attempt's durable UTC delay; begin
+    /// still enforces ordering/leases and the engine rechecks authorization.
+    /// A stale lease or any other delivery state cannot authorize a replay.
+    pub(crate) fn release_outbound_retry(&mut self, id: &str, lease: &str) -> Result<()> {
+        if id.is_empty() || lease.is_empty() {
+            return Err(Error::Invalid("Missing retry attempt identity"));
+        }
+        self.con.execute(
+            "UPDATE delivery_retry SET next_at=0 WHERE delivery_id=? AND EXISTS(SELECT 1 FROM delivery WHERE delivery_id=? AND direction='outbound' AND worker='telegram' AND state='retryable' AND lease_token=? AND lease_until IS NULL)",
+            params![id, id, lease],
+        )?;
+        Ok(())
+    }
     pub fn checkpoint(&mut self, id: &str, lease: &str, receipt: &Value, now: f64) -> Result<()> {
         timestamp(now)?;
         let tx = self.transaction()?;
@@ -673,7 +738,7 @@ impl Journal {
     /// authority for retry time, active leases and priority/FIFO ordering.
     pub fn destinations(&self, dir: &str, after: &str, limit: usize) -> Result<Vec<String>> {
         direction(dir)?;
-        if !(1..=1000).contains(&limit) {
+        if !(1..=MAX_DESTINATION_PAGE).contains(&limit) {
             return Err(Error::Invalid("Invalid destination page size"));
         }
         Ok(self.con.prepare(
@@ -1324,6 +1389,114 @@ mod tests {
         );
     }
     #[test]
+    fn elapsed_outbound_retry_release_requires_the_same_safe_attempt() {
+        let mut j = Journal::memory().unwrap();
+        let id = enqueue(&mut j, "first");
+        let attempt = j
+            .begin("outbound", "chat", "telegram", 100.0, 90.0)
+            .unwrap()
+            .unwrap();
+        let lease = attempt.lease_token.as_deref().unwrap();
+        j.release_outbound_retry(&id, lease).unwrap();
+        assert_eq!(j.rows().unwrap()[0].state, "intent");
+        j.finish(&id, lease, "not_sent", None, None, 10.0, 101.0)
+            .unwrap();
+        j.release_outbound_retry(&id, "different-attempt").unwrap();
+        assert!(
+            j.begin("outbound", "chat", "telegram", 1.0, 90.0)
+                .unwrap()
+                .is_none()
+        );
+        j.release_outbound_retry(&id, lease).unwrap();
+        let next = j
+            .begin("outbound", "chat", "telegram", 1.0, 90.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.delivery_id, id);
+        assert_ne!(next.lease_token, attempt.lease_token);
+        j.finish(
+            &id,
+            next.lease_token.as_deref().unwrap(),
+            "not_sent",
+            None,
+            None,
+            10.0,
+            2.0,
+        )
+        .unwrap();
+        j.release_outbound_retry(&id, lease).unwrap();
+        assert!(
+            j.begin("outbound", "chat", "telegram", 3.0, 90.0)
+                .unwrap()
+                .is_none()
+        );
+        j.release_outbound_retry(&id, next.lease_token.as_deref().unwrap())
+            .unwrap();
+        let third = j
+            .begin("outbound", "chat", "telegram", 3.0, 90.0)
+            .unwrap()
+            .unwrap();
+        j.finish(
+            &id,
+            third.lease_token.as_deref().unwrap(),
+            "unknown",
+            None,
+            Some("outcome unknown"),
+            0.0,
+            4.0,
+        )
+        .unwrap();
+        j.release_outbound_retry(&id, third.lease_token.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(j.rows().unwrap()[0].state, "unknown");
+        assert!(
+            j.begin("outbound", "chat", "telegram", 1_000_000.0, 90.0)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn retry_deadline_survives_reopening_without_process_local_wait_evidence() {
+        let temp = Temp::new();
+        let id;
+        {
+            let mut j = Journal::open(&temp.db()).unwrap();
+            id = enqueue(&mut j, "retry");
+            let row = j
+                .begin("outbound", "chat", "telegram", 100.0, 90.0)
+                .unwrap()
+                .unwrap();
+            j.finish(
+                &id,
+                row.lease_token.as_deref().unwrap(),
+                "not_sent",
+                None,
+                None,
+                10.0,
+                101.0,
+            )
+            .unwrap();
+        }
+        let mut j = Journal::open(&temp.db()).unwrap();
+        assert!(
+            j.begin("outbound", "chat", "telegram", 1.0, 90.0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            j.begin("outbound", "chat", "telegram", 110.99, 90.0)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            j.begin("outbound", "chat", "telegram", 111.0, 90.0)
+                .unwrap()
+                .unwrap()
+                .delivery_id,
+            id
+        );
+    }
+    #[test]
     fn abandon_only_pending_and_recovery_only_processing_for_exact_bot() {
         let mut j = Journal::memory().unwrap();
         let id = enqueue(&mut j, "first");
@@ -1505,6 +1678,39 @@ mod tests {
             j.events_page("tg", "bot", &["admitted"], 3, 1)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn binding_activation_excludes_history_and_survives_refresh() {
+        let mut j = Journal::memory().unwrap();
+        let binding = json!({"registration":"one","revision":1});
+        j.admit("hooks", "fixture", "old", &json!({}), 0.0).unwrap();
+        let old = j.hook_head("fixture").unwrap();
+        j.configure_hook_starts("fixture", std::slice::from_ref(&binding))
+            .unwrap();
+        assert!(
+            !j.hook_after_binding_start("fixture", &binding, old)
+                .unwrap()
+        );
+        j.admit("hooks", "fixture", "new", &json!({}), 1.0).unwrap();
+        let new = j.hook_head("fixture").unwrap();
+        j.configure_hook_starts("fixture", std::slice::from_ref(&binding))
+            .unwrap();
+        assert!(
+            j.hook_after_binding_start("fixture", &binding, new)
+                .unwrap()
+        );
+        j.configure_hook_starts("fixture", &[]).unwrap();
+        assert!(
+            !j.hook_after_binding_start("fixture", &binding, new)
+                .unwrap()
+        );
+        j.configure_hook_starts("fixture", std::slice::from_ref(&binding))
+            .unwrap();
+        assert!(
+            !j.hook_after_binding_start("fixture", &binding, new)
+                .unwrap()
         );
     }
 

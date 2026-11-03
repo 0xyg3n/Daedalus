@@ -12,6 +12,37 @@ use std::{
 
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: usize = 8_000_000;
+
+/// A conversation belongs to its reported harness, never to its terminal ID.
+pub fn reported_session(pane: &Value) -> Option<&str> {
+    let session = &pane["agent_session"];
+    let observed = pane["agent"].as_str()?;
+    let reported = session["agent"].as_str()?;
+    let same_agent = if let Some(agent) = super::harnesses::canonical_id(observed) {
+        super::harnesses::canonical_id(reported) == Some(agent)
+    } else {
+        // Preserve an exact transport report for an unregistered tool without
+        // granting that tool native launch/control capabilities.
+        !observed.is_empty() && observed == reported
+    };
+    (session["kind"] == "id" && same_agent)
+        .then(|| session["value"].as_str())?
+        .filter(|sid| !sid.is_empty() && !sid.chars().any(char::is_control))
+}
+fn normalize_agent(pane: &mut Map<String, Value>) {
+    if let Some(agent) = pane
+        .get("agent")
+        .and_then(Value::as_str)
+        .and_then(super::harnesses::canonical_id)
+    {
+        pane.insert("agent".into(), agent.into());
+    }
+}
+/// The final two TMUX fields follow the full socket path, which may have commas.
+pub(crate) fn active_tmux_socket(value: &str) -> Option<&str> {
+    let socket = value.rsplitn(3, ',').nth(2)?;
+    (Path::new(socket).is_absolute() && !socket.chars().any(char::is_control)).then_some(socket)
+}
 const KEYS: [&str; 21] = [
     "session",
     "session_id",
@@ -65,26 +96,84 @@ pub struct Terminals {
     pub herdr: PathBuf,
     pub proc_root: PathBuf,
     pub timeout: Duration,
+    pub output_limit: usize,
+    pub discovery_budget: Option<std::sync::Arc<crate::app::discovery_budget::Budget>>,
+    pub native_launch_cols: u16,
+    pub native_launch_rows: u16,
+    pub native_scrollback_rows: u64,
 }
 impl Default for Terminals {
     fn default() -> Self {
+        let settings = crate::app::runtime_settings::Settings::default();
         Self {
             tmux: default_mux_binary(),
             herdr: default_herdr_binary(),
             proc_root: "/proc".into(),
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_millis(settings.terminal_query_timeout_ms),
+            output_limit: settings.terminal_query_limit_bytes as usize,
+            discovery_budget: None,
+            native_launch_cols: settings.native_launch_cols,
+            native_launch_rows: settings.native_launch_rows,
+            native_scrollback_rows: settings.native_scrollback_rows,
         }
     }
 }
 impl Terminals {
+    pub fn configured(&self, settings: &crate::app::runtime_settings::Settings) -> Result<Self> {
+        let mut configured = self.clone();
+        configured.apply_settings(settings)?;
+        Ok(configured)
+    }
+
+    pub fn apply_settings(
+        &mut self,
+        settings: &crate::app::runtime_settings::Settings,
+    ) -> Result<()> {
+        settings.validate()?;
+        self.timeout = Duration::from_millis(settings.terminal_query_timeout_ms);
+        self.output_limit = settings.terminal_query_limit_bytes as usize;
+        self.native_launch_cols = settings.native_launch_cols;
+        self.native_launch_rows = settings.native_launch_rows;
+        self.native_scrollback_rows = settings.native_scrollback_rows;
+        Ok(())
+    }
+
     pub(crate) fn query(&self, executable: &Path, args: &[&str]) -> Result<String> {
+        let timeout = match &self.discovery_budget {
+            Some(budget) => self.timeout.min(budget.time_left()?),
+            None => self.timeout,
+        };
+        let limit = self
+            .discovery_budget
+            .as_ref()
+            .map_or(self.output_limit, |budget| {
+                self.output_limit.min(budget.remaining_bytes())
+            });
+        if limit == 0 {
+            return Err(self.discovery_budget.as_ref().map_or_else(
+                || "Terminal query output limit is zero".into(),
+                |budget| budget.capacity_error(),
+            ));
+        }
         let mut command = Command::new(executable);
         command.args(args);
         if let Some(home) = user_home() {
             command.current_dir(home);
         }
-        let output = process::run_terminal(&mut command, self.timeout, LIMIT)
-            .map_err(|e| format!("Terminal query failed ({:?})", e.kind()))?;
+        let output = process::run_terminal(&mut command, timeout, limit).map_err(|error| {
+            if let Some(budget) = &self.discovery_budget {
+                if let Err(error) = budget.time_left() {
+                    return error;
+                }
+                if error.kind() == std::io::ErrorKind::InvalidData && limit < self.output_limit {
+                    return budget.capacity_error();
+                }
+            }
+            format!("Terminal query failed ({:?})", error.kind())
+        })?;
+        if let Some(budget) = &self.discovery_budget {
+            budget.time_left()?;
+        }
         if !output.status.success() {
             return Err("Terminal server rejected discovery query".into());
         }
@@ -104,11 +193,20 @@ impl Terminals {
             &self.tmux,
             &["-S", socket, "list-panes", "-a", "-F", &format],
         )?;
+        if let Some(budget) = &self.discovery_budget {
+            budget.admit_text(
+                output.len(),
+                output.lines().count().saturating_mul(KEYS.len() * 2 + 1),
+            )?;
+        }
         let panes = parse_tmux(&output, socket, |pid| process_start(&self.proc_root, pid))?;
         #[cfg(windows)]
         let panes = windows_harness_labels(panes);
         let format = "#{client_name}\t#{client_pid}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{client_tty}\t#{client_flags}";
         let output = self.query(&self.tmux, &["-S", socket, "list-clients", "-F", format])?;
+        if let Some(budget) = &self.discovery_budget {
+            budget.admit_text(output.len(), output.lines().count().saturating_mul(15))?;
+        }
         let keys = [
             "client",
             "pid",
@@ -120,7 +218,7 @@ impl Terminals {
         ];
         let mut clients = Vec::new();
         for line in output.lines() {
-            let fields: Vec<_> = line.split('\t').collect();
+            let fields: Vec<_> = line.split('\t').take(keys.len() + 1).collect();
             if fields.len() != keys.len() {
                 return Err("Malformed tmux client inventory".into());
             }
@@ -133,7 +231,9 @@ impl Terminals {
             row.insert("socket".into(), socket.into());
             clients.push(Value::Object(row));
         }
-        Ok(json!({"panes":panes,"clients":clients}))
+        let mut snapshot = json!({"panes":panes,"clients":clients});
+        super::pane_observations::normalize(&mut snapshot);
+        Ok(snapshot)
     }
     pub fn herdr_result(&self, session: &str, args: &[&str]) -> Result<Value> {
         TerminalId {
@@ -150,6 +250,9 @@ impl Terminals {
         if output.trim().is_empty() {
             return Ok(json!({}));
         }
+        if let Some(budget) = &self.discovery_budget {
+            budget.admit_json(output.as_bytes())?;
+        }
         let value: Value = serde_json::from_str(&output).map_err(|_| "Malformed Herdr response")?;
         if value
             .get("error")
@@ -162,19 +265,32 @@ impl Terminals {
     pub fn herdr_inventory(&self, session: &str) -> Result<Value> {
         normalize_herdr(self.herdr_result(session, &["api", "snapshot"])?, session)
     }
-    pub fn herdr_sessions(&self) -> Result<Vec<String>> {
+    pub fn herdr_sessions(&self, limit: usize) -> Result<Vec<String>> {
         let text = self.query(&self.herdr, &["session", "list"])?;
-        Ok(text
-            .lines()
-            .filter_map(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                (fields.len() > 1 && fields[1] == "running").then(|| fields[0].to_owned())
-            })
-            .collect())
+        if let Some(budget) = &self.discovery_budget {
+            budget.admit_text(text.len(), text.lines().count())?;
+        }
+        let mut sessions = BTreeSet::new();
+        for line in text.lines() {
+            let mut fields = line.split_whitespace();
+            if let Some(name) = fields.next()
+                && fields.next() == Some("running")
+            {
+                sessions.insert(name.to_owned());
+                // Keep one excess unique endpoint so the caller reports truncation.
+                if sessions.len() > limit {
+                    break;
+                }
+            }
+        }
+        Ok(sessions.into_iter().collect())
     }
     /// Caller revalidates immediately before a mutation. Linked tmux views must
     /// agree on the same terminal generation; a session hint selects the view.
     pub fn verify(&self, saved: &Value) -> Result<Value> {
+        if super::pane_observations::conflicted(saved) {
+            return Err(super::pane_observations::WARNING.into());
+        }
         let expected = identity(saved)?;
         let candidates = match expected.backend {
             Backend::Native => vec![super::native::pane(&crate::app::native_terminal::info(
@@ -196,6 +312,7 @@ impl Terminals {
                 pane.insert("backend".into(), "herdr".into());
                 pane.insert("session".into(), expected.endpoint.clone().into());
                 pane.insert("server".into(), expected.endpoint.clone().into());
+                normalize_agent(&mut pane);
                 // Herdr reports the pane's shell PID only through process-info;
                 // process ancestry checks need it like tmux's pane_pid.
                 if pane.get("pid").is_none()
@@ -217,6 +334,12 @@ impl Terminals {
             .iter()
             .filter(|p| p.get("pane_id") == saved.get("pane_id"))
             .collect();
+        if same_pane
+            .iter()
+            .any(|pane| super::pane_observations::conflicted(pane))
+        {
+            return Err(super::pane_observations::WARNING.into());
+        }
         if same_pane.is_empty()
             || same_pane
                 .iter()
@@ -279,6 +402,29 @@ pub fn process_start(proc_root: &Path, pid: &str) -> Option<String> {
     let start = fields.split_whitespace().nth(19)?;
     (!start.is_empty() && start.bytes().all(|b| b.is_ascii_digit())).then(|| start.to_owned())
 }
+/// Shared saved reference producer; display aliases never replace endpoints.
+pub fn reference(row: &Value) -> Result<crate::core::layouts::TerminalRef> {
+    if super::pane_observations::conflicted(row) {
+        return Err(super::pane_observations::WARNING.into());
+    }
+    let id = identity(row)?;
+    let generation = match row.get("generation") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        _ => return Err("Invalid supplemental terminal generation".into()),
+    };
+    let reference = crate::core::layouts::TerminalRef {
+        backend: id.backend,
+        server: id.endpoint,
+        pane_id: id.pane,
+        terminal_id: id.generation,
+        generation,
+        label: String::new(),
+        place: String::new(),
+    };
+    reference.validate()?;
+    Ok(reference)
+}
 fn encoded(value: &str) -> String {
     let mut output = String::new();
     for byte in value.bytes() {
@@ -300,7 +446,7 @@ pub fn parse_tmux(
     }
     let mut panes = Vec::new();
     for line in output.lines() {
-        let fields: Vec<_> = line.split('\t').collect();
+        let fields: Vec<_> = line.split('\t').take(KEYS.len() + 1).collect();
         if fields.len() != KEYS.len() {
             return Err(
                 "Malformed tmux inventory; labels must not contain tabs or newlines".into(),
@@ -327,15 +473,7 @@ pub fn parse_tmux(
             row["pid"].as_str().unwrap_or(""),
             pane_start
         );
-        let agent = match row["agent"].as_str().unwrap_or("") {
-            "opencode.exe" => "opencode",
-            "cursor-agent" => "cursor",
-            name => name,
-        }
-        .to_owned();
-        #[cfg(windows)]
-        let agent = agent.strip_suffix(".exe").unwrap_or(&agent).to_owned();
-        row.insert("agent".into(), agent.into());
+        normalize_agent(&mut row);
         row.insert("backend".into(), "tmux".into());
         row.insert("socket".into(), socket.into());
         row.insert("server".into(), format!("tmux@{}", encoded(socket)).into());
@@ -347,20 +485,33 @@ pub fn parse_tmux(
     }
     Ok(panes)
 }
-pub fn normalize_herdr(data: Value, session: &str) -> Result<Value> {
-    let data = data.get("snapshot").unwrap_or(&data);
+pub fn normalize_herdr(mut data: Value, session: &str) -> Result<Value> {
+    if let Some(snapshot) = data.get_mut("snapshot") {
+        data = snapshot.take();
+    }
+    let Value::Object(mut data) = data else {
+        return Err("Incomplete Herdr snapshot".into());
+    };
     if !data.get("panes").is_some_and(Value::is_array) {
         return Err("Incomplete Herdr snapshot".into());
     }
     let mut snapshot = Map::new();
     for key in ["panes", "workspaces", "tabs", "clients", "layouts"] {
         let mut rows = Vec::new();
-        if let Some(entries) = data.get(key) {
-            for entry in entries.as_array().ok_or("Invalid Herdr collection")? {
-                let mut row = entry.as_object().cloned().ok_or("Invalid Herdr record")?;
+        if let Some(entries) = data.remove(key) {
+            let Value::Array(entries) = entries else {
+                return Err("Invalid Herdr collection".into());
+            };
+            for entry in entries {
+                let Value::Object(mut row) = entry else {
+                    return Err("Invalid Herdr record".into());
+                };
                 row.insert("backend".into(), "herdr".into());
                 row.insert("session".into(), session.into());
                 row.insert("server".into(), session.into());
+                if key == "panes" {
+                    normalize_agent(&mut row);
+                }
                 let row = Value::Object(row);
                 if key == "panes" {
                     identity(&row)?;
@@ -372,40 +523,118 @@ pub fn normalize_herdr(data: Value, session: &str) -> Result<Value> {
     }
     snapshot.insert("herdr_sessions".into(), json!([session]));
     snapshot.insert("herdr_focus".into(),json!([{"session":session,"scope":"server","workspace_id":data.get("focused_workspace_id"),"tab_id":data.get("focused_tab_id"),"pane_id":data.get("focused_pane_id"),"per_client_focus":"unavailable"}]));
-    Ok(Value::Object(snapshot))
+    let mut snapshot = Value::Object(snapshot);
+    super::pane_observations::normalize(&mut snapshot);
+    Ok(snapshot)
+}
+/// Candidate endpoints plus explicit incompleteness evidence. No socket is removed.
+pub struct SocketDiscovery {
+    pub paths: Vec<PathBuf>,
+    pub errors: Vec<String>,
+}
+fn scan_socket_directory(
+    directory: &Path,
+    remaining: &mut usize,
+    found: &mut BTreeSet<PathBuf>,
+    errors: &mut BTreeSet<&'static str>,
+    deadline: Option<std::time::Instant>,
+    candidate: impl Fn(fs::DirEntry) -> std::io::Result<Option<PathBuf>>,
+) -> bool {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => {
+            errors.insert("Cannot enumerate automatic socket directory");
+            return true;
+        }
+    };
+    for entry in entries {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            errors.insert("Automatic socket discovery deadline reached");
+            return false;
+        }
+        if *remaining == 0 {
+            errors.insert("Automatic socket scan entry limit reached; raise runtime.discovery_socket_scan_limit or reduce discovery scope");
+            return false;
+        }
+        *remaining -= 1;
+        match entry.and_then(&candidate) {
+            Ok(Some(path)) => {
+                found.insert(path);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                errors.insert("Cannot inspect automatic socket directory entry");
+            }
+        }
+    }
+    true
+}
+fn socket_discovery(found: BTreeSet<PathBuf>, errors: BTreeSet<&str>) -> SocketDiscovery {
+    SocketDiscovery {
+        paths: found.into_iter().collect(),
+        errors: errors.into_iter().map(str::to_owned).collect(),
+    }
+}
+#[cfg(test)]
+pub fn discover_sockets(
+    configured: &[PathBuf],
+    roots: &[PathBuf],
+    uid: u32,
+    scan_limit: usize,
+) -> SocketDiscovery {
+    discover_sockets_with(configured, roots, uid, scan_limit, None)
 }
 /// Only owned Unix sockets are discovered automatically. Explicit endpoints
 /// remain the operator's configuration and are validated by the adapter.
 #[cfg(unix)]
-pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], uid: u32) -> Vec<PathBuf> {
+pub(crate) fn discover_sockets_with(
+    configured: &[PathBuf],
+    roots: &[PathBuf],
+    uid: u32,
+    scan_limit: usize,
+    deadline: Option<std::time::Instant>,
+) -> SocketDiscovery {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let mut found: BTreeSet<PathBuf> = configured
         .iter()
         .filter(|p| p.is_absolute())
         .cloned()
         .collect();
+    let mut errors = BTreeSet::new();
+    let mut remaining = scan_limit;
     for root in roots {
-        if let Ok(entries) = fs::read_dir(root.join(format!("tmux-{uid}"))) {
-            for entry in entries.flatten() {
-                if let Ok(info) = fs::symlink_metadata(entry.path())
-                    && info.file_type().is_socket()
-                    && info.uid() == uid
-                {
-                    found.insert(entry.path());
-                }
-            }
+        if !scan_socket_directory(
+            &root.join(format!("tmux-{uid}")),
+            &mut remaining,
+            &mut found,
+            &mut errors,
+            deadline,
+            |entry| {
+                let info = fs::symlink_metadata(entry.path())?;
+                Ok((info.file_type().is_socket() && info.uid() == uid).then(|| entry.path()))
+            },
+        ) {
+            break;
         }
     }
-    found.into_iter().collect()
+    socket_discovery(found, errors)
 }
 /// Native Windows uses Herdr; tmux endpoints belong to WSL instances.
 #[cfg(windows)]
-pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], _uid: u32) -> Vec<PathBuf> {
+pub(crate) fn discover_sockets_with(
+    configured: &[PathBuf],
+    roots: &[PathBuf],
+    _uid: u32,
+    scan_limit: usize,
+    deadline: Option<std::time::Instant>,
+) -> SocketDiscovery {
     let mut endpoints: BTreeSet<PathBuf> = configured
         .iter()
         .filter(|p| p.is_absolute())
         .cloned()
         .collect();
+    let mut errors = BTreeSet::new();
     if !roots.is_empty()
         && default_mux_binary()
             .file_stem()
@@ -414,28 +643,36 @@ pub fn discover_sockets(configured: &[PathBuf], roots: &[PathBuf], _uid: u32) ->
         let root = std::env::var_os("PSMUX_DATA_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join(".psmux")));
-        if let Some(root) =
-            root.filter(|p| p.is_absolute() && crate::platform::check_path(p).is_ok())
-            && let Ok(entries) = fs::read_dir(&root)
-        {
-            for entry in entries.take(256).flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Some(stem) = name.strip_suffix(".port") else {
-                    continue;
-                };
-                let namespace = stem.split_once("__").map(|(ns, _)| ns).unwrap_or("default");
-                if !namespace.is_empty()
-                    && namespace.len() <= 80
-                    && namespace
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                {
-                    endpoints.insert(root.join(namespace));
-                }
+        if let Some(root) = root {
+            if root.is_absolute() && crate::platform::check_path(&root).is_ok() {
+                let mut remaining = scan_limit;
+                scan_socket_directory(
+                    &root,
+                    &mut remaining,
+                    &mut endpoints,
+                    &mut errors,
+                    deadline,
+                    |entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let Some(stem) = name.strip_suffix(".port") else {
+                            return Ok(None);
+                        };
+                        let namespace =
+                            stem.split_once("__").map(|(ns, _)| ns).unwrap_or("default");
+                        Ok((!namespace.is_empty()
+                            && namespace.len() <= 80
+                            && namespace
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)))
+                        .then(|| root.join(namespace)))
+                    },
+                );
+            } else {
+                errors.insert("Invalid automatic psmux socket directory");
             }
         }
     }
-    endpoints.into_iter().collect()
+    socket_discovery(endpoints, errors)
 }
 #[cfg(windows)]
 pub fn process_start(_proc_root: &Path, pid: &str) -> Option<String> {
@@ -447,6 +684,116 @@ pub fn process_start(_proc_root: &Path, pid: &str) -> Option<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let mut bytes = [0; 16];
+            crate::platform::random_bytes(&mut bytes).unwrap();
+            let path = std::env::temp_dir()
+                .join(format!("dd-terminal-scan-{:x}", u128::from_le_bytes(bytes)));
+            crate::core::layouts::write_private(&path.join("fixture"), b"fixture").unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn automatic_scan_counts_all_entries_across_roots_and_preserves_explicit_paths() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let f = Fixture::new();
+        let uid = unsafe { libc::geteuid() };
+        let first = f.0.join("first");
+        let second = f.0.join("second");
+        let directory = first.join(format!("tmux-{uid}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("unrelated-a"), b"unused").unwrap();
+        fs::write(directory.join("unrelated-b"), b"unused").unwrap();
+        let socket = directory.join("s, a");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        symlink(&socket, directory.join("linked-socket")).unwrap();
+        let other_directory = second.join(format!("tmux-{uid}"));
+        fs::create_dir_all(&other_directory).unwrap();
+        let other = other_directory.join("s-b");
+        let _other_listener = UnixListener::bind(&other).unwrap();
+        let explicit = f.0.join("configured offline");
+        let roots = [first, second];
+        let bounded = discover_sockets(std::slice::from_ref(&explicit), &roots, uid, 4);
+        assert_eq!(bounded.paths, [explicit.clone(), socket.clone()]);
+        assert_eq!(bounded.errors.len(), 1);
+        assert!(bounded.errors[0].contains("entry limit reached"));
+        let complete = discover_sockets(std::slice::from_ref(&explicit), &roots, uid, 5);
+        assert_eq!(complete.paths, [explicit, socket, other]);
+        assert!(complete.errors.is_empty());
+        assert!(
+            discover_sockets(&[], &[f.0.join("absent")], uid, 1)
+                .errors
+                .is_empty()
+        );
+    }
+    #[test]
+    fn saved_terminal_output_limit_counts_both_streams_and_session_names_are_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let executable = f.0.join("query-fixture");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%2048s' ''; printf '%1024s' '' >&2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut adapter = Terminals::default();
+        let settings = crate::app::runtime_settings::Settings::default()
+            .set("terminal_query_limit_bytes", "2048")
+            .unwrap();
+        adapter.apply_settings(&settings).unwrap();
+        assert_eq!(adapter.output_limit, 2048);
+        assert!(
+            adapter
+                .query(&executable, &[])
+                .unwrap_err()
+                .contains("InvalidData")
+        );
+        adapter
+            .apply_settings(&settings.set("terminal_query_limit_bytes", "3072").unwrap())
+            .unwrap();
+        assert_eq!(adapter.query(&executable, &[]).unwrap().len(), 2048);
+        fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' 'b running' 'a running' 'a running' 'c running' 'd stopped' 'e running'\n").unwrap();
+        adapter.herdr = executable;
+        assert_eq!(adapter.herdr_sessions(2).unwrap(), ["a", "b", "c"]);
+        assert_eq!(adapter.herdr_sessions(4).unwrap(), ["a", "b", "c", "e"]);
+    }
+    #[test]
+    fn saved_terminal_query_deadline_limits_the_owned_subprocess() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut random = [0; 16];
+        crate::platform::random_bytes(&mut random).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-query-budget-{:x}",
+            u128::from_le_bytes(random)
+        ));
+        fs::create_dir(&directory).unwrap();
+        let executable = directory.join("query");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n/bin/sleep 0.25\nprintf fixture-result\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut adapter = Terminals::default();
+        let mut settings = crate::app::runtime_settings::Settings {
+            terminal_query_timeout_ms: 100,
+            ..Default::default()
+        };
+        adapter.apply_settings(&settings).unwrap();
+        assert!(adapter.query(&executable, &[]).is_err());
+        settings.terminal_query_timeout_ms = 2000;
+        adapter.apply_settings(&settings).unwrap();
+        assert_eq!(adapter.query(&executable, &[]).unwrap(), "fixture-result");
+        fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn verify_rejects_reused_herdr_pane_using_mock_executable() {
         use std::os::unix::fs::PermissionsExt;
@@ -467,6 +814,80 @@ mod tests {
         assert_eq!(adapter.verify(&saved).unwrap()["terminal_id"], "new");
         assert!(adapter.verify(&saved).unwrap().get("pid").is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn conflicting_fresh_tmux_rows_cannot_submit_input_but_exact_duplicates_recover() {
+        use crate::adapters::terminal_actions::{Action, ReceiptState};
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let proc_root = f.0.join("proc");
+        for (pid, start) in [("11", "110"), ("22", "220")] {
+            fs::create_dir_all(proc_root.join(pid)).unwrap();
+            let mut fields = vec!["0"; 20];
+            fields[0] = "S";
+            fields[19] = start;
+            fs::write(
+                proc_root.join(pid).join("stat"),
+                format!("{pid} (fixture) {}", fields.join(" ")),
+            )
+            .unwrap();
+        }
+        let socket = f.0.join("fixture.sock");
+        let socket = socket.to_str().unwrap();
+        let original = fixture();
+        let mut changed: Vec<_> = original.split('\t').map(str::to_owned).collect();
+        changed[15] = "81".into();
+        let payload = f.0.join("panes");
+        fs::write(&payload, format!("{original}\n{}\n", changed.join("\t"))).unwrap();
+        let effects = f.0.join("effects");
+        let executable = f.0.join("inert-tmux");
+        fs::write(&executable,format!("#!/bin/sh\ncase \"$3\" in\nlist-panes) exec /bin/cat '{}' ;;\nlist-clients) exit 0 ;;\nsend-keys) printf '%s\\n' \"$*\" >> '{}' ;;\n*) exit 1 ;;\nesac\n",payload.display(),effects.display())).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let adapter = Terminals {
+            tmux: executable,
+            proc_root,
+            ..Terminals::default()
+        };
+        let saved = parse_tmux(&original, socket, |pid| Some(format!("{pid}0")))
+            .unwrap()
+            .remove(0);
+        assert!(
+            adapter
+                .action(&saved, Action::Send("fixture".into()))
+                .err()
+                .unwrap()
+                .contains("Conflicting terminal observations")
+        );
+        assert!(!effects.exists());
+        let mut marked = saved.clone();
+        marked["observation_conflict"] = json!(true);
+        assert!(adapter.verify(&marked).is_err());
+        assert!(reference(&marked).is_err());
+        fs::write(&payload, format!("{original}\n{original}\n")).unwrap();
+        assert_eq!(
+            adapter
+                .action(&saved, Action::Send("fixture".into()))
+                .unwrap()
+                .state,
+            ReceiptState::Submitted
+        );
+        // One submission consists of literal text followed by one Enter command.
+        let effects = fs::read_to_string(effects).unwrap();
+        assert_eq!(effects.lines().count(), 2);
+        assert_eq!(
+            effects
+                .lines()
+                .filter(|line| line.contains(" -l -- fixture"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            effects
+                .lines()
+                .filter(|line| line.ends_with(" Enter"))
+                .count(),
+            1
+        );
     }
     #[test]
     fn verify_reads_herdr_shell_pid_from_process_info() {

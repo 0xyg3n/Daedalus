@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "entry_limit": 1000,
+  "byte_limit": 1048576,
+  "display_limit": 50,
+  "archive_scan_limit": 1024
+}

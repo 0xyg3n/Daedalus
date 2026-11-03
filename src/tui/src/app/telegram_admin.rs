@@ -223,6 +223,7 @@ impl ChatNamePlan {
 }
 pub struct ServicePlan {
     directory: PathBuf,
+    api_origin: String,
     configuration: Vec<u8>,
     start: bool,
     process: Option<super::telegram_supervisor::Record>,
@@ -259,7 +260,7 @@ impl Plan {
             Self::Route(plan) => plan.review(),
             Self::Binding(plan) => plan.review(),
             Self::Service(plan) => {
-                json!({"operation":if plan.start {"start"} else {"stop"},"approval":self.approval(),"effect":"Requests a service transition; refresh status to observe the result."})
+                json!({"operation":if plan.start {"start"} else {"stop"},"api_origin":plan.api_origin,"approval":self.approval(),"effect":"Requests a service transition; refresh status to observe the result."})
             }
         }
     }
@@ -275,8 +276,12 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
             }
             let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
             let token = config.read_token()?;
-            let mut api = crate::adapters::telegram::BotApi::pairing(&token)
-                .map_err(|_| "Cannot initialize Telegram verification")?;
+            let mut api = crate::adapters::telegram::BotApi::configured(
+                &token,
+                &config.runtime,
+                crate::adapters::telegram::Purpose::Pairing,
+            )
+            .map_err(|_| "Cannot initialize Telegram verification")?;
             let found = discover_chats(&config, &mut api)?;
             let mut names = chat_names(directory, config.bot_id)?;
             for candidate in found["chats"].as_array().into_iter().flatten() {
@@ -415,13 +420,16 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
                 .map(|_| ServiceConfig::load(&path))
                 .transpose()?;
             if serde_json::to_value(current).map_err(|_| "Invalid Telegram configuration")?
-                != serde_json::to_value(expected).map_err(|_| "Invalid Telegram configuration")?
+                != serde_json::to_value(&expected).map_err(|_| "Invalid Telegram configuration")?
             {
                 return Err("Telegram configuration changed; reopen settings".into());
             }
-            Ok(Reply::Plan(Box::new(Plan::Configuration(
-                telegram_config::ServicePlan::prepare(&path, *config)?,
-            ))))
+            Ok(Reply::Plan(Box::new(Plan::Configuration(match expected {
+                Some(expected) => {
+                    telegram_config::ServicePlan::edit_if_current(&path, &expected, *config)?
+                }
+                None => telegram_config::ServicePlan::fresh(&path, *config)?,
+            }))))
         }
         Request::Token { value } => Ok(Reply::Plan(Box::new(Plan::Token(TokenPlan::prepare(
             directory, &value,
@@ -432,7 +440,7 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
                 1024 * 1024,
             )?
             .ok_or("Configure Telegram first")?;
-            let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+            let config = ServiceConfig::parse(&configuration)?;
             let status = super::telegram_supervisor::inspect(directory)?;
             if start {
                 config.read_token()?;
@@ -446,6 +454,7 @@ pub fn execute(directory: &Path, request: Request) -> Result<Reply> {
             }
             Ok(Reply::Plan(Box::new(Plan::Service(ServicePlan {
                 directory: directory.into(),
+                api_origin: config.runtime.api_origin.clone(),
                 configuration,
                 start,
                 process: status.process,
@@ -603,11 +612,12 @@ fn live_terminals(directory: &Path) -> Result<Vec<crate::core::routes::Terminal>
         &layouts::read_private(&directory.join("control.json"))?.ok_or("Run setup first")?,
     )?;
     let instance = ServiceConfig::load(&directory.join("telegram-service.json"))?.instance;
+    let terminals = crate::adapters::terminals::Terminals::default().configured(&config.runtime)?;
     super::telegram_commands::NativeOperations {
         instance,
         directory: directory.into(),
         config,
-        terminals: crate::adapters::terminals::Terminals::default(),
+        terminals,
         environment: crate::platform::environment(),
     }
     .inventory()
@@ -1039,6 +1049,7 @@ mod tests {
                     .as_nanos()
             ));
             let config = ServiceConfig {
+                runtime: Default::default(),
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 123,

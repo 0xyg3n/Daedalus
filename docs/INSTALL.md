@@ -184,6 +184,38 @@ To copy an existing instance into a new directory, run
 writes, `--credentials` also copies token files). If the old instance ran the
 Telegram service, stop it and hand over with `daedalus telegram cutover preview|apply`.
 
+Instance import and the final cutover snapshot preserve `views.json` byte-for-byte,
+including unresolved records and extra record metadata. The source instance's
+saved viewer-history byte, JSON value and processing limits apply; invalid,
+ambiguous or unsupported registries refuse import without changing the source or
+publishing a new destination. Retention does not prune an imported history.
+Live source/viewer relationships still require fresh terminal identities. Import
+starts no viewers and grants no route authority. Cutover keeps the previous
+destination history in its rollback snapshot.
+
+Before publication, import rechecks the exact staging receipt and all sealed file
+hashes. Cutover performs that check after its final live observation and also
+verifies its separately recorded proof. A changed, missing or added file refuses
+the operation before source retirement or destination replacement. Prepare a new
+review after a refusal; no publication is retried automatically.
+
+The source instance's **Terminals and discovery → Instance import and cutover**
+controls set retained bytes, file/directory entries, cumulative structured JSON
+validation, logical byte work and the shared preparation/review deadline. The
+defaults are 512 MiB, 4096 entries, 1000000 JSON values/keys, 2 GiB of byte work and
+120000 ms. Receipt/proof and repeated checks count too. Exhaustion refuses
+publication; raise the named source setting and prepare again. Existing bounded
+source-settings loading happens before these limits can be selected. The limits
+cover admitted snapshot processing, with cooperative checks; they do not impose
+hard process-memory, transient-disk, total I/O or wall-clock ceilings.
+
+Three further source controls limit queued-frame size (262144 bytes), relocated
+attachment references (256) and their combined bytes (128 MiB). A quota refusal
+leaves the existing instances unchanged. Per-file eligibility follows the final
+service's saved attachment limit. Valid private files keep their digest filename
+and safe extension; unrelated frame metadata remains. Missing or disallowed
+files become blocked drafts, and uncertain input is retained without replay.
+
 ## Update and removal
 
 The TUI checks releases in the background at launch and before exit. A newer compatible release

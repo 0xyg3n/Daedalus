@@ -653,7 +653,11 @@ impl Menu {
                         let node = tree::Tree::build(
                             &observed.snapshot,
                             &observed.health,
-                            &tree::ProjectionContext::default(),
+                            &tree::ProjectionContext {
+                                runtime: config.runtime.clone(),
+                                checkpoint_matches: config.ui.checkpoint_matches,
+                                ..tree::ProjectionContext::default()
+                            },
                         )
                         .nodes
                         .into_iter()

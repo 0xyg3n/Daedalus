@@ -22,7 +22,7 @@ foreach ($script in @((Join-Path $root 'install.ps1'), (Join-Path $root 'scripts
     if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 }
 Invoke-Cargo @('fmt', '--manifest-path', $manifest, '--check')
-Invoke-Cargo @('test', '--manifest-path', $manifest, '--locked', '--all-targets')
+Invoke-Cargo @('test', '--manifest-path', $manifest, '--locked', '--all-targets', '--no-fail-fast')
 Invoke-Cargo @('clippy', '--manifest-path', $manifest, '--locked', '--all-targets', '--', '-D', 'warnings')
 Invoke-Cargo @('build', '--manifest-path', $manifest, '--locked', '--release')
 if (-not $SkipInstallerFixtures) {

@@ -355,23 +355,13 @@ fn checkpoint_rows(health: &Value) -> Vec<Item> {
 
 fn live_refs(snapshot: &Value) -> Vec<TerminalRef> {
     let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for pane in rows(snapshot, "panes") {
-        if let Ok(identity) = crate::adapters::terminals::identity(pane) {
-            let reference = TerminalRef {
-                backend: identity.backend,
-                server: identity.endpoint,
-                pane_id: identity.pane,
-                terminal_id: identity.generation,
-                generation: text(pane, "generation").into(),
-                label: String::new(),
-                place: String::new(),
-            };
-            if !result
-                .iter()
-                .any(|existing: &TerminalRef| existing.same_identity(&reference))
-            {
-                result.push(reference);
-            }
+        if let Ok(reference) = crate::adapters::terminals::reference(pane)
+            && let Ok(identity) = reference.identity()
+            && seen.insert((identity, reference.generation.clone()))
+        {
+            result.push(reference);
         }
     }
     result
@@ -1010,6 +1000,22 @@ pub fn armonia_rows(view: &Value, fresh: bool) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_pin_references_and_presentation_share_canonical_endpoints() {
+        let socket = crate::test_support::path("/tmp/reference.sock");
+        let encoded: String = socket.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        for pane in [
+            json!({"backend":"tmux","socket":socket,"server":format!("tmux@{encoded}"),"session":"view","pane_id":"%1","terminal_id":"generation","generation":"extra"}),
+            json!({"backend":"native","server":"local","session":"native-1","pane_id":"native-1","terminal_id":"generation","generation":"extra"}),
+        ] {
+            let saved = crate::app::session_menu::reference(&pane).unwrap();
+            let snapshot = json!({"panes":[pane]});
+            assert_eq!(
+                layouts::resolve(&saved, &live_refs(&snapshot)),
+                Resolution::Live(0)
+            );
+        }
+    }
     use serde_json::json;
     fn context<'a>(
         config: &'a ControlConfig,

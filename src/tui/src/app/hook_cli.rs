@@ -1,6 +1,5 @@
 //! Local hook/goal CLI. Hook stdout is reserved for the harness response.
 use super::{hook_install, hook_runtime, hooks};
-use std::path::Path;
 use crate::core::{goal_store::Control, layouts};
 use crate::{
     adapters::terminals::Terminals,
@@ -8,6 +7,7 @@ use crate::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -177,15 +177,12 @@ pub fn run(
         let result = hook_runtime::run_expected(reader, writer, &path, event_id, event_kind);
         // Hook stdout is the provider protocol. Keep a private, payload-free
         // last-result record so the UI can explain a nonzero native exit.
-        if !result
-            .as_ref()
-            .is_ok_and(|outcome| {
-                matches!(
-                    outcome.event_id.as_str(),
-                    "unbound-codex-session" | "unbound-herdr-window"
-                )
-            })
-        {
+        if !result.as_ref().is_ok_and(|outcome| {
+            matches!(
+                outcome.event_id.as_str(),
+                "unbound-codex-session" | "unbound-herdr-window"
+            )
+        }) {
             let _ = hook_runtime::record_run_result(&path, event_kind, result.as_ref().err());
         }
         result.map_err(|e| e.to_string())?;
@@ -360,11 +357,10 @@ pub(crate) fn profile(
         directory: native_path(&take(&mut fields, "--directory")?),
         profile: native_path(&take(&mut fields, "--profile")?),
         binary: hooks::stable_hook_binary(&hook_install::installed_launcher(native_path(&take(
-            &mut fields, "--binary",
+            &mut fields,
+            "--binary",
         )?))),
-        transcript: fields
-            .remove("--transcript")
-            .map(|path| native_path(path)),
+        transcript: fields.remove("--transcript").map(native_path),
         registration_id: take(&mut fields, "--registration-id")?,
         harness_version: take(&mut fields, "--version")?,
         goal_id: fields.remove("--goal-id").map(str::to_owned),

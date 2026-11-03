@@ -49,6 +49,48 @@ pub fn tools() -> impl Iterator<Item = Tool> {
         .map(|id| tool(id).expect("Every registered harness has a native adapter"))
 }
 
+/// Provider identity from an executable name, on either host platform. Never
+/// interpret terminal titles, command strings, or a generic runtime as a tool.
+pub fn canonical_id(executable: &str) -> Option<&'static str> {
+    let name = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    tools()
+        .find_map(|tool| (tool.id == name || tool.executables.contains(&name)).then_some(tool.id))
+}
+
+/// Select the actual harness argv after a supported runtime wrapper. Do not
+/// search prompts or parse shell command strings for executable-looking words.
+pub(crate) fn conversation_argv<'a>(argv: &'a [String], harness: &str) -> Option<&'a [String]> {
+    let executable = argv.first()?;
+    if canonical_id(executable) == Some(harness) {
+        return Some(argv);
+    }
+    let runtime = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let runtime = runtime.strip_suffix(".exe").unwrap_or(&runtime);
+    if !matches!(runtime, "node" | "nodejs" | "bun" | "python" | "python3") {
+        return None;
+    }
+    let script = argv.get(1)?;
+    let script = [".js", ".mjs", ".cjs", ".py"]
+        .into_iter()
+        .find_map(|suffix| script.strip_suffix(suffix))
+        .unwrap_or(script);
+    (canonical_id(script) == Some(harness)).then_some(&argv[1..])
+}
+
+pub(crate) fn launch_conversation(argv: &[String]) -> Option<(&'static str, String)> {
+    tools().find_map(|tool| {
+        if !matches!(tool.id, "codex" | "claude" | "grok" | "opencode") {
+            return None;
+        }
+        let args = conversation_argv(argv, tool.id)?;
+        crate::core::checkpoints::resolve_sid(args, tool.id, "")
+            .ok()
+            .flatten()
+            .map(|sid| (tool.id, sid))
+    })
+}
+
 pub fn tool(id: &str) -> Option<Tool> {
     let (
         id,
@@ -514,6 +556,43 @@ fn validate_path(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_identity_matches_windows_and_linux_without_guessing_fork_children() {
+        const SID: &str = "019a043e-1234-7000-8000-000000000001";
+        for executable in [
+            "codex",
+            "/opt/tools/codex",
+            "Codex.exe",
+            "C:\\Tools\\CODEX.EXE",
+        ] {
+            let args = vec![executable.to_owned(), "resume".into(), SID.into()];
+            assert_eq!(super::canonical_id(executable), Some("codex"));
+            assert_eq!(
+                super::launch_conversation(&args),
+                Some(("codex", SID.into()))
+            );
+            let args = vec![executable.to_owned(), "fork".into(), SID.into()];
+            assert!(super::launch_conversation(&args).is_none());
+        }
+        for executable in ["cursor-agent", "C:\\Tools\\CURSOR-AGENT.EXE"] {
+            assert_eq!(super::canonical_id(executable), Some("cursor"));
+        }
+        for args in [
+            vec!["/bin/sh", "-c", "codex resume", SID],
+            vec!["node", "/project/unrelated.js", "codex", "resume", SID],
+            vec!["codex", "--last", "prompt containing an ID"],
+            vec!["claude", "--resume", "My session title"],
+            vec!["grok", "--resume", SID, "--fork-session"],
+        ] {
+            assert!(
+                super::launch_conversation(
+                    &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
+                )
+                .is_none()
+            );
+        }
+        assert!(super::canonical_id("node.exe").is_none());
+    }
     use super::*;
     fn env() -> BTreeMap<String, String> {
         [

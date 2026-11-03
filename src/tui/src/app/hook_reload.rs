@@ -30,10 +30,11 @@ fn executable_unchanged(binary: &Path, target: &Path, image: Option<(u64, u64)>)
     #[cfg(windows)]
     {
         let _ = target;
-        let file = crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
-        let current = crate::platform::file_identity(&file)
-            .map_err(|_| "Cannot identify hook executable")?;
-        return Ok(Some(current) == image);
+        let file =
+            crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
+        let current =
+            crate::platform::file_identity(&file).map_err(|_| "Cannot identify hook executable")?;
+        Ok(Some(current) == image)
     }
     #[cfg(not(windows))]
     {
@@ -250,8 +251,8 @@ pub fn prepare(directory: &Path, binary: PathBuf, terminals: &Terminals) -> Resu
     let (target, image) = {
         let file =
             crate::platform::open_regular(&binary).map_err(|_| "Cannot resolve hook executable")?;
-        let image = crate::platform::file_identity(&file)
-            .map_err(|_| "Cannot resolve hook executable")?;
+        let image =
+            crate::platform::file_identity(&file).map_err(|_| "Cannot resolve hook executable")?;
         (binary.clone(), image)
     };
     Ok(Plan {
@@ -308,10 +309,9 @@ mod tests {
         layouts::write_private(&b, b"manual-edit").unwrap();
         layouts::write_private(&binary, b"fixture").unwrap();
         #[cfg(windows)]
-        let image = crate::platform::file_identity(
-            &crate::platform::open_regular(&binary).unwrap(),
-        )
-        .unwrap();
+        let image =
+            crate::platform::file_identity(&crate::platform::open_regular(&binary).unwrap())
+                .unwrap();
         let plan = Plan {
             directory: root.clone(),
             target: std::fs::canonicalize(&binary).unwrap(),

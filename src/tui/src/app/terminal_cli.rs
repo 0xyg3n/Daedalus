@@ -275,7 +275,8 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
                 .get("--timeout-seconds")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(30);
-            let adapter = Terminals::default();
+            let mut adapter = Terminals::default();
+            adapter.apply_settings(&config.runtime)?;
             let started = std::time::Instant::now();
             wait_with_deadline(
                 seconds * 2,

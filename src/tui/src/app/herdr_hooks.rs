@@ -6,6 +6,8 @@ use crate::{adapters::process, core::layouts};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::{
     fs,
@@ -14,8 +16,6 @@ use std::{
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(unix)]
-use std::fs::OpenOptions;
 type Result<T> = std::result::Result<T, String>;
 const LIMIT: u64 = 8 * 1024 * 1024;
 
@@ -35,7 +35,7 @@ fn normalized(request: &Request) -> Request {
         request.home = super::hooks::windows_native_path(&request.home);
         request.profile = super::hooks::windows_native_path(&request.profile);
         request.directory = super::hooks::windows_native_path(&request.directory);
-        return request;
+        request
     }
     #[cfg(not(windows))]
     request.clone()
@@ -128,9 +128,8 @@ fn files(r: &Request) -> Result<Vec<PathBuf>> {
                 return Err("Profile and home directories must be directories".into());
             }
         }
-        crate::platform::validate_native_profile_dir(&r.profile).map_err(|_| {
-            "Profile directory must stay private to the current user".to_owned()
-        })?;
+        crate::platform::validate_native_profile_dir(&r.profile)
+            .map_err(|_| "Profile directory must stay private to the current user".to_owned())?;
         crate::platform::validate_private_dir(&r.directory)
             .map_err(|_| "Integration state directory must be private".to_owned())?;
         crate::platform::open_regular(&r.binary)
