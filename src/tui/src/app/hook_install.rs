@@ -393,7 +393,7 @@ fn local_opencode_server(
     let executable = crate::platform::open_regular(&root.executable).map_err(|e| e.to_string())?;
     let identity = crate::platform::file_identity(&executable).map_err(|e| e.to_string())?;
     let children = crate::platform::descendant_processes(ui.pid)
-        .map_err(|_| "Cannot verify the OpenCode server process")?;
+        .map_err(|error| format!("Cannot verify the OpenCode server process: {error}"))?;
     let mut servers = Vec::new();
     for child in children.into_iter().filter(|p| p.parent_pid == ui.pid) {
         let current = crate::platform::process_identity(child.pid)
@@ -2877,7 +2877,11 @@ mod windows_server_tests {
     #[test]
     #[ignore = "Private child process for the native server identity test"]
     fn server_child() {
-        use std::io::Read;
+        use std::io::{Read, Write};
+        std::io::stdout()
+            .write_all(b"DAEDALUS_SERVER_READY\n")
+            .unwrap();
+        std::io::stdout().flush().unwrap();
         let _ = std::io::stdin().read_exact(&mut [0u8; 1]);
     }
     #[test]
@@ -2918,7 +2922,7 @@ mod windows_server_tests {
         };
         let proc = Path::new("unused");
         assert!(local_opencode_server(&ui, proc).is_err());
-        let child = Child(
+        let mut child = Child(
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -2926,10 +2930,30 @@ mod windows_server_tests {
                     "--ignored",
                 ])
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
+        let output = child.0.stdout.take().unwrap();
+        let (ready_send, ready_receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(output);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if line.trim() == "DAEDALUS_SERVER_READY" => {
+                        let _ = ready_send.send(());
+                        break;
+                    }
+                    Ok(_) => (),
+                }
+            }
+        });
+        ready_receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("Native child must acknowledge startup before discovery");
         let pin = local_opencode_server(&ui, proc).unwrap();
         assert_eq!(pin.process.pid, child.0.id());
         hook_runtime::verify_server_emitter(&pin, proc).unwrap();

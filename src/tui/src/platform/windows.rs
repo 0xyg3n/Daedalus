@@ -681,8 +681,13 @@ fn descendant_processes_with(
                 Err(error) if exited_during_scan(&error) => continue,
                 Err(error) => return Err(error),
             };
-            if child.owner != root.owner || child.creation_time < parent.creation_time {
-                return Err(denied("Process ancestry changed or has a foreign owner"));
+            // Toolhelp retains numeric parent IDs after the original parent
+            // exits. A newer process can reuse that ID without being an ancestor.
+            if child.creation_time < parent.creation_time {
+                continue;
+            }
+            if child.owner != root.owner {
+                return Err(denied("Process ancestry has a foreign owner"));
             }
             queue.push_back((child.clone(), depth + 1));
             result.push(child);
@@ -1428,6 +1433,28 @@ mod tests {
                 .iter()
                 .any(|entry| entry.pid == pid)
         );
+    }
+    #[test]
+    fn descendant_scan_ignores_a_stale_parent_id_reused_by_a_newer_process() {
+        let root = process_identity(std::process::id()).unwrap();
+        let mut child = std::process::Command::new("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let found = descendant_processes_with(root.pid, |candidate, parent| {
+            let mut observed = process_identity_with_parent(candidate, parent)?;
+            if candidate == pid {
+                observed.creation_time = root.creation_time - 1;
+            }
+            Ok(observed)
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!found.unwrap().iter().any(|process| process.pid == pid));
     }
     #[test]
     fn descendant_scan_skips_exited_children_and_retains_live_metadata_failures() {
