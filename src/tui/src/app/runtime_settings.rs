@@ -62,6 +62,12 @@ pub struct Settings {
     pub checkpoint_entry_limit: u64,
     pub checkpoint_value_limit: u64,
     pub checkpoint_timeout_ms: u64,
+    pub session_fork_limit_bytes: u64,
+    pub session_fork_entry_limit: u64,
+    pub session_fork_value_limit: u64,
+    pub session_fork_timeout_ms: u64,
+    pub agent_activity_max_age_ms: u64,
+    pub agent_activity_query_timeout_ms: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -76,6 +82,12 @@ impl Default for Settings {
             checkpoint_entry_limit: checkpoints.entries,
             checkpoint_value_limit: checkpoints.values,
             checkpoint_timeout_ms: checkpoints.timeout_ms,
+            session_fork_limit_bytes: 1073741824,
+            session_fork_entry_limit: 262144,
+            session_fork_value_limit: 16777216,
+            session_fork_timeout_ms: 30000,
+            agent_activity_max_age_ms: 60000,
+            agent_activity_query_timeout_ms: 250,
             shell_cols: 120,
             shell_rows: 36,
             terminal_query_timeout_ms: 5000,
@@ -589,6 +601,54 @@ pub const SETTINGS: &[Setting] = &[
         "Cooperative processing deadline for checkpoint reads, normalization and write admission. Discovery/import also honor their own earlier deadline; blocking OS calls are not preempted.",
         1,
         60000
+    ),
+    setting!(
+        session_fork_limit_bytes,
+        "Fork history byte budget",
+        "Session forks",
+        "Cumulative bytes read and materialized for a selected conversation, including stability checks. No other conversation contents are read. Refusal preserves the source.",
+        4096,
+        4294967296
+    ),
+    setting!(
+        session_fork_entry_limit,
+        "Fork history entry budget",
+        "Session forks",
+        "Combined directory-entry and JSONL-record work limit while locating and capturing the selected conversation and its required ancestors.",
+        1,
+        4194304
+    ),
+    setting!(
+        session_fork_value_limit,
+        "Fork history JSON value budget",
+        "Session forks",
+        "Cumulative JSON values and object keys checked while capturing selected fork history. Duplicate fields and incomplete records are refused.",
+        128,
+        134217728
+    ),
+    setting!(
+        session_fork_timeout_ms,
+        "Fork preparation timeout (ms)",
+        "Session forks",
+        "Shared capture, native history migration and fork-creation deadline for a fork under another license. A native mutation with an uncertain outcome is never automatically retried.",
+        100,
+        300000
+    ),
+    setting!(
+        agent_activity_max_age_ms,
+        "Agent activity freshness (ms)",
+        "Agent activity",
+        "Maximum age of verified hook lifecycle feedback before it is shown as stale. Expiry never implies idle or authorizes input.",
+        1000,
+        86400000
+    ),
+    setting!(
+        agent_activity_query_timeout_ms,
+        "Agent activity query budget (ms)",
+        "Agent activity",
+        "Combined read-only lifecycle and tool-metadata query time per discovery pass, also bounded by its remaining deadline.",
+        1,
+        5000
     ),
 ];
 impl Settings {

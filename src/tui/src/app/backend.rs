@@ -418,6 +418,7 @@ pub fn assemble(
     }
     frame["ui_settings"] =
         serde_json::to_value(&context.config.ui).map_err(|_| "Cannot encode interface settings")?;
+    frame["agent_activity_max_age_ms"] = json!(context.config.runtime.agent_activity_max_age_ms);
     frame["resize_settings"] = serde_json::to_value(context.config.runtime.resize_policy())
         .map_err(|_| "Cannot encode resize settings")?;
     if include_catalog {
@@ -2420,6 +2421,12 @@ impl Source for NativeSource {
                     )?;
                     Ok(Answer::Live { checkpoint, source })
                 }
+                Request::Licenses(id) => Ok(Answer::Licenses(super::fork_licenses::list(
+                    &self.directory,
+                    &id,
+                    &environment,
+                    &config.runtime,
+                )?)),
                 Request::Capabilities(id) => {
                     let tool = harnesses::tool(&id).ok_or("Unknown harness adapter")?;
                     let binary = harnesses::executable(&tool, &environment)
@@ -2456,6 +2463,7 @@ impl Source for NativeSource {
                     parent,
                     source,
                     placement,
+                    license,
                 } => {
                     if operation == crate::core::checkpoints::Operation::Handoff
                         && checkpoint.context_file.is_empty()
@@ -2472,16 +2480,20 @@ impl Source for NativeSource {
                             target: &target,
                             parent: &parent,
                             placement,
+                            license: license.as_ref(),
                         },
                         config,
                         &environment,
                     )?;
-                    super::gateway::wrap(
-                        &self.directory,
-                        &target.harness,
-                        &mut prepared.launch,
-                        &std::env::current_exe().map_err(|_| "Cannot locate native launcher")?,
-                    )?;
+                    if license.is_none() {
+                        super::gateway::wrap(
+                            &self.directory,
+                            &target.harness,
+                            &mut prepared.launch,
+                            &std::env::current_exe()
+                                .map_err(|_| "Cannot locate native launcher")?,
+                        )?;
+                    }
                     Ok(Answer::Receipt(store.apply(&self.terminals, prepared)?))
                 }
                 Request::Attach { pane, mode, node } => {

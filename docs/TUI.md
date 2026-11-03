@@ -157,6 +157,55 @@ saved in the configuration directory. Previews read recent output of visible
 terminals only and are not stored. Watching, attaching and capture can show private
 terminal output.
 
+Codex forks offer **Fork with which license?** before destination selection.
+**Keep current profile** preserves the existing profile and routing. A named
+license uses that profile's own native settings and authentication, independently
+of Daedalus's optional gateway. The confirmation shows its name and directory.
+The saved checkpoint and source history are retained. Cross-profile forks copy
+only the selected conversation and the ancestor prefixes it needs; Codex's native
+history migration rebuilds the paginated history before creating the final fork.
+This requires installed Codex support for `migrate-rollouts --thread` and
+prompt-free `exec fork`. A failed or uncertain native operation is not retried.
+
+License names and directories come from `CODEX_LICENSE_FILE` when set, otherwise
+the instance's `codex-licenses.json`, then the existing
+`HOME/.config/daedalus/codex-licenses.json` catalog. Paths must be absolute and
+symlink-free. The catalog has the shape
+`{"licenses":{"work":{"home":"/absolute/native/profile"}}}`. Existing catalog
+metadata, seat mappings and account files are retained. Catalog changes during
+review require selecting the license again. On Windows use an absolute native
+path, such as `C:/Users/you/.codex-work`, and set `CODEX_LICENSE_FILE` to choose a
+catalog outside the instance directory.
+
+**Terminals and discovery → Session forks** controls cumulative history byte,
+directory/record entry, JSON-value and time budgets through
+`runtime.session_fork_limit_bytes` (1 GiB), `runtime.session_fork_entry_limit`
+(262144), `runtime.session_fork_value_limit` (16777216), and
+`runtime.session_fork_timeout_ms` (30000). The byte budget includes two reads for
+prefix stability and the materialized output. Larger histories can require
+raising it. Daedalus captures only the selected conversation and required ancestor
+prefixes during fork preparation.
+
+**Agent activity feedback** adds working, waiting, idle, error, stale and unknown
+counts to the header and lists active agents on Overview, with errors and input
+requests first. Counts include each physical agent terminal once, excluding
+shells, conversation child rows and duplicate viewer panes. Selected agents show
+their latest lifecycle detail; Details identifies the evidence and event age.
+Verified hook events can report prompt processing, the current tool, a completed
+tool with a continuing turn, or a settled turn. Tool arguments, prompts and replies
+are excluded from this projection. Native terminal status remains available when
+hook telemetry is absent; unknown activity is not treated as idle.
+
+Existing hook journals are queried read-only after matching the live process,
+terminal generation, harness and conversation. These observations do not authorize
+input or goal continuation. Expired events appear stale, and a failed inventory
+refresh marks the activity snapshot stale. Partial discovery/display is labeled
+incomplete. `runtime.agent_activity_max_age_ms` defaults to 60000 and
+`runtime.agent_activity_query_timeout_ms` to 250; queries also share discovery's
+remaining deadline and metadata admission. The SQL deadline is cooperative.
+**Interface settings → Agent activity feedback** hides the new summaries and
+**Overview active-agent rows** controls their list length (3 by default, 0–12).
+
 Duplicate views retain `XDG_CONFIG_HOME`; Herdr clients also retain
 `HERDR_CONFIG_PATH` from Daedalus's environment. The reviewed source supplies the
 native session and terminal identity. Caller pane, socket and harness profile
@@ -317,6 +366,8 @@ for fields, startup-selection behavior and the corresponding CLI.
 | `search_query_limit_chars` | `1024` | 1–16384 Unicode characters per list, command or terminal-switcher query |
 | `shortcut_query_limit_chars` | `160` | 1–16384 Unicode characters per shortcut query |
 | `agent_session_ids` | `true` | Labeled agent conversation IDs on workspace cards, outlines and selected-terminal status |
+| `agent_activity` | `true` | Agent activity totals, active agents on Overview, and selected-agent lifecycle feedback |
+| `agent_activity_rows` | `3` | Maximum active-agent rows on Overview; 0–12, reduced to fit available space |
 
 Local navigation steps clamp at the beginning/end of available items or text.
 Chooser PageUp/Down scrolls its details; arrows and wheel select a choice, and

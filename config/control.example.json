@@ -50,7 +50,9 @@
     "choice_wheel_items": 1,
     "search_query_limit_chars": 1024,
     "shortcut_query_limit_chars": 160,
-    "agent_session_ids": true
+    "agent_session_ids": true,
+    "agent_activity": true,
+    "agent_activity_rows": 3
   },
   "runtime": {
     "native_launch_cols": 120,
@@ -108,6 +110,12 @@
     "checkpoint_work_limit_bytes": 67108864,
     "checkpoint_entry_limit": 65536,
     "checkpoint_value_limit": 1000000,
-    "checkpoint_timeout_ms": 2000
+    "checkpoint_timeout_ms": 2000,
+    "session_fork_limit_bytes": 1073741824,
+    "session_fork_entry_limit": 262144,
+    "session_fork_value_limit": 16777216,
+    "session_fork_timeout_ms": 30000,
+    "agent_activity_max_age_ms": 60000,
+    "agent_activity_query_timeout_ms": 250
   }
 }

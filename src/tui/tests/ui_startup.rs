@@ -843,6 +843,153 @@ fn agent_session_ids_reach_real_views_and_visibility_is_reviewed_saved_and_reope
 }
 
 #[test]
+fn real_ui_reports_agent_work_wait_idle_and_reviewed_feedback_visibility() {
+    use daedalus_tui::app::{config::ControlConfig, interface_settings::SETTINGS};
+    use std::os::unix::fs::PermissionsExt;
+    let mut ui = Ui::configured(false, true);
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.quit();
+    let path = ui.directory.join(".config/daedalus/control.json");
+    let mut config = ControlConfig::parse(&fs::read(&path).unwrap()).unwrap();
+    config.discovery.herdr_sessions = vec!["fixture".into()];
+    private_dashboard_file(&path, &config.encode().unwrap()).unwrap();
+    let payload = ui.directory.join("activity-payload.json");
+    let mut data = serde_json::json!({"result":{"panes":[
+        {"pane_id":"a","terminal_id":"generation-a","workspace_id":"work","tab_id":"tab","title":"Fixture worker","cwd":ui.directory,"agent":"codex","agent_status":"working","agent_session":{"agent":"codex","kind":"id","value":"12345678-abcd-4000-8000-123456789abc"}},
+        {"pane_id":"b","terminal_id":"generation-b","workspace_id":"work","tab_id":"tab","title":"Fixture needs input","cwd":ui.directory,"agent":"claude","agent_status":"blocked","agent_session":{"agent":"claude","kind":"id","value":"22345678-abcd-4000-8000-123456789abc"}},
+        {"pane_id":"c","terminal_id":"generation-c","workspace_id":"work","tab_id":"tab","title":"Fixture idle","cwd":ui.directory,"agent":"grok","agent_status":"idle","agent_session":{"agent":"grok","kind":"id","value":"32345678-abcd-4000-8000-123456789abc"}}
+    ]}});
+    fs::write(&payload, serde_json::to_vec(&data).unwrap()).unwrap();
+    let script = ui.directory.join("inert-activity-herdr");
+    fs::write(
+        &script,
+        "#!/bin/sh\nexec /bin/cat \"$AGENT_ACTIVITY_FIXTURE_PAYLOAD\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    ui.command
+        .env("DAEDALUS_HERDR_BIN", &script)
+        .env("AGENT_ACTIVITY_FIXTURE_PAYLOAD", &payload);
+    ui.restart();
+    ui.wait_text("3 terminals");
+    ui.wait_text("1 working");
+    ui.wait_text("1 waiting");
+    ui.wait_text("1 idle");
+    ui.master.write_all(b"1").unwrap();
+    ui.wait_text("Fixture needs input");
+    ui.wait_text("waiting");
+    data["result"]["panes"][0]["agent_status"] = serde_json::json!("idle");
+    fs::write(&payload, serde_json::to_vec(&data).unwrap()).unwrap();
+    ui.master.write_all(b"r").unwrap();
+    ui.wait_text("2 idle");
+    ui.wait_presence("1 working", false);
+    ui.master.write_all(b"\x10Interface settings").unwrap();
+    ui.wait_text("Interface settings_");
+    ui.wait_presence("UPDATING", false);
+    ui.master.write_all(b"\r\r").unwrap();
+    ui.wait_text("Saved in this configuration");
+    let index = SETTINGS
+        .iter()
+        .position(|setting| setting.key == "agent_activity")
+        .unwrap();
+    for _ in 0..index {
+        ui.master.write_all(b"\x1b[B").unwrap();
+    }
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Saved value: On");
+    ui.master.write_all(b"\x1b[H\x1b[B\r").unwrap();
+    ui.wait_text("Save agent_activity:");
+    assert!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .agent_activity
+    );
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Configuration saved privately");
+    assert!(
+        !ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .agent_activity
+    );
+    ui.quit();
+    ui.restart();
+    ui.wait_text("3 terminals");
+    ui.wait_presence("2 idle", false);
+    ui.quit();
+}
+
+#[test]
+fn codex_fork_license_picker_reaches_review_in_real_ui_without_launching() {
+    use daedalus_tui::app::config::ControlConfig;
+    use std::os::unix::fs::PermissionsExt;
+    let mut ui = Ui::configured(false, true);
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.quit();
+    let directory = ui.directory.join(".config/daedalus");
+    let path = directory.join("control.json");
+    let mut config = ControlConfig::parse(&fs::read(&path).unwrap()).unwrap();
+    config.discovery.herdr_sessions = vec!["fixture".into()];
+    private_dashboard_file(&path, &config.encode().unwrap()).unwrap();
+    let original = ui.directory.join("source-profile");
+    let selected = ui.directory.join("selected-profile");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(&selected).unwrap();
+    let checkpoints=serde_json::to_vec(&serde_json::json!({"checkpoints":[{"name":"Fixture conversation","harness":"codex","sid":"12345678-abcd-4000-8000-123456789abc","cwd":ui.directory,"profile":original}]})).unwrap();
+    private_dashboard_file(&directory.join("dashboard-checkpoints.json"), &checkpoints).unwrap();
+    private_dashboard_file(
+        &directory.join("codex-licenses.json"),
+        &serde_json::to_vec(&serde_json::json!({"licenses":{"Fixture account":{"home":selected}}}))
+            .unwrap(),
+    )
+    .unwrap();
+    let bin = ui.directory.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        "#!/bin/sh\nif [ \"$1\" = --help ]; then printf 'resume fork\\n'; exit 0; fi\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let payload = ui.directory.join("fork-destination.json");
+    fs::write(&payload,serde_json::to_vec(&serde_json::json!({"result":{"panes":[{"pane_id":"destination","terminal_id":"generation","workspace_id":"work","tab_id":"tab","title":"Fixture destination","cwd":ui.directory,"agent":"bash"}]}})).unwrap()).unwrap();
+    let script = ui.directory.join("inert-fork-herdr");
+    fs::write(
+        &script,
+        "#!/bin/sh\nexec /bin/cat \"$FORK_LICENSE_UI_PAYLOAD\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    ui.command
+        .env("PATH", &bin)
+        .env("DAEDALUS_HERDR_BIN", &script)
+        .env("FORK_LICENSE_UI_PAYLOAD", &payload);
+    ui.restart();
+    ui.wait_text("1 checkpoints");
+    ui.master.write_all(b"3").unwrap();
+    ui.wait_text("Fixture conversation");
+    ui.master.write_all(b"/Fixture conversation\r\r").unwrap();
+    ui.wait_text("Fork in the same harness");
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Fork with which license?");
+    ui.wait_text("Fixture account");
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Open a new pane below which terminal?");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("License: Fixture account");
+    ui.wait_text("Native profile:");
+    ui.master.write_all(b"\x1b").unwrap();
+    assert_eq!(
+        fs::read(directory.join("dashboard-checkpoints.json")).unwrap(),
+        checkpoints
+    );
+    assert!(!selected.join("sessions").exists());
+    ui.quit();
+}
+
+#[test]
 fn checkpoint_policy_is_saved_in_real_ui_and_oversized_observation_recovers_without_data_loss() {
     use daedalus_tui::app::{config::ControlConfig, runtime_settings::SETTINGS};
     fn edit(ui: &mut Ui, key: &str, value: &str) {

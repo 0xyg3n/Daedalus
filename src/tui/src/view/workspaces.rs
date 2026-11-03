@@ -762,27 +762,14 @@ pub(super) fn wall_panel(f: &mut Frame, area: Rect, ui: &mut Ui) {
 /// last five minutes violet, the last hour blue, the rest plain. Cyan is
 /// kept for the selection.
 pub(super) fn terminal_status(node: &Node) -> (&'static str, Tone) {
-    let states = [
-        node.state.as_str(),
-        node.activity.as_str(),
-        node.tile.as_ref().map_or("", |t| t.state.as_str()),
-    ];
-    if states
-        .iter()
-        .any(|s| matches!(*s, "failed" | "error" | "exited"))
-    {
-        ("error", Tone::Rose)
-    } else if states.contains(&"blocked") {
-        ("blocked", Tone::Warn)
-    } else if states.iter().any(|s| matches!(*s, "working" | "busy")) {
-        ("working", Tone::Ok)
-    } else if states
-        .iter()
-        .any(|s| matches!(*s, "idle" | "ready" | "done"))
-    {
-        ("idle", Tone::Muted)
-    } else {
-        ("unknown", Tone::Faint)
+    use crate::model::{AgentState, utc_seconds};
+    match node.agent_state(utc_seconds()) {
+        AgentState::Error => ("error", Tone::Rose),
+        AgentState::Waiting => ("blocked", Tone::Warn),
+        AgentState::Working => ("working", Tone::Ok),
+        AgentState::Idle => ("idle", Tone::Muted),
+        AgentState::Stale => ("stale", Tone::Warn),
+        AgentState::Unknown => ("unknown", Tone::Faint),
     }
 }
 fn heat(ui: &Ui, node: &Node) -> Option<Tone> {

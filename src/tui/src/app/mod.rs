@@ -1,8 +1,10 @@
+pub mod agent_activity;
 pub mod agent_identity;
 pub mod agent_tools;
 pub mod armonia_status;
 pub mod backend;
 pub mod cli;
+pub(crate) mod codex_fork;
 #[cfg(target_os = "linux")]
 mod codex_hook_binding;
 pub mod codex_state;
@@ -18,6 +20,7 @@ pub mod dependencies;
 pub mod diagnostics;
 pub mod dialog_text;
 pub mod discovery_budget;
+pub mod fork_licenses;
 pub mod gateway;
 pub mod gateway_config;
 pub mod grok_state;

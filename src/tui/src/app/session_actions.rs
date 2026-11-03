@@ -52,6 +52,7 @@ pub struct LaunchRequest<'a> {
     pub target: &'a Capabilities,
     pub parent: &'a Value,
     pub placement: Placement,
+    pub license: Option<&'a super::fork_licenses::Choice>,
 }
 #[derive(Clone, Debug)]
 pub struct SessionStore {
@@ -420,7 +421,16 @@ pub fn enrich_sessions(
             }
         }
     }
-    let hooks = super::hook_runtime::enrich_native_sessions(directory, snapshot, adapter);
+    let settings = SessionStore {
+        directory: directory.to_path_buf(),
+    }
+    .checkpoint_settings()?;
+    let hooks = super::hook_runtime::enrich_native_sessions_observed(
+        directory,
+        snapshot,
+        adapter,
+        Some(&settings),
+    );
     let mut enriched = 0;
     if let Some(panes) = snapshot["panes"].as_array_mut() {
         for pane in panes {
@@ -1323,6 +1333,7 @@ impl SessionStore {
             target,
             parent,
             placement,
+            license,
         } = request;
         let destination = terminals::identity(parent)?;
         let mut launch = checkpoints::plan(
@@ -1346,9 +1357,43 @@ impl SessionStore {
         if operation != Operation::Handoff && !checkpoint.profile.is_empty() {
             profiles.insert(target.harness.clone(), checkpoint.profile.clone());
         }
+        if let Some(choice) = license {
+            if operation != Operation::NativeFork
+                || target.harness != "codex"
+                || checkpoint.harness != "codex"
+            {
+                return Err("License selection is supported for native Codex forks".into());
+            }
+            if checkpoint.profile.is_empty() {
+                return Err(
+                    "Source fork profile is unknown; select an exact native source first".into(),
+                );
+            }
+            choice.verify(&config.runtime)?;
+            profiles.insert(
+                "codex".into(),
+                choice
+                    .home
+                    .to_str()
+                    .ok_or("License profile must be UTF-8")?
+                    .into(),
+            );
+        }
         let native =
             harnesses::launch_plan(&tool, &launch.binary, &launch.cwd, environment, &profiles)?;
         launch.environment = native.environment;
+        if let Some(choice) = license {
+            // An explicitly selected default Codex profile still needs a fixed
+            // import destination; ordinary inherited launches may omit this.
+            launch.environment.insert(
+                "CODEX_HOME".into(),
+                choice
+                    .home
+                    .to_str()
+                    .ok_or("License profile must be UTF-8")?
+                    .into(),
+            );
+        }
         Ok(PreparedLaunch {
             checkpoint,
             saved_key,
@@ -1357,9 +1402,11 @@ impl SessionStore {
             parent: parent.clone(),
             destination,
             placement,
+            license: license.cloned(),
+            settings: config.runtime.clone(),
         })
     }
-    pub fn apply(&self, adapter: &Terminals, prepared: PreparedLaunch) -> Result<Receipt> {
+    pub fn apply(&self, adapter: &Terminals, mut prepared: PreparedLaunch) -> Result<Receipt> {
         if let Some(key) = &prepared.saved_key {
             let current = self.get(key)?;
             if key != &checkpoints::key(&prepared.checkpoint)?
@@ -1374,7 +1421,30 @@ impl SessionStore {
         if let Some(session) = &prepared.pi_session {
             session.verify()?;
         }
-        adapter.spawn(&prepared.parent, &prepared.launch, prepared.placement)
+        if let Some(choice) = &prepared.license {
+            choice.verify(&prepared.settings)?;
+            // Verify the destination before importing native history. Spawn
+            // verifies it again after the bounded history preparation.
+            adapter.verify(&prepared.parent)?;
+            if Path::new(&prepared.checkpoint.profile) != choice.home {
+                let child = super::codex_fork::create(
+                    Path::new(&prepared.checkpoint.profile),
+                    &prepared.checkpoint.sid,
+                    &prepared.launch,
+                    &prepared.settings,
+                )?;
+                prepared.launch.args = vec!["resume".into(), child];
+            }
+        }
+        let mut receipt = adapter.spawn(&prepared.parent, &prepared.launch, prepared.placement)?;
+        if let Some(choice) = &prepared.license {
+            receipt.message.push_str(&format!(
+                "\nLicense: {} ({})",
+                choice.name,
+                choice.home.display()
+            ));
+        }
+        Ok(receipt)
     }
 }
 /// Kept in memory between the menu preview and explicit confirmation. The
@@ -1387,6 +1457,8 @@ pub struct PreparedLaunch {
     pub parent: Value,
     pub destination: TerminalId,
     pub placement: Placement,
+    license: Option<super::fork_licenses::Choice>,
+    settings: super::runtime_settings::Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2359,6 +2431,7 @@ mod tests {
             .prepare(
                 &saved.key,
                 LaunchRequest {
+                    license: None,
                     operation: Operation::NativeFork,
                     target: &caps,
                     parent: &f.pane,
@@ -2390,6 +2463,7 @@ mod tests {
                 .prepare(
                     &saved.key,
                     LaunchRequest {
+                        license: None,
                         operation: Operation::NativeFork,
                         target: &caps,
                         parent: &f.pane,
@@ -2399,6 +2473,119 @@ mod tests {
                     &f.environment
                 )
                 .is_err()
+        );
+    }
+    #[test]
+    fn fork_license_preserves_checkpoint_and_is_revalidated_before_any_native_mutation() {
+        let f = fixture();
+        let saved = save(&f, false);
+        let target = f.dir.join("selected-profile");
+        fs::create_dir(&target).unwrap();
+        let default_profile = Path::new(&f.environment["HOME"]).join(".codex");
+        fs::create_dir_all(&default_profile).unwrap();
+        let catalog = f.store.directory.join("codex-licenses.json");
+        layouts::write_private(
+            &catalog,
+            &serde_json::to_vec(&json!({"licenses":{"default":{"home":default_profile},"selected":{"home":target}}})).unwrap(),
+        )
+        .unwrap();
+        let choices = super::super::fork_licenses::list(
+            &f.store.directory,
+            "codex",
+            &BTreeMap::new(),
+            &f.config.runtime,
+        )
+        .unwrap();
+        let caps = capabilities(&f);
+        for choice in &choices {
+            let plan = f
+                .store
+                .prepare(
+                    &saved.key,
+                    LaunchRequest {
+                        operation: Operation::NativeFork,
+                        target: &caps,
+                        parent: &f.pane,
+                        placement: Placement::Split,
+                        license: Some(choice),
+                    },
+                    &f.config,
+                    &f.environment,
+                )
+                .unwrap();
+            assert_eq!(
+                plan.launch.environment["CODEX_HOME"],
+                choice.home.to_string_lossy()
+            );
+        }
+        let prepared = f
+            .store
+            .prepare(
+                &saved.key,
+                LaunchRequest {
+                    operation: Operation::NativeFork,
+                    target: &caps,
+                    parent: &f.pane,
+                    placement: Placement::Split,
+                    license: Some(
+                        choices
+                            .iter()
+                            .find(|choice| choice.name == "selected")
+                            .unwrap(),
+                    ),
+                },
+                &f.config,
+                &f.environment,
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.launch.environment["CODEX_HOME"],
+            target.to_string_lossy()
+        );
+        assert_eq!(
+            serde_json::to_value(&prepared.checkpoint).unwrap(),
+            serde_json::to_value(&saved.checkpoint).unwrap()
+        );
+        assert_eq!(prepared.saved_key.as_deref(), Some(saved.key.as_str()));
+        assert_eq!(
+            serde_json::to_value(f.store.get(&saved.key).unwrap().checkpoint).unwrap(),
+            serde_json::to_value(&saved.checkpoint).unwrap()
+        );
+        for operation in [Operation::Resume, Operation::Handoff] {
+            assert!(
+                f.store
+                    .prepare(
+                        &saved.key,
+                        LaunchRequest {
+                            operation,
+                            target: &caps,
+                            parent: &f.pane,
+                            placement: Placement::Split,
+                            license: Some(
+                                choices
+                                    .iter()
+                                    .find(|choice| choice.name == "selected")
+                                    .unwrap()
+                            )
+                        },
+                        &f.config,
+                        &f.environment
+                    )
+                    .is_err()
+            );
+        }
+        layouts::write_private(&catalog, b"{\"licenses\":{}}").unwrap();
+        assert!(
+            f.store
+                .apply(&f.adapter, prepared)
+                .err()
+                .unwrap()
+                .contains("changed")
+        );
+        assert!(!target.join("sessions").exists());
+        assert_eq!(
+            serde_json::to_value(f.store.get(&saved.key).unwrap().checkpoint).unwrap(),
+            serde_json::to_value(&saved.checkpoint).unwrap()
         );
     }
     #[test]
@@ -2842,6 +3029,7 @@ else:sys.exit(2)
             .prepare(
                 &saved.key,
                 LaunchRequest {
+                    license: None,
                     operation: Operation::Handoff,
                     target: &caps,
                     parent: &f.pane,

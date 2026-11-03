@@ -38,6 +38,10 @@ pub struct Node {
     /// how: working, blocked, status, input or output.
     pub active_at: f64,
     pub activity: String,
+    pub agent: bool,
+    pub terminal_key: String,
+    pub conflicted: bool,
+    pub agent_activity: Option<daedalus_tui::app::agent_activity::Observation>,
     /// On a tab or window: its panes where the backend places them.
     pub layout: Option<Layout>,
 }
@@ -214,8 +218,159 @@ impl Layout {
 impl Node {
     /// Working or blocked right now.
     pub fn live(&self) -> bool {
-        matches!(self.activity.as_str(), "working" | "blocked")
-            || matches!(self.state.as_str(), "working" | "busy" | "blocked")
+        matches!(
+            self.agent_state(utc_seconds()),
+            AgentState::Working | AgentState::Waiting
+        )
+    }
+    pub fn is_agent(&self) -> bool {
+        self.kind == "pane"
+            && !self.tile.as_ref().is_some_and(|tile| tile.viewer)
+            && (self.agent
+                || self.fields.iter().any(|field| {
+                    field.key == "Agent"
+                        && !field.value.is_empty()
+                        && !field.value.starts_with("not reported")
+                }))
+    }
+    pub fn terminal_identity_key(&self) -> &str {
+        if self.terminal_key.is_empty() {
+            &self.id
+        } else {
+            &self.terminal_key
+        }
+    }
+    pub fn agent_state(&self, now: f64) -> AgentState {
+        if self.conflicted {
+            return AgentState::Unknown;
+        }
+        let states = [
+            self.state.as_str(),
+            self.activity.as_str(),
+            self.tile.as_ref().map_or("", |tile| tile.state.as_str()),
+        ];
+        if states
+            .iter()
+            .any(|state| matches!(*state, "failed" | "error" | "exited"))
+        {
+            return AgentState::Error;
+        }
+        if states.iter().any(|state| {
+            matches!(
+                *state,
+                "blocked"
+                    | "waiting_for_user"
+                    | "awaiting_input"
+                    | "needs_input"
+                    | "permission_required"
+            )
+        }) {
+            return AgentState::Waiting;
+        }
+        if let Some(activity) = &self.agent_activity {
+            if !activity.fresh(now) {
+                return if !activity.observed_at.is_finite()
+                    || activity.observed_at <= 0.0
+                    || activity.observed_at > now
+                {
+                    AgentState::Unknown
+                } else {
+                    AgentState::Stale
+                };
+            }
+            return match activity.state.as_str() {
+                "working" => AgentState::Working,
+                "idle" => AgentState::Idle,
+                _ => AgentState::Unknown,
+            };
+        }
+        if states
+            .iter()
+            .any(|state| matches!(*state, "working" | "busy"))
+        {
+            AgentState::Working
+        } else if states
+            .iter()
+            .any(|state| matches!(*state, "idle" | "ready" | "done"))
+        {
+            AgentState::Idle
+        } else {
+            AgentState::Unknown
+        }
+    }
+    pub fn activity_note(&self, now: f64) -> String {
+        let state = self.agent_state(now);
+        if let Some(activity) = &self.agent_activity {
+            if !activity.observed_at.is_finite()
+                || activity.observed_at <= 0.0
+                || activity.observed_at > now
+            {
+                return format!(
+                    "{} · {} · timestamp unavailable",
+                    state.label(),
+                    activity.detail
+                );
+            }
+            let age = (now - activity.observed_at).max(0.0) as u64;
+            format!(
+                "{} · last: {} · {} ago",
+                state.label(),
+                activity.detail,
+                activity_age(age)
+            )
+        } else {
+            format!("{} · reported by terminal", state.label())
+        }
+    }
+}
+pub fn utc_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+fn activity_age(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h", seconds / 3600)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Working,
+    Waiting,
+    Idle,
+    Error,
+    Stale,
+    Unknown,
+}
+impl AgentState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Idle => "idle",
+            Self::Error => "error",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct AgentCounts {
+    pub working: usize,
+    pub waiting: usize,
+    pub idle: usize,
+    pub error: usize,
+    pub stale: usize,
+    pub unknown: usize,
+}
+impl AgentCounts {
+    pub fn total(&self) -> usize {
+        self.working + self.waiting + self.idle + self.error + self.stale + self.unknown
     }
 }
 /// One inspector fact, sent as `[label, value]` or `[label, value, tone]`.
@@ -863,6 +1018,8 @@ pub struct Snapshot {
     pub demo: bool,
     pub freshness: String,
     pub observed_at: f64,
+    pub agent_activity_max_age_ms: u64,
+    pub display_limited: bool,
     pub terminals: usize,
     pub views: usize,
     pub routes: usize,
@@ -873,6 +1030,47 @@ pub struct Snapshot {
     pub focus: String,
     pub terminal_actions: Vec<QuickAction>,
     pub workspace: WorkspaceState,
+}
+impl Snapshot {
+    pub fn activity_stale(&self, now: f64) -> bool {
+        if self.demo {
+            return false;
+        }
+        !now.is_finite()
+            || self.freshness.starts_with("STALE")
+            || self.freshness.starts_with("CHECKING")
+            || !self.observed_at.is_finite()
+            || self.observed_at <= 0.0
+            || now < self.observed_at
+            || (now - self.observed_at) * 1000.0
+                > (if self.agent_activity_max_age_ms == 0 {
+                    60000
+                } else {
+                    self.agent_activity_max_age_ms
+                }) as f64
+    }
+    pub fn agent_counts(&self, now: f64) -> AgentCounts {
+        let mut seen = HashSet::new();
+        let mut counts = AgentCounts::default();
+        for node in self.tree.iter().filter(|node| {
+            node.is_agent() && !node.id.is_empty() && seen.insert(node.terminal_identity_key())
+        }) {
+            let state = if self.activity_stale(now) {
+                AgentState::Stale
+            } else {
+                node.agent_state(now)
+            };
+            match state {
+                AgentState::Working => counts.working += 1,
+                AgentState::Waiting => counts.waiting += 1,
+                AgentState::Idle => counts.idle += 1,
+                AgentState::Error => counts.error += 1,
+                AgentState::Stale => counts.stale += 1,
+                AgentState::Unknown => counts.unknown += 1,
+            }
+        }
+        counts
+    }
 }
 #[derive(Default)]
 pub struct Dialog {
@@ -2448,6 +2646,87 @@ pub mod tests {
             ..Entry::default()
         }];
         ui
+    }
+    #[test]
+    fn agent_feedback_counts_one_terminal_and_excludes_shells_children_and_viewers() {
+        let mut snapshot = Snapshot {
+            observed_at: 1000.0,
+            agent_activity_max_age_ms: 60000,
+            ..Snapshot::default()
+        };
+        let pane = |id: &str, state: &str| Node {
+            id: id.into(),
+            terminal_key: id.into(),
+            kind: "pane".into(),
+            agent: true,
+            state: state.into(),
+            ..Node::default()
+        };
+        let mut viewer = pane("viewer", "working");
+        viewer.tile = Some(Tile {
+            viewer: true,
+            ..Tile::default()
+        });
+        let mut child = pane("child", "working");
+        child.kind = "agent session".into();
+        let mut shell = pane("shell", "working");
+        shell.agent = false;
+        snapshot.tree = vec![
+            pane("one", "working"),
+            pane("one", "working"),
+            pane("two", "blocked"),
+            pane("three", "idle"),
+            pane("four", "error"),
+            pane("five", "process present"),
+            viewer,
+            child,
+            shell,
+        ];
+        let mut linked = snapshot.tree[0].clone();
+        linked.id = "linked-one".into();
+        snapshot.tree.push(linked);
+        assert_eq!(
+            snapshot.agent_counts(1001.0),
+            AgentCounts {
+                working: 1,
+                waiting: 1,
+                idle: 1,
+                error: 1,
+                unknown: 1,
+                ..AgentCounts::default()
+            }
+        );
+        snapshot.freshness = "STALE · refresh failed".into();
+        assert_eq!(
+            snapshot.agent_counts(1001.0),
+            AgentCounts {
+                stale: 5,
+                ..AgentCounts::default()
+            }
+        );
+        assert!(snapshot.activity_stale(f64::NAN));
+    }
+    #[test]
+    fn hook_feedback_expires_without_becoming_idle_and_attention_states_take_priority() {
+        let mut node = Node {
+            state: "working".into(),
+            agent_activity: Some(daedalus_tui::app::agent_activity::Observation {
+                state: "idle".into(),
+                observed_at: 1000.0,
+                expires_at: 1060.0,
+                detail: "Turn settled".into(),
+                source: "verified hook".into(),
+            }),
+            ..Node::default()
+        };
+        assert_eq!(node.agent_state(1001.0), AgentState::Idle);
+        assert_eq!(node.agent_state(1061.0), AgentState::Stale);
+        node.activity = "blocked".into();
+        assert_eq!(node.agent_state(1001.0), AgentState::Waiting);
+        node.state = "error".into();
+        assert_eq!(node.agent_state(1001.0), AgentState::Error);
+        node.conflicted = true;
+        assert_eq!(node.agent_state(1001.0), AgentState::Unknown);
     }
     fn nodes(ui: &Ui) -> Vec<String> {
         ui.rows()

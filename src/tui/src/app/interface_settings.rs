@@ -54,6 +54,8 @@ pub struct InterfaceSettings {
     pub search_query_limit_chars: u64,
     pub shortcut_query_limit_chars: u64,
     pub agent_session_ids: bool,
+    pub agent_activity: bool,
+    pub agent_activity_rows: u64,
 }
 impl Default for InterfaceSettings {
     fn default() -> Self {
@@ -96,6 +98,8 @@ impl Default for InterfaceSettings {
             search_query_limit_chars: 1024,
             shortcut_query_limit_chars: 160,
             agent_session_ids: true,
+            agent_activity: true,
+            agent_activity_rows: 3,
         }
     }
 }
@@ -407,8 +411,22 @@ pub const SETTINGS: &[Setting] = &[
         agent_session_ids,
         "Agent session IDs in views",
         "Workspace display",
-        "Show labeled conversation session IDs on workspace cards, outlines and selected-terminal status. Missing reported IDs are explicit. Full observed values remain available in Details; terminal IDs are never substituted.",
+        "Show labeled conversation session IDs on workspace cards, outlines and selected-terminal status. Full observed values and missing-ID diagnostics remain in Details; terminal IDs are never substituted.",
         Kind::Toggle
+    ),
+    setting!(
+        agent_activity,
+        "Agent activity feedback",
+        "Workspace display",
+        "Show agent activity totals, active agents on Overview, and selected-agent lifecycle detail. Reported terminal status and evidence in Details remain available.",
+        Kind::Toggle
+    ),
+    setting!(
+        agent_activity_rows,
+        "Overview active-agent rows",
+        "Workspace display",
+        "Maximum working, waiting or failed agents listed on Overview. Zero keeps only activity totals. Available space may reduce the list.",
+        Kind::Number { min: 0, max: 12 }
     ),
 ];
 

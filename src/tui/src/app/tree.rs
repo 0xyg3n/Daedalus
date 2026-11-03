@@ -1368,6 +1368,34 @@ impl Tree {
         let [activity, tone] = activity_description(pane, context.now);
         rows.push(json!(["State", state, "state"]));
         rows.push(json!(["Activity", activity, tone]));
+        if let Some(observed) = pane.get("agent_activity").and_then(|value| {
+            serde_json::from_value::<super::agent_activity::Observation>(value.clone()).ok()
+        }) {
+            let fresh = observed.fresh(context.now);
+            let age = if observed.observed_at > 0.0 {
+                (context.now - observed.observed_at).max(0.0) as u64
+            } else {
+                0
+            };
+            rows.push(json!([
+                "Agent activity",
+                format!(
+                    "{} · {}",
+                    if fresh {
+                        observed.state.as_str()
+                    } else {
+                        "stale"
+                    },
+                    observed.detail
+                ),
+                if fresh { "state" } else { "warn" }
+            ]));
+            rows.push(json!([
+                "Activity evidence",
+                format!("{} · last event {age}s ago", observed.source),
+                "muted"
+            ]));
+        }
         if let Some(usage) = node.attributes.get("usage")
             && let (Some(seconds), Some(visits)) =
                 (usage["seconds"].as_f64(), usage["visits"].as_u64())
@@ -1642,6 +1670,19 @@ impl Tree {
                     json!({"title":title(pane,&context.hostname),"place":place,"project":first(pane,&["session"]),"harness":first(pane,&["agent"]),"state":attr("state","".into()),"views":node.attr_ref("views").and_then(|views|views.get("count")).cloned().unwrap_or(1.into()),"pinned":pin,"viewer":truth(&node.attr("viewer")),"split":attr("split",0.into())})
                 });
                 let mut row = json!({"id":id,"parent":node.parent.map(|p|tree.nodes[p].id()).unwrap_or_default(),"label":node.label,"parts":attr("parts",json!([])),"branch":format!("{prefix}{}",if last{"└─ "}else{"├─ "}),"kind":node.kind,"backend":node.key.first().map(text).unwrap_or_default(),"children":!node.children.is_empty(),"count":attr("pane_count",0.into()),"state":attr("state","".into()),"active_at":attr("activity_at",json!(0.0)),"activity":attr("activity","".into()),"linked":attr("linked",0.into()),"viewed":attr("viewed",false.into()),"server_focused":attr("server_focused",false.into()),"actionable":node.pane.as_ref().is_some_and(|pane|!crate::adapters::pane_observations::conflicted(pane))||truth(&node.attr("checkpoint")),"fields":tree.fields(index,context),"tile":tile,"layout":node.attr("layout")});
+                if let Some(pane) = node.pane.as_ref() {
+                    row["agent"] = json!(is_agent(pane));
+                    row["conflicted"] = json!(crate::adapters::pane_observations::conflicted(pane));
+                    if node.kind == "pane"
+                        && let Ok(identity) = crate::adapters::terminals::identity(pane)
+                    {
+                        row["terminal_key"] =
+                            json!(serde_json::to_string(&identity).expect("terminal identity"));
+                    }
+                    if let Some(activity) = pane.get("agent_activity") {
+                        row["agent_activity"] = activity.clone();
+                    }
+                }
                 if let Some(usage) = node.attributes.get("usage") {
                     row["usage"] = usage.clone();
                 }
@@ -2202,7 +2243,15 @@ mod tests {
         // independently disclose native-ID-only/profile/source uncertainty;
         // all other historical values remain.
         let (fixture, context) = fixture();
-        let actual = Tree::build(&fixture["snapshot"], &fixture["health"], &context).rows(&context);
+        let mut actual =
+            Tree::build(&fixture["snapshot"], &fixture["health"], &context).rows(&context);
+        // Preserve the entire historical projection contract. Additive activity
+        // metadata is verified by the linked-terminal test below.
+        for row in &mut actual {
+            for key in ["agent", "conflicted", "terminal_key", "agent_activity"] {
+                row.as_object_mut().unwrap().remove(key);
+            }
+        }
         let expected: Vec<Value> = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/tree-projection-expected.json"
         ))
@@ -2214,6 +2263,36 @@ mod tests {
             actual.len() == expected.len() && changes.is_empty(),
             "Projection differs: {}",
             json!(changes)
+        );
+    }
+    #[test]
+    fn activity_metadata_identifies_shared_terminals_without_counting_conversation_rows() {
+        let (fixture, context) = fixture();
+        let rows = Tree::build(&fixture["snapshot"], &fixture["health"], &context).rows(&context);
+        let agents: Vec<_> = rows
+            .iter()
+            .filter(|row| row["kind"] == "pane" && row["agent"] == true)
+            .collect();
+        assert_eq!(agents.len(), 4);
+        let identities: std::collections::BTreeSet<_> = agents
+            .iter()
+            .map(|row| row["terminal_key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            identities.len(),
+            3,
+            "A linked tmux pane has one physical activity identity"
+        );
+        for identity in identities {
+            serde_json::from_str::<crate::core::identity::TerminalId>(identity)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        assert!(
+            rows.iter()
+                .filter(|row| row["kind"] == "pane")
+                .all(|row| row["conflicted"] == false)
         );
     }
     #[test]

@@ -1653,6 +1653,7 @@ impl NativeOperations {
                     String::from_utf8(output.stdout).map_err(|_| "Invalid capability response")?;
                 let capabilities = harnesses::checkpoint_capabilities(&tool, &binary, Some(&help))?;
                 let request = LaunchRequest {
+                    license: None,
                     operation: if matches!(action, Action::CheckpointFork(_)) {
                         Operation::NativeFork
                     } else {

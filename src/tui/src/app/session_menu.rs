@@ -48,6 +48,7 @@ pub enum Request {
         sid: String,
     },
     Capabilities(String),
+    Licenses(String),
     Launch {
         checkpoint: Box<Checkpoint>,
         key: Option<String>,
@@ -56,6 +57,7 @@ pub enum Request {
         parent: Value,
         source: Option<Value>,
         placement: Placement,
+        license: Option<super::fork_licenses::Choice>,
     },
     Attach {
         pane: Value,
@@ -89,6 +91,7 @@ pub enum Answer {
         source: Value,
     },
     Capabilities(Capabilities),
+    Licenses(Vec<super::fork_licenses::Choice>),
     Receipt(Receipt),
     Frame(Value),
     Text(String),
@@ -140,6 +143,7 @@ struct Launch {
     parent: Value,
     source: Option<Value>,
     placement: Placement,
+    license: Option<super::fork_licenses::Choice>,
 }
 enum Commit {
     Workspace(Box<WorkspaceRequest>),
@@ -229,6 +233,12 @@ enum Stage {
         checkpoint: Checkpoint,
     },
     ForkSid(Value),
+    License {
+        checkpoint: Checkpoint,
+        key: Option<String>,
+        source: Option<Value>,
+        choices: Vec<super::fork_licenses::Choice>,
+    },
     Target {
         checkpoint: Checkpoint,
         key: Option<String>,
@@ -241,6 +251,7 @@ enum Stage {
         target: Capabilities,
         source: Option<Value>,
         panes: Vec<Value>,
+        license: Option<super::fork_licenses::Choice>,
     },
     Text {
         pane: Value,
@@ -1213,6 +1224,7 @@ impl SessionMenu {
         source: &mut S,
         config: &ControlConfig,
         seq: &mut u64,
+        license: Option<super::fork_licenses::Choice>,
     ) -> Result<Outcome> {
         let (checkpoint, key, operation, source_pane) = selection;
         let Answer::Capabilities(capabilities) =
@@ -1254,11 +1266,43 @@ impl SessionMenu {
                 target: capabilities,
                 source: source_pane,
                 panes,
+                license,
             },
             "Open a new pane below which terminal?",
             options,
             "",
         )
+    }
+    fn fork_license<S: Source>(
+        &mut self,
+        selection: (Checkpoint, Option<String>, Operation, Option<Value>),
+        source: &mut S,
+        config: &ControlConfig,
+        seq: &mut u64,
+    ) -> Result<Outcome> {
+        if selection.2 != Operation::NativeFork || selection.0.harness != "codex" {
+            let target = selection.0.harness.clone();
+            return self.destinations(selection, &target, source, config, seq, None);
+        }
+        let Answer::Licenses(choices) =
+            source.session(config, Request::Licenses("codex".into()))?
+        else {
+            return Err("Invalid native license response".into());
+        };
+        let mut options = vec![json!([
+            "current",
+            "Keep current profile",
+            "Retains the source profile and current routing."
+        ])];
+        options.extend(
+            choices
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| json!([index.to_string(), choice.name, choice.home])),
+        );
+        let (checkpoint, key, _, source_pane) = selection;
+        self.choose(seq,Stage::License{checkpoint,key,source:source_pane,choices},"Fork with which license?",options,
+            "A named license uses its native profile and retains the conversation history. Configure names and home directories in codex-licenses.json, or select another catalog with CODEX_LICENSE_FILE.")
     }
     fn targets(
         &mut self,
@@ -1718,39 +1762,31 @@ impl SessionMenu {
                     ),
                 ),
                 "handoff" => self.targets(seq, row.checkpoint, Some(row.key), None),
-                _ => {
-                    let target = row.checkpoint.harness.clone();
-                    self.destinations(
-                        (
-                            row.checkpoint,
-                            Some(row.key),
-                            if text == "fork" {
-                                Operation::NativeFork
-                            } else {
-                                Operation::Resume
-                            },
-                            None,
-                        ),
-                        &target,
-                        source,
-                        config,
-                        seq,
-                    )
-                }
+                _ => self.fork_license(
+                    (
+                        row.checkpoint,
+                        Some(row.key),
+                        if text == "fork" {
+                            Operation::NativeFork
+                        } else {
+                            Operation::Resume
+                        },
+                        None,
+                    ),
+                    source,
+                    config,
+                    seq,
+                ),
             },
             Stage::Fork { pane, checkpoint } => match text {
                 "manual" => self.input(seq, Stage::ForkSid(pane), "Native session ID"),
                 "handoff" => self.targets(seq, checkpoint, None, Some(pane)),
-                _ => {
-                    let target = checkpoint.harness.clone();
-                    self.destinations(
-                        (checkpoint, None, Operation::NativeFork, Some(pane)),
-                        &target,
-                        source,
-                        config,
-                        seq,
-                    )
-                }
+                _ => self.fork_license(
+                    (checkpoint, None, Operation::NativeFork, Some(pane)),
+                    source,
+                    config,
+                    seq,
+                ),
             },
             Stage::ForkSid(pane) => {
                 let Answer::Live {
@@ -1766,13 +1802,38 @@ impl SessionMenu {
                 else {
                     return Err("Invalid live session response".into());
                 };
-                let target = row.harness.clone();
-                self.destinations(
+                self.fork_license(
                     (row, None, Operation::NativeFork, Some(pane)),
+                    source,
+                    config,
+                    seq,
+                )
+            }
+            Stage::License {
+                checkpoint,
+                key,
+                source: source_pane,
+                choices,
+            } => {
+                let license = if text == "current" {
+                    None
+                } else {
+                    Some(
+                        text.parse::<usize>()
+                            .ok()
+                            .and_then(|index| choices.get(index))
+                            .cloned()
+                            .ok_or("Fork license is no longer available")?,
+                    )
+                };
+                let target = checkpoint.harness.clone();
+                self.destinations(
+                    (checkpoint, key, Operation::NativeFork, source_pane),
                     &target,
                     source,
                     config,
                     seq,
+                    license,
                 )
             }
             Stage::Target {
@@ -1785,6 +1846,7 @@ impl SessionMenu {
                 source,
                 config,
                 seq,
+                None,
             ),
             Stage::Destination {
                 checkpoint,
@@ -1793,13 +1855,14 @@ impl SessionMenu {
                 target,
                 source: source_pane,
                 panes,
+                license,
             } => {
                 let (placement, index) = match text.strip_prefix("window:") {
                     Some(index) => (Placement::Window, index),
                     None => (Placement::Split, text),
                 };
                 let parent = pick(&panes, index)?;
-                let label = format!(
+                let mut label = format!(
                     "{} “{}” with {} in a NEW {} at {}. This launches the AI tool.",
                     match operation {
                         Operation::Resume => "Resume",
@@ -1815,6 +1878,9 @@ impl SessionMenu {
                     },
                     description(&parent)
                 );
+                if let Some(choice) = &license {
+                    label.push_str(&format!("\nLicense: {}\nNative profile: {}\nThe selected conversation history is copied to this profile. The source profile and saved checkpoint are retained.",choice.name,choice.home.display()));
+                }
                 self.confirm(
                     seq,
                     Commit::Launch(Box::new(Launch {
@@ -1825,6 +1891,7 @@ impl SessionMenu {
                         parent,
                         source: source_pane,
                         placement,
+                        license,
                     })),
                     &label,
                 )
@@ -2009,6 +2076,7 @@ impl SessionMenu {
                 parent: launch.parent,
                 source: launch.source,
                 placement: launch.placement,
+                license: launch.license,
             },
             Commit::Terminal { pane, action } => Request::Terminal { pane, action },
             Commit::Duplicate {
@@ -2096,6 +2164,8 @@ mod tests {
         fail_effect: bool,
         supported: bool,
         missing_sid: bool,
+        codex: bool,
+        licenses: Vec<super::super::fork_licenses::Choice>,
     }
     fn checkpoint() -> Checkpoint {
         serde_json::from_value(
@@ -2175,12 +2245,22 @@ mod tests {
                     configuration: updated.clone(),
                     message: "Configured".into(),
                 },
-                Request::Load(_) => Answer::Saved(row()),
+                Request::Load(_) => {
+                    let mut row = row();
+                    if self.codex {
+                        row.checkpoint.harness = "codex".into();
+                    }
+                    Answer::Saved(row)
+                }
+                Request::Licenses(_) => Answer::Licenses(self.licenses.clone()),
                 Request::Live { pane, sid } => {
                     let mut frozen = pane.clone();
                     frozen["_daedalus_handoff_process"] = json!({"pid":123,"start":"456","argv_hash":"fixture","cwd":crate::test_support::path("/tmp/project"),"profile":""});
                     frozen["_fixture_supplied_sid"] = json!(sid);
                     let mut row = checkpoint();
+                    if self.codex {
+                        row.harness = "codex".into();
+                    }
                     if self.missing_sid {
                         row.sid = sid.clone();
                     }
@@ -2513,6 +2593,97 @@ mod tests {
                     );
                 }
                 _ => panic!("missing launch"),
+            }
+        }
+    }
+    #[test]
+    fn codex_fork_license_is_reviewed_and_kept_for_saved_live_and_manual_sources() {
+        let choice: super::super::fork_licenses::Choice = serde_json::from_value(json!({
+            "name":"fixture-license","home":crate::test_support::path("/tmp/selected-profile"),
+            "catalog":crate::test_support::path("/tmp/catalog.json"),"catalog_sha256":"fixture"
+        }))
+        .unwrap();
+        for entry in ["saved", "live", "manual"] {
+            let (mut menu, mut source, mut seq) = (
+                SessionMenu::default(),
+                Mock {
+                    supported: true,
+                    codex: true,
+                    missing_sid: entry == "manual",
+                    licenses: vec![choice.clone()],
+                    ..Mock::default()
+                },
+                0,
+            );
+            let picker = if entry == "saved" {
+                start(
+                    &mut menu,
+                    &mut source,
+                    &mut seq,
+                    "checkpoint:checkpoint:stable",
+                );
+                reply(&mut menu, &mut source, &mut seq, json!("fork")).unwrap()
+            } else {
+                let first = start(&mut menu, &mut source, &mut seq, "terminal.fork");
+                if entry == "manual" {
+                    reply(&mut menu, &mut source, &mut seq, json!("manual")).unwrap();
+                    reply(
+                        &mut menu,
+                        &mut source,
+                        &mut seq,
+                        json!("12345678-abcd-4000-8000-123456789abc"),
+                    )
+                    .unwrap()
+                } else {
+                    assert!(
+                        first.frames[0]["options"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|option| option[0] == "fork")
+                    );
+                    reply(&mut menu, &mut source, &mut seq, json!("fork")).unwrap()
+                }
+            };
+            assert_eq!(picker.frames[0]["title"], "Fork with which license?");
+            assert!(
+                picker.frames[0]["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row[1] == "fixture-license")
+            );
+            assert!(reply(&mut menu, &mut source, &mut seq, json!("99")).is_err());
+            assert!(menu.pending());
+            reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+            let confirmation = reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+            assert!(
+                confirmation.frames[0]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("fixture-license")
+            );
+            assert!(
+                !source
+                    .requests
+                    .iter()
+                    .any(|r| matches!(r, Request::Launch { .. }))
+            );
+            reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+            match source.requests.last().unwrap() {
+                Request::Launch {
+                    license: Some(selected),
+                    checkpoint,
+                    key,
+                    source: original,
+                    ..
+                } => {
+                    assert_eq!(selected, &choice);
+                    assert!(checkpoint.profile.is_empty());
+                    assert_eq!(key.is_some(), entry == "saved");
+                    assert_eq!(original.is_some(), entry != "saved");
+                }
+                _ => panic!("Confirmed fork lost its selected license"),
             }
         }
     }

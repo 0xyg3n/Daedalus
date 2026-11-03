@@ -377,7 +377,7 @@ pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
 }
 
 #[cfg(unix)]
-fn private_file(path: &Path) -> Result<File> {
+pub(super) fn private_file(path: &Path) -> Result<File> {
     layouts::check_path(path).map_err(|_| Error::PrivateState)?;
     let file = OpenOptions::new()
         .read(true)
@@ -396,7 +396,7 @@ fn private_file(path: &Path) -> Result<File> {
 }
 #[cfg(windows)]
 #[allow(unused_variables)]
-fn private_file(path: &Path) -> Result<File> {
+pub(super) fn private_file(path: &Path) -> Result<File> {
     crate::platform::open_private(path, false, false).map_err(|_| Error::PrivateState)
 }
 fn native_transcript(path: &Path) -> Result<File> {
@@ -4915,8 +4915,23 @@ pub fn enrich_native_sessions(
     snapshot: &mut Value,
     terminals: &Terminals,
 ) -> Result<usize> {
+    enrich_native_sessions_observed(directory, snapshot, terminals, None)
+}
+pub(crate) fn enrich_native_sessions_observed(
+    directory: &Path,
+    snapshot: &mut Value,
+    terminals: &Terminals,
+    settings: Option<&super::runtime_settings::Settings>,
+) -> Result<usize> {
     // A reused snapshot must not retain a conversation after its evidence expires.
     apply_native_sessions(snapshot, &[]);
+    if let Some(panes) = snapshot["panes"].as_array_mut() {
+        for pane in panes {
+            if let Some(map) = pane.as_object_mut() {
+                map.remove("agent_activity");
+            }
+        }
+    }
     if snapshot["panes"]
         .as_array()
         .is_none_or(|panes| panes.is_empty())
@@ -4960,10 +4975,37 @@ pub fn enrich_native_sessions(
         if registration.harness_process.is_some()
             && verify_live_session(&registration, terminals).is_ok()
         {
-            verified.push(registration.scope);
+            verified.push(registration);
         }
     }
-    let enriched = apply_native_sessions(snapshot, &verified);
+    let enriched = apply_native_sessions(
+        snapshot,
+        &verified.iter().map(|r| r.scope.clone()).collect::<Vec<_>>(),
+    );
+    if let Some(settings) = settings {
+        let deadline = terminals
+            .discovery_budget
+            .as_ref()
+            .map(|b| b.deadline)
+            .unwrap_or_else(|| {
+                std::time::Instant::now()
+                    + Duration::from_millis(settings.agent_activity_query_timeout_ms)
+            });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::Input)?
+            .as_secs_f64();
+        super::agent_activity::enrich(
+            directory,
+            snapshot,
+            &verified,
+            settings,
+            deadline,
+            now,
+            terminals.discovery_budget.as_deref(),
+        )
+        .map_err(|_| Error::Invalid("Agent activity observation is unavailable"))?;
+    }
     invalid.map_or(Ok(enriched), Err)
 }
 fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {

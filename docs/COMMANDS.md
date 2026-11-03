@@ -56,8 +56,18 @@ daedalus inventory --config-dir /abs/instance --json
 daedalus terminal capture --config-dir /abs/instance --target /abs/target.json --lines 80
 daedalus checkpoint save --config-dir /abs/instance --target /abs/target.json --name review --apply
 daedalus checkpoint spawn --config-dir /abs/instance --key CHECKPOINT --target /abs/target.json --operation fork --harness claude
+daedalus checkpoint licenses --config-dir /abs/instance
+daedalus checkpoint spawn --config-dir /abs/instance --key CHECKPOINT --target /abs/target.json --operation fork --harness codex --license work
 daedalus diagnostics --config-dir /abs/instance --json
 ```
+
+`checkpoint licenses` lists Codex license names and native directories without
+reading authentication files. `checkpoint spawn --operation fork --harness codex
+--license NAME` previews the selected profile; add `--apply` to prepare native
+history and launch the fork. Named licenses use native profile settings and
+bypass the optional Daedalus gateway. The original saved checkpoint is retained.
+See [fork licenses and history limits](TUI.md#workspaces) for catalog precedence,
+native capabilities, and failure behavior.
 
 - `config show` lists saved portable configuration, eleven instance fields, and every interface and local
   runtime setting, including its type, bounds and description, plus native profile
@@ -198,6 +208,12 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `checkpoint_entry_limit` | 65536 | 1–1048576; combined raw checkpoint/removal entries before duplicate collapse, including new entries |
 | `checkpoint_value_limit` | 1000000 | 128–16777216; cumulative JSON values and object keys |
 | `checkpoint_timeout_ms` | 2000 | 1–60000; cooperative checkpoint processing/write-admission deadline |
+| `session_fork_limit_bytes` | 1073741824 | 4096–4294967296; cumulative selected history reads and materialized bytes |
+| `session_fork_entry_limit` | 262144 | 1–4194304; directory entries and history records processed |
+| `session_fork_value_limit` | 16777216 | 128–134217728; cumulative history JSON values and object keys |
+| `session_fork_timeout_ms` | 30000 | 100–300000; shared capture/native migration/fork preparation deadline |
+| `agent_activity_max_age_ms` | 60000 | 1000–86400000; maximum verified lifecycle/snapshot age before feedback is stale |
+| `agent_activity_query_timeout_ms` | 250 | 1–5000; shared cooperative read-only activity query budget per discovery pass |
 
 Checkpoint policies cover canonical and both supported legacy registries, the
 removal index, local list/show/save/remove/launch checks, discovery observations

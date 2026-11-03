@@ -1276,11 +1276,14 @@ fn header(f: &mut Frame, area: Rect, ui: &mut Ui, wide: bool) {
     } else {
         theme.fg(chip_tone)
     };
-    let mut right = vec![
-        Span::styled(chip, chip_style.add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  {age}"), theme.fg(Tone::Muted)),
-        Span::raw(" "),
-    ];
+    let mut right = vec![Span::styled(chip, chip_style.add_modifier(Modifier::BOLD))];
+    right.extend(
+        agent_activity_spans(ui, crate::model::utc_seconds())
+            .into_iter()
+            .map(|(text, tone)| Span::styled(format!("  {text}"), theme.fg(tone))),
+    );
+    right.push(Span::styled(format!("  {age}"), theme.fg(Tone::Muted)));
+    right.push(Span::raw(" "));
     let left_width: usize = left.iter().map(|s| s.width()).sum();
     while right.len() > 1
         && left_width + right.iter().map(|s| s.width()).sum::<usize>() + 2 > area.width as usize
@@ -1306,6 +1309,54 @@ fn header(f: &mut Frame, area: Rect, ui: &mut Ui, wide: bool) {
     } else {
         tabs(f, second, ui);
     }
+}
+
+fn agent_activity_spans(ui: &Ui, now: f64) -> Vec<(String, Tone)> {
+    if !ui.settings.agent_activity {
+        return Vec::new();
+    }
+    let counts = ui.snapshot.agent_counts(now);
+    let partial = ui.snapshot.display_limited || ui.snapshot.freshness.starts_with("PARTIAL");
+    if counts.total() == 0 {
+        return vec![(
+            if partial {
+                "activity incomplete"
+            } else {
+                "0 agents"
+            }
+            .into(),
+            if partial { Tone::Warn } else { Tone::Faint },
+        )];
+    }
+    if ui.snapshot.activity_stale(now) {
+        return vec![(
+            format!("activity stale · {} agents", counts.total()),
+            Tone::Warn,
+        )];
+    }
+    let mut parts = vec![(
+        format!("{} working", counts.working),
+        if counts.working > 0 {
+            Tone::Ok
+        } else {
+            Tone::Muted
+        },
+    )];
+    for (count, label, tone) in [
+        (counts.waiting, "waiting", Tone::Warn),
+        (counts.error, "errors", Tone::Rose),
+        (counts.idle, "idle", Tone::Muted),
+        (counts.stale, "stale", Tone::Warn),
+        (counts.unknown, "unknown", Tone::Faint),
+    ] {
+        if count > 0 {
+            parts.push((format!("{count} {label}"), tone));
+        }
+    }
+    if partial {
+        parts.insert(0, ("partial activity".into(), Tone::Warn));
+    }
+    parts
 }
 
 /// A hairline under the header. While discovery runs, a light sweeps across it.
@@ -2532,6 +2583,32 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         }
         _ => ui.status.as_str(),
     };
+    let activity_status;
+    let status = if ui.page == WORKSPACES
+        && ui.settings.agent_activity
+        && !ui.status_error
+        && !ui.busy
+        && ui.dialog.is_none()
+        && ui.embed.is_none()
+        && let Some(node) = ui
+            .selected_terminal()
+            .and_then(|id| ui.terminal_node(&id))
+            .filter(|node| node.is_agent())
+    {
+        let feedback = if ui.snapshot.activity_stale(crate::model::utc_seconds()) {
+            "Agent activity snapshot is stale".into()
+        } else {
+            node.activity_note(crate::model::utc_seconds())
+        };
+        activity_status = if status.is_empty() {
+            feedback
+        } else {
+            format!("{status} · {feedback}")
+        };
+        activity_status.as_str()
+    } else {
+        status
+    };
     let identity_status;
     let status = if ui.page == WORKSPACES
         && ui.settings.agent_session_ids
@@ -2930,6 +3007,40 @@ mod tests {
             status: "Ready".into(),
             ..Ui::default()
         }
+    }
+    #[test]
+    fn agent_activity_feedback_shows_counts_tools_staleness_and_saved_visibility() {
+        let mut ui = fixture(Theme::default());
+        let now = crate::model::utc_seconds();
+        ui.page = OVERVIEW;
+        ui.snapshot.tree[1].agent = true;
+        ui.snapshot.tree[1].agent_activity = Some(daedalus_tui::app::agent_activity::Observation {
+            state: "working".into(),
+            detail: "Using exec_command".into(),
+            source: "verified hook".into(),
+            observed_at: now - 3.0,
+            expires_at: now + 30.0,
+        });
+        let rendered = text(&render(&mut ui, 160, 48));
+        assert!(rendered.contains("1 working"));
+        assert!(rendered.contains("Using exec_command"));
+        ui.snapshot.tree[1]
+            .agent_activity
+            .as_mut()
+            .unwrap()
+            .expires_at = now - 1.0;
+        let rendered = text(&render(&mut ui, 160, 48));
+        assert!(rendered.contains("1 stale"));
+        assert!(!rendered.contains("1 working"));
+        ui.snapshot.demo = false;
+        ui.snapshot.freshness = "STALE · refresh failed".into();
+        let rendered = text(&render(&mut ui, 160, 48));
+        assert!(rendered.contains("activity stale"));
+        assert!(!rendered.contains("1 working"));
+        ui.settings.agent_activity = false;
+        let rendered = text(&render(&mut ui, 160, 48));
+        assert!(!rendered.contains("activity stale"));
+        assert!(!rendered.contains("Using exec_command"));
     }
     fn render(ui: &mut Ui, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();

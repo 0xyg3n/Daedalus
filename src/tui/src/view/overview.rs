@@ -183,6 +183,63 @@ pub(super) fn overview(f: &mut Frame, area: Rect, ui: &mut Ui) {
         );
         y += 2;
     }
+    if ui.settings.agent_activity && inner.bottom() > y + 8 {
+        let now = crate::model::utc_seconds();
+        let summary = super::agent_activity_spans(ui, now)
+            .into_iter()
+            .map(|(text, tone)| Span::styled(format!("{text}  "), theme.fg(tone)))
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(Line::from(summary)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
+        if !s.activity_stale(now) {
+            let mut seen = std::collections::HashSet::new();
+            let mut agents = s
+                .tree
+                .iter()
+                .filter(|node| node.is_agent() && seen.insert(node.terminal_identity_key()))
+                .filter_map(|node| {
+                    let state = node.agent_state(now);
+                    match state {
+                        crate::model::AgentState::Error => Some((0, node, Tone::Rose)),
+                        crate::model::AgentState::Waiting => Some((1, node, Tone::Warn)),
+                        crate::model::AgentState::Working => Some((2, node, Tone::Ok)),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            agents.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| b.1.active_at.total_cmp(&a.1.active_at))
+                    .then_with(|| a.1.id.cmp(&b.1.id))
+            });
+            let rows = (ui.settings.agent_activity_rows as usize)
+                .min(inner.bottom().saturating_sub(y + 9) as usize);
+            for (_, node, tone) in agents.into_iter().take(rows) {
+                let name = node
+                    .tile
+                    .as_ref()
+                    .map(|tile| tile.title.as_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(&node.label);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(
+                        fit(
+                            &format!("{} · {}", super::clean(name), node.activity_note(now)),
+                            inner.width as usize,
+                            &theme,
+                        ),
+                        theme.fg(tone),
+                    )])),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+                y += 1;
+            }
+        }
+        y += 1;
+    }
     // Connections and setup, side by side when there is room.
     let items = ui.rows();
     let action_height: u16 = items

@@ -15,7 +15,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Write, path::PathBuf};
 pub type Result<T> = std::result::Result<T, String>;
-pub const HELP: &str = "daedalus checkpoint list --config-dir ABS\ndaedalus checkpoint show|remove --config-dir ABS --key CHECKPOINT_KEY [--apply]\ndaedalus checkpoint save --config-dir ABS --target ABS --name NAME [--sid ID] [--include-output] [--apply]\ndaedalus checkpoint spawn --config-dir ABS --key CHECKPOINT_KEY --target ABS --operation resume|fork|handoff --harness ID [--placement split|window] [--apply]\nTarget is a private JSON file containing one exact terminal observation from inventory, including generation. Labels are never resolved. Save/remove/spawn preview by default; --apply authorizes that operation. Spawn requires installed harness capability evidence.\n";
+pub const HELP: &str = "daedalus checkpoint list|licenses --config-dir ABS\ndaedalus checkpoint show|remove --config-dir ABS --key CHECKPOINT_KEY [--apply]\ndaedalus checkpoint save --config-dir ABS --target ABS --name NAME [--sid ID] [--include-output] [--apply]\ndaedalus checkpoint spawn --config-dir ABS --key CHECKPOINT_KEY --target ABS --operation resume|fork|handoff --harness ID [--placement split|window] [--license NAME] [--apply]\nTarget is a private JSON file containing one exact terminal observation from inventory, including generation. Labels are never resolved. Save/remove/spawn preview by default; --apply authorizes that operation. Spawn requires installed harness capability evidence. --license selects a named native Codex profile for a fork and preserves the source checkpoint. Catalog: CODEX_LICENSE_FILE, instance codex-licenses.json, or the existing home catalog.\n";
 #[derive(Debug, PartialEq)]
 pub struct Command {
     verb: String,
@@ -29,7 +29,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
         return Ok(None);
     }
     let verb = args[0].as_str();
-    if !["list", "show", "remove", "rm", "save", "spawn"].contains(&verb) {
+    if !["list", "licenses", "show", "remove", "rm", "save", "spawn"].contains(&verb) {
         return Err("Unknown checkpoint command; use checkpoint --help".into());
     }
     let mut options = BTreeMap::new();
@@ -56,6 +56,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
             "--operation",
             "--harness",
             "--placement",
+            "--license",
         ]
         .contains(&flag.as_str())
             || index + 1 >= args.len()
@@ -74,7 +75,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
     );
     layouts::check_path(&directory)?;
     let (required, allowed): (&[&str], &[&str]) = match verb {
-        "list" => (&[], &[]),
+        "list" | "licenses" => (&[], &[]),
         "show" | "remove" | "rm" => (&["--key"], &["--key"]),
         "save" => (&["--target", "--name"], &["--target", "--name", "--sid"]),
         _ => (
@@ -85,13 +86,14 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
                 "--operation",
                 "--harness",
                 "--placement",
+                "--license",
             ],
         ),
     };
     if required.iter().any(|key| !options.contains_key(*key))
         || options.keys().any(|key| !allowed.contains(&key.as_str()))
         || (include_output && verb != "save")
-        || (apply && ["list", "show"].contains(&verb))
+        || (apply && ["list", "licenses", "show"].contains(&verb))
     {
         return Err("Options do not match checkpoint operation".into());
     }
@@ -117,6 +119,15 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
             .is_some_and(|p| !["split", "window"].contains(&p.as_str()))
     {
         return Err("Invalid checkpoint operation or placement".into());
+    }
+    if let Some(name) = options.get("--license")
+        && (options.get("--operation").map(String::as_str) != Some("fork")
+            || options.get("--harness").map(String::as_str) != Some("codex")
+            || name.is_empty()
+            || name.len() > 128
+            || name.chars().any(char::is_control))
+    {
+        return Err("--license requires a named native Codex fork".into());
     }
     Ok(Some(Command {
         verb: verb.into(),
@@ -148,6 +159,24 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
         .map(String::as_str)
         .unwrap_or("");
     let value = match command.verb.as_str() {
+        "licenses" => {
+            let config = ControlConfig::parse(
+                &layouts::read_private(&command.directory.join("control.json"))?
+                    .ok_or("Configuration missing")?,
+            )?;
+            let licenses = super::fork_licenses::list(
+                &command.directory,
+                "codex",
+                &crate::platform::environment(),
+                &config.runtime,
+            )?;
+            json!(
+                licenses
+                    .into_iter()
+                    .map(|choice| json!({"name":choice.name,"home":choice.home}))
+                    .collect::<Vec<_>>()
+            )
+        }
         "list" => serde_json::to_value(store.list_with_settings(&settings)?)
             .map_err(|_| "Cannot encode checkpoints")?,
         "show" => serde_json::to_value(store.get_with_settings(key, &settings)?)
@@ -170,11 +199,26 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
             )
             .map_err(|_| "Invalid target JSON")?;
             let identity = terminals::identity(&pane)?;
+            let license = if let Some(name) = command.options.get("--license") {
+                Some(
+                    super::fork_licenses::list(
+                        &command.directory,
+                        "codex",
+                        &crate::platform::environment(),
+                        &config.runtime,
+                    )?
+                    .into_iter()
+                    .find(|choice| &choice.name == name)
+                    .ok_or("Unknown fork license")?,
+                )
+            } else {
+                None
+            };
             if !command.apply {
                 if command.verb == "spawn" {
                     store.get(key)?;
                 }
-                json!({"operation":command.verb,"target":identity,"key":key,"apply":false,"notice":"Apply revalidates exact terminal generation. No terminal operation has run."})
+                json!({"operation":command.verb,"target":identity,"key":key,"license":license.as_ref().map(|choice|json!({"name":choice.name,"home":choice.home})),"apply":false,"notice":"Apply revalidates exact terminal generation. No terminal operation has run."})
             } else if command.verb == "save" {
                 let request = SaveRequest {
                     name: command.options["--name"].clone(),
@@ -220,6 +264,7 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
                         parent: pane,
                         source: None,
                         placement,
+                        license,
                     },
                 )? {
                     Answer::Receipt(receipt) => {
