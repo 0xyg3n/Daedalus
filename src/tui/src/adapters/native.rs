@@ -91,6 +91,18 @@ pub fn keys(keys: &[String]) -> Result<Vec<u8>, String> {
 mod identity_tests {
     use super::*;
     #[test]
+    fn exact_native_reports_for_unknown_tools_do_not_disappear_or_cross_providers() {
+        let mut pane = json!({"agent":"custom-tool","agent_session":{"kind":"id","agent":"custom-tool","value":"native-conversation"}});
+        assert_eq!(
+            super::super::terminals::reported_session(&pane),
+            Some("native-conversation")
+        );
+        pane["agent_session"]["agent"] = json!("other-tool");
+        assert!(super::super::terminals::reported_session(&pane).is_none());
+        pane["agent"] = Value::Null;
+        assert!(super::super::terminals::reported_session(&pane).is_none());
+    }
+    #[test]
     fn native_launch_metadata_is_private_backward_compatible_and_not_a_fork_parent() {
         let mut info: SessionInfo = serde_json::from_value(json!({"id":"pty","generation":"generation","name":"fixture","workspace":"project","cwd":".","command":"CODEX.EXE","pid":42,"foreground_pid":null,"cols":80,"rows":24,"controlled":false})).unwrap();
         assert!(super::super::terminals::reported_session(&pane(&info)).is_none());

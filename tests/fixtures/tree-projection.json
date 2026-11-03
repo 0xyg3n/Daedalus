@@ -7,7 +7,7 @@
       {
         "backend": "tmux",
         "pane_id": "%1",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "terminal_id": "v2:10:100:20:200%1"
       }
     ]
@@ -70,7 +70,7 @@
         "flags": "",
         "pane_id": "%1",
         "session_id": "$2",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "tty": "/dev/pts/4"
       },
       {
@@ -79,7 +79,7 @@
         "flags": "read-only",
         "pane_id": "%2",
         "session_id": "$3",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "tty": "/dev/pts/5"
       },
       {
@@ -89,12 +89,12 @@
         "outer_panes": [
           {
             "pane_id": "%2",
-            "socket": "/tmp/example.sock"
+            "socket": "//fixture/tmp/example.sock"
           }
         ],
         "pane_id": "%9",
         "session_id": "$9",
-        "socket": "/tmp/nested.sock",
+        "socket": "//fixture/tmp/nested.sock",
         "tty": "/dev/pts/6"
       }
     ],
@@ -104,7 +104,7 @@
         "label": "Viewer",
         "mechanism": "tmux client",
         "pane_id": "%2",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "source": "herdr/work/w1:p1/uuid1",
         "source_label": "Compiler",
         "terminal_id": "v2:10:100:20:200%2"
@@ -159,11 +159,11 @@
         "left": "0",
         "pane_id": "%1",
         "pid": "20",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "session": "main-view",
         "session_group": "main",
         "session_id": "$2",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "terminal_id": "v2:10:100:20:200%1",
         "terminal_title_stripped": "Checking tests",
         "title": "Project \u00b7 Codex \u00b7 default",
@@ -200,11 +200,11 @@
         "left": "0",
         "pane_id": "%1",
         "pid": "20",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "session": "main",
         "session_group": "main",
         "session_id": "$1",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "terminal_id": "v2:10:100:20:200%1",
         "terminal_title_stripped": "Checking tests",
         "title": "Project \u00b7 Codex \u00b7 default",
@@ -245,11 +245,11 @@
         "left": "61",
         "pane_id": "%2",
         "pid": "20",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "session": "main",
         "session_group": "main",
         "session_id": "$1",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "terminal_id": "v2:10:100:20:200%2",
         "title": "fixture-host",
         "top": "0",
@@ -269,11 +269,11 @@
         "left": "0",
         "pane_id": "%1",
         "pid": "20",
-        "server": "tmux@%2Ftmp%2Fexample.sock",
+        "server": "tmux@%2F%2Ffixture%2Ftmp%2Fexample.sock",
         "session": "linked",
         "session_group": "",
         "session_id": "$3",
-        "socket": "/tmp/example.sock",
+        "socket": "//fixture/tmp/example.sock",
         "terminal_id": "v2:10:100:20:200%1",
         "terminal_title_stripped": "Checking tests",
         "title": "Project \u00b7 Codex \u00b7 default",

@@ -196,7 +196,7 @@ const spawnSync=(binary,args,options)=>{
 const handlers={{}};
 const ctx={{session:{{get:async()=>({{id:'session'}}),hook:async(name,handler)=>{{handlers[name]=handler;return{{dispose:async()=>{{}}}};}}}},
 tool:{{hook:async()=>({{dispose:async()=>{{}}}})}},event:{{async *subscribe(){{}}}},
-sessionManager:{{getSessionId:()=> 'session'}}}};
+sessionManager:{{getSessionId:()=> 'session',getSessionFile:()=>null}}}};
 {activate}
 if(count()<2)throw new Error('Native child fixtures did not execute');
 globalThis.rejectHook=true;let rejected=false;

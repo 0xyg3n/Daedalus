@@ -16,11 +16,18 @@ const LIMIT: usize = 8_000_000;
 /// A conversation belongs to its reported harness, never to its terminal ID.
 pub fn reported_session(pane: &Value) -> Option<&str> {
     let session = &pane["agent_session"];
-    let agent = super::harnesses::canonical_id(pane["agent"].as_str()?)?;
-    (session["kind"] == "id"
-        && super::harnesses::canonical_id(session["agent"].as_str()?) == Some(agent))
-    .then(|| session["value"].as_str())?
-    .filter(|sid| !sid.is_empty() && !sid.chars().any(char::is_control))
+    let observed = pane["agent"].as_str()?;
+    let reported = session["agent"].as_str()?;
+    let same_agent = if let Some(agent) = super::harnesses::canonical_id(observed) {
+        super::harnesses::canonical_id(reported) == Some(agent)
+    } else {
+        // Preserve an exact transport report for an unregistered tool without
+        // granting that tool native launch/control capabilities.
+        !observed.is_empty() && observed == reported
+    };
+    (session["kind"] == "id" && same_agent)
+        .then(|| session["value"].as_str())?
+        .filter(|sid| !sid.is_empty() && !sid.chars().any(char::is_control))
 }
 fn normalize_agent(pane: &mut Map<String, Value>) {
     if let Some(agent) = pane

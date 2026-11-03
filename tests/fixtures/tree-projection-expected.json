@@ -684,13 +684,13 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\"]",
     "kind": "server",
-    "label": "TMUX · /tmp/example.sock",
+    "label": "TMUX · //fixture/tmp/example.sock",
     "layout": null,
     "linked": 0,
     "parent": "",
@@ -720,12 +720,12 @@
         "info"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\"]",
     "kind": "tmux session",
     "label": "linked",
     "layout": null,
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\"]",
     "parts": [],
     "server_focused": false,
     "state": "",
@@ -752,7 +752,7 @@
         "info"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
     "kind": "window",
     "label": "Linked",
     "layout": {
@@ -761,7 +761,7 @@
         {
           "focused": true,
           "h": 24,
-          "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+          "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
           "w": 60,
           "x": 0,
           "y": 0
@@ -771,7 +771,7 @@
       "zoomed": false
     },
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\"]",
     "parts": [],
     "server_focused": false,
     "state": "",
@@ -804,7 +804,7 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ],
       [
@@ -848,12 +848,12 @@
         "warn"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
     "kind": "pane",
     "label": "%1 · Project · Codex · default",
     "layout": null,
     "linked": 2,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\"]",
     "parts": [
       [
         "%1",
@@ -917,7 +917,7 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ],
       [
@@ -961,12 +961,12 @@
         "ok"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
     "kind": "agent session",
     "label": "codex",
     "layout": null,
     "linked": 2,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$3\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
     "parts": [
       [
         "codex",
@@ -998,12 +998,12 @@
         "info"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\"]",
     "kind": "tmux session",
     "label": "main (+1 grouped)",
     "layout": null,
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\"]",
     "parts": [],
     "server_focused": false,
     "state": "",
@@ -1030,7 +1030,7 @@
         "info"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
     "kind": "window",
     "label": "Editor",
     "layout": {
@@ -1039,7 +1039,7 @@
         {
           "focused": true,
           "h": 24,
-          "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+          "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
           "w": 60,
           "x": 0,
           "y": 0
@@ -1047,7 +1047,7 @@
         {
           "focused": false,
           "h": 24,
-          "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+          "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
           "w": 59,
           "x": 61,
           "y": 0
@@ -1057,7 +1057,7 @@
       "zoomed": false
     },
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\"]",
     "parts": [],
     "server_focused": false,
     "state": "",
@@ -1090,7 +1090,7 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ],
       [
@@ -1134,12 +1134,12 @@
         "warn"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
     "kind": "pane",
     "label": "%1 · Project · Codex · default",
     "layout": null,
     "linked": 2,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
     "parts": [
       [
         "%1",
@@ -1197,12 +1197,12 @@
         "muted"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"herdr-view\", \"work\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"herdr-view\", \"work\"]",
     "kind": "declared view",
     "label": "Herdr view → work",
     "layout": null,
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
     "parts": [],
     "server_focused": false,
     "state": "",
@@ -1235,7 +1235,7 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ],
       [
@@ -1279,12 +1279,12 @@
         "ok"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\", \"agent\", \"codex\", \"\"]",
     "kind": "agent session",
     "label": "codex",
     "layout": null,
     "linked": 2,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%1\", \"v2:10:100:20:200%1\"]",
     "parts": [
       [
         "codex",
@@ -1327,7 +1327,7 @@
       ],
       [
         "Server",
-        "/tmp/example.sock",
+        "//fixture/tmp/example.sock",
         "tmux"
       ],
       [
@@ -1366,12 +1366,12 @@
         "ok"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
     "kind": "pane",
     "label": "%2 · View of Compiler",
     "layout": null,
     "linked": 1,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\"]",
     "parts": [
       [
         "%2",
@@ -1408,7 +1408,7 @@
     "fields": [
       [
         "View",
-        "Nested tmux view → /tmp/nested.sock / $9",
+        "Nested tmux view → //fixture/tmp/nested.sock / $9",
         "info"
       ],
       [
@@ -1417,12 +1417,12 @@
         "muted"
       ]
     ],
-    "id": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\", \"nested\", \"/tmp/nested.sock\", \"nested\"]",
+    "id": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\", \"nested\", \"//fixture/tmp/nested.sock\", \"nested\"]",
     "kind": "nested view",
-    "label": "Nested tmux view → /tmp/nested.sock / $9",
+    "label": "Nested tmux view → //fixture/tmp/nested.sock / $9",
     "layout": null,
     "linked": 0,
-    "parent": "[\"tmux\", \"/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
+    "parent": "[\"tmux\", \"//fixture/tmp/example.sock\", \"project\", \"$1\", \"group\", \"@1\", \"pane\", \"%2\", \"v2:10:100:20:200%2\"]",
     "parts": [],
     "server_focused": false,
     "state": "",

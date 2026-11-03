@@ -2882,6 +2882,28 @@ mod windows_server_tests {
     }
     #[test]
     fn guided_server_pins_one_native_child_and_rejects_replaced_ui() {
+        // Other parallel tests spawn this same image. Give the exact-child
+        // selection test its own process tree, with one controlled child.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::hook_install::windows_server_tests::guided_server_parent",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    #[ignore = "Isolated parent fixture, invoked by the guided server identity regression"]
+    fn guided_server_parent() {
         struct Child(std::process::Child);
         impl Drop for Child {
             fn drop(&mut self) {

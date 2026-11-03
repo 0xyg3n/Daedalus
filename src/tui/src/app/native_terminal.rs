@@ -1820,6 +1820,8 @@ mod tests {
                         Err(error) => panic!("owned listener did not receive discovery: {error}"),
                     }
                 };
+                // Winsock inherits the listener's nonblocking mode.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();

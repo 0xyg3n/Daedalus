@@ -58,7 +58,7 @@ fn prepare_uninstall_at(
     // Check that the image can actually be removed before NSIS deletes anything.
     // Never force-stop unrelated TUI, native terminal or agent processes.
     platform::check_executable_not_running(destination)
-        .map_err(|_| "Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved.".into())
+        .map_err(|error| format!("Close other Daedalus windows before uninstalling. Telegram was stopped gracefully; your configuration is preserved. ({error})"))
 }
 
 /// The NSIS update waits for the parent TUI only. A Telegram service keeps the
