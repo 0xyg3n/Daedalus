@@ -98,6 +98,7 @@ pub fn fork_parent(argv: &[String], cwd: &Path) -> Result<Option<Parent>> {
     } else {
         cwd.join(path)
     };
+    layouts::check_path(&path)?;
     if !path.exists()
         && !Path::new(&selector).is_absolute()
         && Path::new(&selector).components().count() == 1
