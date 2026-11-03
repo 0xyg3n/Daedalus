@@ -18,8 +18,12 @@ type Result<T> = std::result::Result<T, String>;
 const HELP: &str = "daedalus memory list --config-dir ABS [--after ID]\ndaedalus memory status --config-dir ABS --key MEMORY_KEY\ndaedalus memory refresh --config-dir ABS --key MEMORY_KEY\nList/status read local receipts only. Refresh queries the configured Hindsight operation status and saves its correlated receipt. It never retries or uploads memory. Provider errors and original memory contents are not printed.\n";
 
 pub fn run(args: &[String], out: &mut impl Write) -> Result<()> {
+    if args.first().is_some_and(|value| value == "config") {
+        return super::memory_config::run(&args[1..], out);
+    }
     if args.is_empty() || args == ["--help"] {
-        return write!(out, "{HELP}").map_err(|_| "Cannot write memory help".into());
+        return write!(out, "{HELP}{}", super::memory_config::HELP)
+            .map_err(|_| "Cannot write memory help".into());
     }
     let verb = args[0].as_str();
     if !matches!(verb, "list" | "status" | "refresh") {

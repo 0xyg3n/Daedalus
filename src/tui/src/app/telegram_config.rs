@@ -50,6 +50,8 @@ impl Grant {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
+    #[serde(default)]
+    pub runtime: super::telegram_runtime::Settings,
     pub version: u32,
     pub instance: String,
     pub bot_id: i64,
@@ -69,6 +71,10 @@ fn valid_path(path: &Path) -> Result<()> {
 }
 impl ServiceConfig {
     pub fn validate(&self) -> Result<()> {
+        self.runtime.validate()?;
+        if self.registrations.len() as u64 > self.runtime.feeder_registration_limit {
+            return Err("Selected registrations exceed feeder_registration_limit".into());
+        }
         if self.version != 1
             || self.bot_id <= 0
             || self.instance.is_empty()
@@ -166,14 +172,29 @@ impl ServiceConfig {
     }
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = read_private(path, LIMIT)?.ok_or("Service configuration is missing")?;
+        Self::parse(&bytes)
+    }
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > LIMIT {
+            return Err("Service configuration exceeds the supported 1 MiB size".into());
+        }
         // PowerShell 5.1 and some Windows editors write a UTF-8 BOM. The
         // service reloads this file while it is running; rejecting the BOM
         // after an update makes that reload fail closed and drop the process.
-        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
         let config: Self =
             serde_json::from_slice(bytes).map_err(|_| "Invalid service configuration JSON")?;
         config.validate()?;
         Ok(config)
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes =
+            serde_json::to_vec_pretty(self).map_err(|_| "Cannot encode service configuration")?;
+        if bytes.len() as u64 > LIMIT {
+            return Err("Service configuration exceeds the supported 1 MiB size".into());
+        }
+        Ok(bytes)
     }
     /// Read only at explicit local check or service start. Never serialize the returned secret.
     pub fn read_token(&self) -> Result<String> {
@@ -208,7 +229,7 @@ impl ServiceConfig {
         Ok(registrations)
     }
     pub fn preview(&self) -> Value {
-        json!({"version":self.version,"instance":self.instance,"bot_id":self.bot_id,"token":"external private file; contents omitted","grants":self.grants,"listen_chats":self.listen_chats,"registration_count":self.registrations.len(),"hook_binding_count":self.hook_bindings.len(),"notices":["No account, sender grant, or route is inferred from incoming Telegram messages.","Hook recipients remain subject to current route revision and conversation checks.","This plan does not start Telegram or register hooks."]})
+        json!({"version":self.version,"instance":self.instance,"bot_id":self.bot_id,"runtime":self.runtime,"token":"external private file; contents omitted","grants":self.grants,"listen_chats":self.listen_chats,"registration_count":self.registrations.len(),"hook_binding_count":self.hook_bindings.len(),"notices":["No account, sender grant, or route is inferred from incoming Telegram messages.","Hook recipients remain subject to current route revision and conversation checks.","Runtime changes require a stopped service and take effect on its next start.","This plan does not start Telegram or register hooks."]})
     }
 }
 pub(crate) fn validate_token(bot_id: i64, bytes: &[u8]) -> Result<String> {
@@ -275,6 +296,31 @@ pub struct ServicePlan {
     pub config: ServiceConfig,
 }
 impl ServicePlan {
+    pub(crate) fn edit_if_current(
+        path: &Path,
+        expected: &ServiceConfig,
+        updated: ServiceConfig,
+    ) -> Result<Self> {
+        let plan = Self::prepare(path, updated)?;
+        let actual = ServiceConfig::parse(
+            plan.before
+                .as_deref()
+                .ok_or("Service configuration disappeared")?,
+        )?;
+        if serde_json::to_value(actual).map_err(|_| "Invalid service configuration")?
+            != serde_json::to_value(expected)
+                .map_err(|_| "Invalid expected service configuration")?
+        {
+            return Err("Telegram configuration changed; reopen settings".into());
+        }
+        Ok(plan)
+    }
+    fn restart_required(&self) -> bool {
+        self.before
+            .as_deref()
+            .and_then(|bytes| ServiceConfig::parse(bytes).ok())
+            .is_none_or(|before| before.runtime != self.config.runtime)
+    }
     pub fn fresh(path: &Path, config: ServiceConfig) -> Result<Self> {
         let plan = Self::prepare(path, config)?;
         if plan.before.is_some() {
@@ -296,10 +342,8 @@ impl ServicePlan {
         {
             return Err("Telegram configuration cannot be stored under %LOCALAPPDATA%\\Daedalus. That directory is the install tree an update replaces. Use the config directory (%APPDATA%\\Daedalus or an explicit --config-dir outside the install tree).".into());
         }
-        config.validate()?;
+        let after = config.encode()?;
         let before = read_private(path, LIMIT)?;
-        let after = serde_json::to_vec_pretty(&config)
-            .map_err(|_| "Cannot encode service configuration")?;
         Ok(Self {
             destination: path.into(),
             before,
@@ -308,7 +352,7 @@ impl ServicePlan {
         })
     }
     pub fn review(&self) -> Value {
-        json!({"configuration":self.config.preview(),"changes":self.before.as_deref()!=Some(&self.after),"backup_required":self.before.is_some(),"approval":self.approval_token()})
+        json!({"configuration":self.config.preview(),"changes":self.before.as_deref()!=Some(&self.after),"backup_required":self.before.is_some(),"service_restart_required":self.restart_required(),"approval":self.approval_token()})
     }
     pub fn approval_token(&self) -> String {
         format!(
@@ -336,6 +380,11 @@ impl ServicePlan {
         if current != self.before {
             return Err("Service configuration changed; review a new plan".into());
         }
+        let _stopped = if self.restart_required() {
+            super::telegram_service::runtime_edit_guard(directory, self.before.is_none())?
+        } else {
+            None
+        };
         if let Some(before) = &self.before {
             let backup = directory.join(format!(
                 "telegram-service.backup-{:x}.json",
@@ -401,9 +450,67 @@ pub(crate) fn configuration_lock(directory: &Path) -> Result<ConfigurationLock> 
     Ok(ConfigurationLock(lock))
 }
 /// Local CLI only: no network requests or service activation.
+fn runtime_command(args: &[String], writer: &mut impl Write) -> Result<()> {
+    let set = args[0] == "set";
+    let mut file = None;
+    let mut key = None;
+    let mut value = None;
+    let mut apply = false;
+    let mut index = 1;
+    while index < args.len() {
+        let slot = match args[index].as_str() {
+            "--apply" if set && !apply => {
+                apply = true;
+                index += 1;
+                continue;
+            }
+            "--file" => &mut file,
+            "--key" if set => &mut key,
+            "--value" if set => &mut value,
+            _ => return Err("Unknown or duplicate runtime option".into()),
+        };
+        if slot.is_some() {
+            return Err("Duplicate runtime option".into());
+        }
+        index += 1;
+        *slot = Some(
+            args.get(index)
+                .ok_or("Missing runtime option value")?
+                .as_str(),
+        );
+        index += 1;
+    }
+    let path = Path::new(file.ok_or("--file ABS is required")?);
+    let expected = ServiceConfig::load(path)?;
+    if !set {
+        return serde_json::to_writer_pretty(writer,&json!({"configuration":expected.preview(),"runtime_settings":super::telegram_runtime::FIELDS,
+            "note":"Runtime changes require a stopped service and apply on its next start. No token is read and no network request is made."})).map_err(|_|"Cannot write Telegram settings".into());
+    }
+    let key = key.ok_or("--key is required")?;
+    let text = value.ok_or("--value is required")?;
+    let before = expected.runtime.value(key)?;
+    let mut updated = expected.clone();
+    updated.runtime = expected.runtime.set(key, text)?;
+    let after = updated.runtime.value(key)?;
+    let plan = ServicePlan::edit_if_current(path, &expected, updated)?;
+    let preview = json!({"setting":key,"before":before,"after":after,"plan":plan.review()});
+    let result = if apply {
+        json!({"preview":preview,"changed":plan.apply(&plan.approval_token())?})
+    } else {
+        json!({"preview":preview})
+    };
+    serde_json::to_writer_pretty(writer, &result)
+        .map_err(|_| "Cannot write Telegram settings result".into())
+}
 pub fn run(args: &[String], writer: &mut impl Write) -> Result<()> {
+    if args
+        .first()
+        .is_some_and(|v| matches!(v.as_str(), "show" | "set"))
+    {
+        return runtime_command(args, writer);
+    }
     if args.is_empty() || args == ["--help"] || args == ["help"] {
-        writeln!(writer, "daedalus telegram config init --file ABS --instance NAME --bot-id ID --token-file ABS [--owner ID --chat ID] [--apply]\ndaedalus telegram config import --file ABS --from ABS [--apply]\ndaedalus telegram config check --file ABS\nInit/import preview by default. --apply writes private configuration; it never starts Telegram.\nToken file: private raw bot token or literal TELEGRAM_BOT_TOKEN=value on one line. No shell evaluation.\nOwner grants are explicit; omitted --owner/--chat grants nobody access.")
+        writeln!(writer, "daedalus telegram config init --file ABS --instance NAME --bot-id ID --token-file ABS [--owner ID --chat ID] [--apply]\ndaedalus telegram config import --file ABS --from ABS [--apply]\ndaedalus telegram config check --file ABS\ndaedalus telegram config show --file ABS\ndaedalus telegram config set --file ABS --key runtime.SETTING --value VALUE [--apply]\nRuntime settings require a stopped service and apply on its next start.\nInit/import preview by default. --apply writes private configuration; it never starts Telegram.\nToken file: private raw bot token or literal TELEGRAM_BOT_TOKEN=value on one line. No shell evaluation.\nOwner grants are explicit; omitted --owner/--chat grants nobody access.")
             .map_err(|_| "Cannot write configuration help")?;
         return Ok(());
     }
@@ -489,6 +596,7 @@ pub fn run(args: &[String], writer: &mut impl Write) -> Result<()> {
             ServicePlan::fresh(
                 path,
                 ServiceConfig {
+                    runtime: Default::default(),
                     version: 1,
                     instance: get("--instance")?.into(),
                     bot_id,
@@ -540,7 +648,7 @@ pub(crate) fn in_install_tree(path: &Path) -> bool {
         let Ok(root) = crate::platform::user_local_data_directory() else {
             return false;
         };
-        return windows_path_within(&root.join("Daedalus"), path);
+        windows_path_within(&root.join("Daedalus"), path)
     }
     #[cfg(not(windows))]
     {
@@ -685,10 +793,7 @@ fn filetime_to_system(filetime: u64) -> Option<std::time::SystemTime> {
     let ticks = filetime.checked_sub(UNIX_OFFSET)?;
     let seconds = ticks / 10_000_000;
     let sub = ticks % 10_000_000;
-    Some(
-        std::time::UNIX_EPOCH
-            + std::time::Duration::new(seconds, u32::try_from(sub * 100).ok()?),
-    )
+    Some(std::time::UNIX_EPOCH + std::time::Duration::new(seconds, u32::try_from(sub * 100).ok()?))
 }
 
 pub(crate) fn preupdate_stop_digest(record: &super::telegram_supervisor::Record) -> String {
@@ -956,6 +1061,7 @@ mod tests {
     }
     fn config(directory: &Path) -> ServiceConfig {
         ServiceConfig {
+            runtime: Default::default(),
             version: 1,
             instance: "example".into(),
             bot_id: 123,
@@ -969,6 +1075,177 @@ mod tests {
             registrations: vec![],
             hook_bindings: vec![],
         }
+    }
+    #[test]
+    fn oversized_serialized_configuration_is_rejected_before_any_write() {
+        let temp = Temp::new();
+        let path = temp.0.join("telegram-service.json");
+        let mut oversized = config(&temp.0);
+        for index in 0..512 {
+            oversized.hook_bindings.push(serde_json::from_value(json!({"registration_id":format!("fixture-{index}"),
+                "goal_scope":{"instance":"example","terminal":{"backend":"herdr","endpoint":"fixture","pane":"x".repeat(4096),"generation":"fixture"},"conversation":"session","harness":"claude"},
+                "route_scope":{"instance":"example","bot":"123","chat":"42"},"actor":"7","route_revision":1,"reply_to":null,"hindsight_bank":null})).unwrap());
+        }
+        oversized.validate().unwrap();
+        assert!(oversized.encode().unwrap_err().contains("1 MiB"));
+        assert!(
+            ServiceConfig::parse(&serde_json::to_vec_pretty(&oversized).unwrap())
+                .unwrap_err()
+                .contains("1 MiB")
+        );
+        assert!(
+            ServicePlan::fresh(&path, oversized)
+                .err()
+                .unwrap()
+                .contains("1 MiB")
+        );
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 0);
+    }
+    #[test]
+    fn old_and_partial_runtime_configurations_keep_defaults_and_reject_unknown_fields() {
+        let temp = Temp::new();
+        let original = config(&temp.0);
+        let mut value = serde_json::to_value(&original).unwrap();
+        value.as_object_mut().unwrap().remove("runtime");
+        let old = ServiceConfig::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            old.runtime,
+            super::super::telegram_runtime::Settings::default()
+        );
+        value["runtime"] = json!({"loop_interval_ms":250});
+        let partial = ServiceConfig::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(partial.runtime.loop_interval_ms, 250);
+        assert_eq!(partial.runtime.poll_timeout_seconds, 50);
+        value["runtime"]["secret-value"] = json!("secret-value");
+        assert!(
+            !ServiceConfig::parse(&serde_json::to_vec(&value).unwrap())
+                .unwrap_err()
+                .contains("secret-value")
+        );
+    }
+    #[test]
+    fn lowering_feeder_capacity_refuses_configured_registrations_without_writing() {
+        let temp = Temp::new();
+        let path = temp.0.join("telegram-service.json");
+        let mut configured = config(&temp.0);
+        configured.registrations = vec![temp.0.join("first.json"), temp.0.join("second.json")];
+        configured.runtime.feeder_registration_limit = 2;
+        let plan = ServicePlan::fresh(&path, configured).unwrap();
+        plan.apply(&plan.approval_token()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let result = run(
+            &[
+                "set",
+                "--file",
+                path.to_str().unwrap(),
+                "--key",
+                "runtime.feeder_registration_limit",
+                "--value",
+                "1",
+                "--apply",
+            ]
+            .map(String::from),
+            &mut Vec::new(),
+        );
+        assert!(result.unwrap_err().contains("feeder_registration_limit"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    #[test]
+    fn runtime_cli_previews_privately_applies_with_backup_and_preserves_other_configuration() {
+        let temp = Temp::new();
+        let path = temp.0.join("telegram-service.json");
+        let original = config(&temp.0);
+        let plan = ServicePlan::fresh(&path, original.clone()).unwrap();
+        plan.apply(&plan.approval_token()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut args = [
+            "set",
+            "--file",
+            path.to_str().unwrap(),
+            "--key",
+            "runtime.loop_interval_ms",
+            "--value",
+            "250",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut output = Vec::new();
+        run(&args, &mut output).unwrap();
+        let preview: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(preview["preview"]["before"], 100);
+        assert_eq!(preview["preview"]["after"], 250);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        args.push("--apply".into());
+        run(&args, &mut Vec::new()).unwrap();
+        let mut expected = original.clone();
+        expected.runtime.loop_interval_ms = 250;
+        assert_eq!(
+            serde_json::to_value(ServiceConfig::load(&path).unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(
+            fs::read(temp.0.join(format!(
+                "telegram-service.backup-{:x}.json",
+                Sha256::digest(&before)
+            )))
+            .unwrap(),
+            before
+        );
+        output.clear();
+        run(
+            &[
+                "show".into(),
+                "--file".into(),
+                path.to_str().unwrap().into(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let shown: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            shown["runtime_settings"].as_array().unwrap().len(),
+            super::super::telegram_runtime::FIELDS.len()
+        );
+        assert!(
+            !original.token_file.exists(),
+            "No credential is needed to show or edit runtime configuration"
+        );
+        let saved = fs::read(&path).unwrap();
+        args[4] = "runtime.api_origin".into();
+        args[6] = "https://user:secret-value@example.invalid".into();
+        output.clear();
+        assert!(
+            !run(&args, &mut output)
+                .unwrap_err()
+                .contains("secret-value")
+        );
+        assert!(output.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
+    #[test]
+    fn runtime_edits_require_stopped_ownership_and_reject_stale_expected_configuration() {
+        let temp = Temp::new();
+        let path = temp.0.join("telegram-service.json");
+        let original = config(&temp.0);
+        let plan = ServicePlan::fresh(&path, original.clone()).unwrap();
+        plan.apply(&plan.approval_token()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut updated = original.clone();
+        updated.runtime.loop_interval_ms = 250;
+        let plan = ServicePlan::edit_if_current(&path, &original, updated).unwrap();
+        let owner =
+            super::super::telegram_service::Owner::acquire(&temp.0, &temp.0.join("locks"), 123)
+                .unwrap();
+        assert!(
+            plan.apply(&plan.approval_token())
+                .unwrap_err()
+                .contains("Stop Telegram")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        drop(owner);
+        assert!(plan.apply(&plan.approval_token()).unwrap());
+        assert!(ServicePlan::edit_if_current(&path, &original, original.clone()).is_err());
     }
     #[test]
     fn fresh_is_inert_redacted_private_and_idempotent() {

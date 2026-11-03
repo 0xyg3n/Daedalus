@@ -15,6 +15,12 @@ pub struct Binding {
     pub description: String,
 }
 pub fn bindings(ui: &Ui) -> Vec<Binding> {
+    let options_page = format!("Move {} settings", ui.settings.options_page_items);
+    let list_page = format!("Move {} rows", ui.settings.list_page_rows);
+    let details_page = format!(
+        "Scroll details by {} rows without moving the selection",
+        ui.settings.details_page_rows
+    );
     let mut rows = [
         ("Dashboard", "F1", "Search all keyboard shortcuts"),
         ("Dashboard", "Ctrl+P", "Search commands and actions"),
@@ -34,7 +40,7 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ),
         ("Options", "Up / Down / j / k", "Select a setting"),
         ("Options", "Tab / Shift+Tab", "Next / previous setting"),
-        ("Options", "PageUp / PageDown", "Move five settings"),
+        ("Options", "PageUp / PageDown", options_page.as_str()),
         (
             "Options",
             "Left / Right / Enter / Space",
@@ -46,12 +52,12 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
             "Resize real split panes in Focus",
         ),
         ("Lists", "Up / Down", "Select previous / next item"),
-        ("Lists", "PageUp / PageDown", "Move ten rows"),
+        ("Lists", "PageUp / PageDown", list_page.as_str()),
         ("Lists", "Home / End", "First / last item"),
         (
             "Details",
             "Alt+PageUp / Alt+PageDown",
-            "Scroll the details panel without moving the selection",
+            details_page.as_str(),
         ),
         ("Lists", "Enter", "Open selected item or terminal menu"),
         (
@@ -107,9 +113,21 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ("Focus", "Esc", "Leave Focus or detach"),
         ("Focus", "Arrows", "Select another pane in the same tab"),
         ("Focus", "Z", "Zoom selected pane / show whole tab"),
-        ("Terminal", "Drag", "Select text in any view. Shift+drag while a program has the mouse"),
-        ("Terminal", "Ctrl+C", "Copy the selection, or interrupt the attached terminal"),
-        ("Terminal", "Ctrl+V / right click", "Paste into the attached terminal"),
+        (
+            "Terminal",
+            "Drag",
+            "Select text in any view. Shift+drag while a program has the mouse",
+        ),
+        (
+            "Terminal",
+            "Ctrl+C",
+            "Copy the selection, or interrupt the attached terminal",
+        ),
+        (
+            "Windows attached terminal",
+            "Ctrl+V / right click",
+            "Paste into the attached terminal",
+        ),
         (
             "Appearance",
             "< / >",
@@ -272,9 +290,13 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
     }
     #[cfg(windows)]
     if crate::clipboard::paste_key(key) {
-        match crate::clipboard::read() {
+        match crate::clipboard::read(ui.settings.clipboard_read_limit_bytes as usize) {
             Ok(text) => {
-                crate::ui_text::append_query(ui.binding_search.as_mut().unwrap(), &text, 160);
+                crate::ui_text::append_query(
+                    ui.binding_search.as_mut().unwrap(),
+                    &text,
+                    ui.settings.shortcut_query_limit_chars as usize,
+                );
                 ui.binding_notice = None;
                 ui.binding_scroll = 0;
             }
@@ -294,10 +316,14 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
         KeyCode::PageDown => {
             ui.binding_scroll = ui
                 .binding_scroll
-                .saturating_add(10)
+                .saturating_add(ui.settings.list_page_rows as usize)
                 .min(matching(ui).len().saturating_sub(1))
         }
-        KeyCode::PageUp => ui.binding_scroll = ui.binding_scroll.saturating_sub(10),
+        KeyCode::PageUp => {
+            ui.binding_scroll = ui
+                .binding_scroll
+                .saturating_sub(ui.settings.list_page_rows as usize)
+        }
         KeyCode::Home => ui.binding_scroll = 0,
         KeyCode::End => ui.binding_scroll = matching(ui).len().saturating_sub(1),
         KeyCode::Backspace => {
@@ -310,7 +336,11 @@ pub fn key(ui: &mut Ui, key: KeyEvent) -> bool {
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            crate::ui_text::append_query(ui.binding_search.as_mut().unwrap(), &c.to_string(), 160);
+            crate::ui_text::append_query(
+                ui.binding_search.as_mut().unwrap(),
+                &c.to_string(),
+                ui.settings.shortcut_query_limit_chars as usize,
+            );
             ui.binding_scroll = 0;
             ui.binding_notice = None;
         }
@@ -326,10 +356,14 @@ pub fn mouse(ui: &mut Ui, mouse: MouseEvent) -> bool {
         MouseEventKind::ScrollDown => {
             ui.binding_scroll = ui
                 .binding_scroll
-                .saturating_add(3)
+                .saturating_add(ui.settings.mouse_scroll_rows as usize)
                 .min(matching(ui).len().saturating_sub(1))
         }
-        MouseEventKind::ScrollUp => ui.binding_scroll = ui.binding_scroll.saturating_sub(3),
+        MouseEventKind::ScrollUp => {
+            ui.binding_scroll = ui
+                .binding_scroll
+                .saturating_sub(ui.settings.mouse_scroll_rows as usize)
+        }
         _ => {}
     }
     true
@@ -480,6 +514,44 @@ pub fn draw(f: &mut Frame, area: Rect, ui: &Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_shortcut_steps_clamp_and_typing_respects_its_own_limit() {
+        let mut ui = Ui {
+            binding_search: Some(String::new()),
+            ..Ui::default()
+        };
+        ui.settings.list_page_rows = 4;
+        ui.settings.mouse_scroll_rows = 2;
+        ui.settings.shortcut_query_limit_chars = 3;
+        key(
+            &mut ui,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.binding_scroll, 4);
+        let mut wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(mouse(&mut ui, wheel));
+        assert_eq!(ui.binding_scroll, 6);
+        ui.settings.list_page_rows = 1000;
+        key(
+            &mut ui,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.binding_scroll, matching(&ui).len() - 1);
+        key(&mut ui, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        wheel.kind = MouseEventKind::ScrollUp;
+        mouse(&mut ui, wheel);
+        assert_eq!(ui.binding_scroll, 0);
+        for c in "abcde".chars() {
+            key(&mut ui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(ui.binding_search.as_deref(), Some("abc"));
+        assert!(ui.filter.is_empty() && !ui.busy && !ui.action_pending);
+    }
     #[test]
     fn overlay_is_visible_in_dashboard_at_common_sizes() {
         for (width, height) in [(60, 18), (100, 30), (160, 50)] {

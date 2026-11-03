@@ -103,7 +103,10 @@ fn installed_launcher_in(current: PathBuf, home: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn installed_windows_launcher_in(current: PathBuf, local_app_data: &Path) -> PathBuf {
-    let launcher = local_app_data.join("Daedalus").join("bin").join("daedalus.exe");
+    let launcher = local_app_data
+        .join("Daedalus")
+        .join("bin")
+        .join("daedalus.exe");
     if windows_same_release(&current, &launcher) {
         launcher
     } else {
@@ -171,7 +174,7 @@ fn same_installed_exe(left: &mut std::fs::File, right: &mut std::fs::File) -> bo
     let Ok(right_len) = right.metadata().map(|meta| meta.len()) else {
         return false;
     };
-    if left_len != right_len || left_len < 2 || left_len > MAX {
+    if left_len != right_len || !(2..=MAX).contains(&left_len) {
         return false;
     }
     let Some(left_hash) = hash_mz(left) else {
@@ -221,11 +224,14 @@ pub(crate) fn ensure_service_allows_hook_change(
 }
 
 #[cfg(windows)]
-fn ensure_service_allows_hook_change_windows(directory: &Path, binary: Option<&Path>) -> Result<()> {
-    if let Some(binary) = binary {
-        if ephemeral_updater_binary(binary) {
-            return Err("Hook commands cannot use an updater temporary or previous-release copy. Restart the installed Daedalus and stop Telegram if it is still running the old image.".into());
-        }
+fn ensure_service_allows_hook_change_windows(
+    directory: &Path,
+    binary: Option<&Path>,
+) -> Result<()> {
+    if let Some(binary) = binary
+        && ephemeral_updater_binary(binary)
+    {
+        return Err("Hook commands cannot use an updater temporary or previous-release copy. Restart the installed Daedalus and stop Telegram if it is still running the old image.".into());
     }
     let lock_path = directory.join(".telegram-service.lock");
     let held = match crate::platform::open_private(&lock_path, true, false) {
@@ -253,8 +259,9 @@ fn ensure_service_allows_hook_change_windows(directory: &Path, binary: Option<&P
         directory: PathBuf,
         executable: PathBuf,
     }
-    let bytes = layouts::read_private(&directory.join("telegram-runtime.json"))?
-        .ok_or("Telegram is starting from an unverified executable. Stop it before changing hooks.")?;
+    let bytes = layouts::read_private(&directory.join("telegram-runtime.json"))?.ok_or(
+        "Telegram is starting from an unverified executable. Stop it before changing hooks.",
+    )?;
     let record: ServiceImage = serde_json::from_slice(&bytes)
         .map_err(|_| "Invalid Telegram service record. Stop Telegram before changing hooks.")?;
     if record.version != 1 || record.directory != directory || record.pid == 0 {
@@ -276,10 +283,12 @@ fn ensure_service_allows_hook_change_windows(directory: &Path, binary: Option<&P
         "Telegram is running a Daedalus image that is no longer installed. Stop it before changing hooks."
     })?;
     if let Some(binary) = binary {
-        let hook = crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
+        let hook =
+            crate::platform::open_regular(binary).map_err(|_| "Hook executable disappeared")?;
         if crate::platform::file_identity(&service)
             .map_err(|_| "Cannot identify Telegram executable")?
-            != crate::platform::file_identity(&hook).map_err(|_| "Cannot identify hook executable")?
+            != crate::platform::file_identity(&hook)
+                .map_err(|_| "Cannot identify hook executable")?
         {
             return Err("Telegram is still running a different Daedalus image. Stop the service before changing hooks so they are not left half-installed against the old executable.".into());
         }
@@ -1785,7 +1794,7 @@ mod tests {
         std::os::unix::fs::symlink(&f.dir, proc.join("cwd")).unwrap();
         let pane = json!({"backend":"herdr","server":"example","pane_id":"pane","terminal_id":"terminal","pid":42,"agent":"claude","agent_session":{"kind":"id","agent":"claude","value":"session"},"cwd":f.dir});
         let script = format!(
-            "#!/bin/sh\ncase \"$4\" in\nprocess-info) printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"foreground_processes\":[{{\"pid\":42}}]}}}}}}' ;;\n*) printf '%s\\n' '{}' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$4\" in\nprocess-info) printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"pane_id\":\"pane\",\"foreground_processes\":[{{\"pid\":42}}]}}}}}}' ;;\n*) printf '%s\\n' '{}' ;;\nesac\n",
             json!({"result":{"pane":pane}})
         );
         fs::write(&f.terminals.herdr, script).unwrap();
@@ -3010,10 +3019,10 @@ mod windows_server_tests {
         let stdin = child.stdin.take().unwrap();
         let started = std::time::Instant::now();
         let process = loop {
-            if let Ok(process) = crate::platform::process_identity(child.id()) {
-                if service_lock_held(&directory) {
-                    break process;
-                }
+            if let Ok(process) = crate::platform::process_identity(child.id())
+                && service_lock_held(&directory)
+            {
+                break process;
             }
             if started.elapsed() > std::time::Duration::from_secs(5) {
                 let _ = child.kill();
@@ -3038,13 +3047,10 @@ mod windows_server_tests {
         )
         .unwrap();
         let current = std::env::current_exe().unwrap();
-        assert!(
-            super::ensure_service_allows_hook_change(&directory, Some(&current)).is_ok()
-        );
+        assert!(super::ensure_service_allows_hook_change(&directory, Some(&current)).is_ok());
         let other = directory.join("other.exe");
         std::fs::write(&other, b"MZ-other-image").unwrap();
-        let error =
-            super::ensure_service_allows_hook_change(&directory, Some(&other)).unwrap_err();
+        let error = super::ensure_service_allows_hook_change(&directory, Some(&other)).unwrap_err();
         assert!(error.contains("different Daedalus image"), "{error}");
         crate::core::layouts::write_private(
             &directory.join("telegram-runtime.json"),
@@ -3071,11 +3077,9 @@ mod windows_server_tests {
         let _ = std::fs::remove_dir_all(directory);
     }
     fn service_lock_held(directory: &Path) -> bool {
-        let Ok(file) = crate::platform::open_private(
-            &directory.join(".telegram-service.lock"),
-            true,
-            false,
-        ) else {
+        let Ok(file) =
+            crate::platform::open_private(&directory.join(".telegram-service.lock"), true, false)
+        else {
             return false;
         };
         match crate::platform::lock_exclusive(&file, true) {

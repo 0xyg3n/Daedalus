@@ -347,6 +347,70 @@ mod tests {
         assert!(!f.r.directory.exists());
     }
     #[test]
+    fn superseded_consumed_reservation_requires_current_native_idle() {
+        let f = Fixture::new();
+        let path = f.install();
+        hook_runtime::ready_snapshot(&path, &f.proc).unwrap();
+        let con =
+            rusqlite::Connection::open(f.r.directory.join("hook-observations.sqlite3")).unwrap();
+        let scope = serde_json::to_string(&f.r.scope).unwrap();
+        for (table, value) in [
+            ("hook_reservations", "hash"),
+            ("hook_prompt_receipts", "hash"),
+            ("hook_prompt_turns", "old"),
+            ("hook_active_turns", "new"),
+            ("hook_turn_release", "new"),
+        ] {
+            con.execute(
+                &format!("INSERT INTO {table} VALUES(?,?)"),
+                rusqlite::params![scope, value],
+            )
+            .unwrap();
+        }
+        con.execute("UPDATE hook_observations SET state='\"busy\"'", [])
+            .unwrap();
+        // Live process without its exact native log must not unblock the reservation.
+        fs::remove_file(f.proc.join("42/fd/3")).unwrap();
+        assert_eq!(
+            hook_runtime::ready_snapshot(&path, &f.proc).unwrap().state,
+            Readiness::Busy
+        );
+        symlink(f.r.transcript.as_ref().unwrap(), f.proc.join("42/fd/3")).unwrap();
+        // An unacknowledged prompt is uncertain, not eligible for automatic recovery.
+        con.execute(
+            "UPDATE hook_prompt_receipts SET correlation='different'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            hook_runtime::ready_snapshot(&path, &f.proc).unwrap().state,
+            Readiness::Busy
+        );
+        con.execute("UPDATE hook_prompt_receipts SET correlation='hash'", [])
+            .unwrap();
+        assert_eq!(
+            hook_runtime::ready_snapshot(&path, &f.proc).unwrap().state,
+            Readiness::Idle
+        );
+        assert_eq!(
+            con.query_row("SELECT count(*) FROM hook_reservations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            con.query_row("SELECT reason FROM hook_retired_reservations", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "superseded_consumed_prompt_not_replayed"
+        );
+        assert_eq!(
+            hook_runtime::ready_snapshot(&path, &f.proc).unwrap().state,
+            Readiness::Idle
+        );
+    }
+    #[test]
     fn hook_updates_registration_uses_only_exact_sibling_native_events() {
         let f = Fixture::new();
         let expected = idle_proof(&f.r, &f.proc).unwrap().unwrap();

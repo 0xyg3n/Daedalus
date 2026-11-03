@@ -4,8 +4,8 @@ mod embed;
 mod graphics;
 mod model;
 mod neon;
-mod select;
 mod options;
+mod select;
 mod shortcuts;
 #[cfg(test)]
 mod test_support;
@@ -38,14 +38,28 @@ use std::{
 };
 
 const PROTOCOL: u64 = 2;
-/// How long quitting waits for the backend to save the view.
-const QUIT_WAIT: Duration = Duration::from_millis(1500);
-/// Previews refresh at most this often, for on-screen terminals only.
-const PREVIEW_EVERY: Duration = Duration::from_millis(2000);
-/// A newly shown terminal is read this soon after the previous read.
-const PREVIEW_SETTLE: Duration = Duration::from_millis(250);
-/// Resized panels are remembered once the sizes stop changing.
-const SIZES_SETTLE: Duration = Duration::from_millis(600);
+const ACTION_WAIT: &str =
+    "Still working on the previous action; press Enter again when it finishes";
+
+/// Preserve the navigation that selected a request, including while queued.
+struct PendingRequest {
+    value: Value,
+    navigation_revision: u64,
+}
+impl PendingRequest {
+    fn new(ui: &Ui, value: Value) -> Self {
+        Self {
+            value,
+            navigation_revision: ui.navigation_revision,
+        }
+    }
+    fn send(self, ui: &mut Ui, host: &mut Host) -> io::Result<()> {
+        ui.begin_request(is_action(&self.value), self.navigation_revision);
+        host.send(self.value)?;
+        ui.busy = true;
+        Ok(())
+    }
+}
 
 struct Host {
     child: Child,
@@ -59,12 +73,12 @@ impl Host {
     }
     /// Give the backend up to `limit` to finish its last request (saving
     /// the view on quit) and exit; whatever still runs is stopped on drop.
-    fn wait_exit(&mut self, limit: Duration) -> bool {
+    fn wait_exit(&mut self, limit: Duration, poll: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < limit {
             match self.child.try_wait() {
                 Ok(Some(_)) | Err(_) => return true,
-                Ok(None) => thread::sleep(Duration::from_millis(15)),
+                Ok(None) => thread::sleep(poll.min(limit.saturating_sub(start.elapsed()))),
             }
         }
         false
@@ -107,6 +121,19 @@ enum Step {
     Continue,
     Quit,
     Send(Value),
+}
+
+/// Command names are local metadata. Make them searchable before the first
+/// inventory arrives so an early action can use the existing refresh queue.
+fn initial_snapshot() -> Snapshot {
+    Snapshot {
+        catalog: daedalus_tui::app::registry::builtin()
+            .catalog()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        ..Snapshot::default()
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -198,8 +225,20 @@ fn main() -> io::Result<()> {
         return daedalus_tui::app::memory_status::run(&args[1..], &mut io::stdout())
             .map_err(io::Error::other);
     }
+    if args.first().is_some_and(|arg| arg == "history") {
+        return daedalus_tui::app::history::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other);
+    }
+    if args.first().is_some_and(|arg| arg == "dashboard") {
+        return daedalus_tui::app::dashboard::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other);
+    }
     if args.first().is_some_and(|arg| arg == "route") {
         return daedalus_tui::app::route_cli::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other);
+    }
+    if args.first().is_some_and(|arg| arg == "gateway") {
+        return daedalus_tui::app::gateway_config::run(&args[1..], &mut io::stdout())
             .map_err(io::Error::other);
     }
     if args.first().is_some_and(|arg| arg == "gateway-exec") {
@@ -319,7 +358,7 @@ fn main() -> io::Result<()> {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, shell, terminal-native, agent, inventory, workspace-usage, terminal, checkpoint, route, job, hook, goal, telegram, memory, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall, Cube and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
+            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, shell, terminal-native, agent, inventory, workspace-usage, terminal, checkpoint, route, job, hook, goal, telegram, memory, gateway, dashboard, history, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall, Cube and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -336,6 +375,7 @@ fn main() -> io::Result<()> {
         |name| std::env::var_os(name),
     )
     .map_err(io::Error::other)?;
+    let settings = launch.interface_settings().map_err(io::Error::other)?;
     setup |= launch.first_run;
     let mut backend = launch.command(std::env::current_exe()?.as_os_str());
     daedalus_tui::platform::hide_console(&mut backend);
@@ -358,8 +398,10 @@ fn main() -> io::Result<()> {
             }
         }
     });
-    let theme = theme::Theme::from_env();
+    let theme = theme::Theme::from_env(&settings);
     let mut ui = Ui {
+        snapshot: initial_snapshot(),
+        settings: settings.clone(),
         theme,
         still: theme.reduced_motion,
         splash: theme.splash.then(Splash::new),
@@ -369,22 +411,34 @@ fn main() -> io::Result<()> {
         preview_rows: 8,
         ..Ui::default()
     };
+    ui.begin_request(false, ui.navigation_revision);
     let mut updater = update_ui::Controller::new(
         !backend_args.iter().any(|arg| arg == "--demo")
-            && std::env::var("DAEDALUS_UPDATE_CHECK").as_deref() != Ok("0"),
+            && std::env::var("DAEDALUS_UPDATE_CHECK")
+                .ok()
+                .or_else(|| settings.environment_default("DAEDALUS_UPDATE_CHECK"))
+                .as_deref()
+                != Some("0"),
     );
     let mut last = Instant::now();
     let mut suspended = false;
     // An action chosen during a background refresh waits for that refresh.
-    let mut queued: Option<Value> = None;
+    let mut queued: Option<PendingRequest> = None;
     // Whether the first inventory has arrived; setup waits for it.
     let mut inventory = false;
     let mut terminal = ratatui::init();
     // Ask about pictures before anything else reads the input. The first
     // splash frame shows while the terminal answers. Only the splash uses one.
-    if theme.backdrop && ui.splash.is_some() && graphics::wanted(|name| std::env::var(name).ok()) {
+    if theme.backdrop
+        && ui.splash.is_some()
+        && graphics::wanted(|name| {
+            std::env::var(name)
+                .ok()
+                .or_else(|| settings.environment_default(name))
+        })
+    {
         terminal.draw(|f| view::draw(f, &mut ui))?;
-        ui.kitty = graphics::probe(Duration::from_millis(1000));
+        ui.kitty = graphics::probe(Duration::from_millis(settings.graphics_probe_timeout_ms));
         if ui.kitty.is_some() {
             graphics::transmit(&mut io::stdout())?;
         }
@@ -414,26 +468,23 @@ fn main() -> io::Result<()> {
                             "state" => {
                                 let state: Snapshot =
                                     serde_json::from_value(value).map_err(io::Error::other)?;
-                                if ui.action_pending && state.page != ui.page {
-                                    ui.navigate(state.page);
-                                }
-                                if ui.page != WORKSPACES {
-                                    leave_focus(&mut ui);
-                                }
-                                let action_completed = ui.action_pending;
-                                ui.update(state);
+                                apply_state(&mut ui, state);
+                                let automatic = !ui.snapshot.demo
+                                    && std::env::var("DAEDALUS_UPDATE_CHECK")
+                                        .ok()
+                                        .or_else(|| {
+                                            ui.settings.environment_default("DAEDALUS_UPDATE_CHECK")
+                                        })
+                                        .as_deref()
+                                        != Some("0");
+                                updater.set_automatic(automatic);
                                 if let Some(splash) = ui.splash.as_mut() {
                                     splash.ready.get_or_insert_with(Instant::now);
                                 }
                                 inventory = true;
-                                ui.busy = false;
-                                ui.action_pending = false;
-                                ui.refresh_status(action_completed);
                                 last = Instant::now();
                                 if let Some(request) = queued.take() {
-                                    ui.action_pending = is_action(&request);
-                                    host.send(request)?;
-                                    ui.busy = true;
+                                    request.send(&mut ui, &mut host)?;
                                 }
                             }
                             "dialog" => {
@@ -469,7 +520,7 @@ fn main() -> io::Result<()> {
                             }
                             "error" => {
                                 ui.busy = false;
-                                ui.action_pending = false;
+                                ui.finish_request();
                                 ui.preview_pending = false;
                                 ui.status_error = true;
                                 ui.status =
@@ -487,7 +538,7 @@ fn main() -> io::Result<()> {
                 }
             }
             if suspended {
-                thread::sleep(Duration::from_millis(40));
+                thread::sleep(Duration::from_millis(ui.settings.suspended_poll_ms));
                 continue;
             }
             if let Some(embed) = ui.embed.as_mut() {
@@ -504,9 +555,8 @@ fn main() -> io::Result<()> {
             // question ends the splash at once; so it waits for the splash.
             if setup && inventory && setup_due(&ui) && queued.is_none() {
                 setup = false;
-                host.send(json!({"op":"action","page":OVERVIEW,"action":"setup"}))?;
-                ui.busy = true;
-                ui.action_pending = true;
+                PendingRequest::new(&ui, json!({"op":"action","page":OVERVIEW,"action":"setup"}))
+                    .send(&mut ui, &mut host)?;
             }
             if std::mem::take(&mut ui.updates_requested) {
                 updater.open();
@@ -526,7 +576,10 @@ fn main() -> io::Result<()> {
                     .send(json!({"op":"quit","view":view_state(&ui)}))
                     .is_ok()
                 {
-                    host.wait_exit(QUIT_WAIT);
+                    host.wait_exit(
+                        Duration::from_millis(ui.settings.quit_timeout_ms),
+                        Duration::from_millis(ui.settings.quit_poll_ms),
+                    );
                 }
                 break 'ui;
             }
@@ -549,8 +602,10 @@ fn main() -> io::Result<()> {
             // Drain ready input before repainting. Mouse motion and fast typing
             // must not queue one full rendering interval per event.
             let mut input_started: Option<Instant> = None;
-            for batch in 0..64 {
-                if input_started.is_some_and(|at| at.elapsed() >= Duration::from_millis(4)) {
+            for batch in 0..ui.settings.input_batch_limit {
+                if input_started.is_some_and(|at| {
+                    at.elapsed() >= Duration::from_millis(ui.settings.input_batch_ms)
+                }) {
                     break;
                 }
                 if !event::poll(if batch == 0 {
@@ -647,15 +702,14 @@ fn main() -> io::Result<()> {
                         break;
                     }
                     Step::Send(_) if ui.action_pending => {
-                        ui.status = "Still working on the previous action".into();
+                        ui.status = ACTION_WAIT.into();
                     }
                     Step::Send(request) => {
+                        let request = PendingRequest::new(&ui, request);
                         if ui.busy || ui.preview_pending {
                             queued = Some(request);
                         } else {
-                            ui.action_pending = is_action(&request);
-                            host.send(request)?;
-                            ui.busy = true;
+                            request.send(&mut ui, &mut host)?;
                         }
                     }
                     Step::Continue => {}
@@ -665,19 +719,18 @@ fn main() -> io::Result<()> {
                 && ui.dialog.is_none()
                 && !ui.preview_pending
                 && queued.is_none()
-                && last.elapsed() > Duration::from_secs(5)
+                && last.elapsed() > Duration::from_millis(ui.settings.refresh_interval_ms)
             {
-                host.send(json!({"op":"refresh"}))?;
-                ui.busy = true;
+                PendingRequest::new(&ui, json!({"op":"refresh"})).send(&mut ui, &mut host)?;
                 last = Instant::now();
             }
             // Panel sizes need no answer, so they never wait behind an action.
             if ui.dragging.is_none()
                 && ui.dialog.is_none()
                 && !ui.busy
-                && ui
-                    .sizes_changed
-                    .is_some_and(|at| at.elapsed() > SIZES_SETTLE)
+                && ui.sizes_changed.is_some_and(|at| {
+                    at.elapsed() > Duration::from_millis(ui.settings.resize_debounce_ms)
+                })
             {
                 ui.sizes_changed = None;
                 host.send(json!({"op":"view","view":view_state(&ui)}))?;
@@ -696,9 +749,7 @@ fn main() -> io::Result<()> {
                 && !ui.preview_pending
                 && let Some(request) = queued.take()
             {
-                ui.action_pending = is_action(&request);
-                host.send(request)?;
-                ui.busy = true;
+                request.send(&mut ui, &mut host)?;
             }
         }
         Ok(())
@@ -741,7 +792,10 @@ fn previews_due(ui: &Ui) -> bool {
         && !ui.busy
         && !ui.preview_pending
         && !ui.preview_targets.is_empty()
-        && since.is_none_or(|t| t > PREVIEW_EVERY || (changed && t > PREVIEW_SETTLE))
+        && since.is_none_or(|t| {
+            t > Duration::from_millis(ui.settings.preview_interval_ms)
+                || (changed && t > Duration::from_millis(ui.settings.preview_settle_ms))
+        })
 }
 
 /// The Workspaces view to remember, even while another page is open.
@@ -780,12 +834,33 @@ fn terminal_request(ui: &Ui, action: &str, node: &str) -> Value {
     json!({"op":"action","page":WORKSPACES,"action":action,"node":node,"view":view_state(ui)})
 }
 
+/// Finish a request without replacing navigation started after it was selected.
+fn apply_state(ui: &mut Ui, mut state: Snapshot) {
+    let action_completed = ui.action_pending;
+    let navigation_current = ui.request_navigation_is_current();
+    if action_completed && navigation_current && state.page != ui.page {
+        ui.navigate(state.page);
+    }
+    if !navigation_current {
+        state.focus.clear();
+        state.workspace.apply.mode.clear();
+        state.workspace.apply.selected.clear();
+    }
+    if ui.page != WORKSPACES {
+        leave_focus(ui);
+    }
+    ui.update(state);
+    ui.busy = false;
+    ui.finish_request();
+    ui.refresh_status(action_completed);
+}
+
 fn open_embed(ui: &mut Ui, plan: &Value) {
     // An attach frame completes the backend action without a following state
     // frame. Stream connection progress belongs to Embed, not the action lock.
     // Release even on malformed plans or failed process startup so retry works.
     ui.busy = false;
-    ui.action_pending = false;
+    ui.finish_request();
     let Ok(plan) = serde_json::from_value::<Plan>(plan.clone()) else {
         ui.status = "Unexpected attach plan".into();
         ui.status_error = true;
@@ -796,9 +871,14 @@ fn open_embed(ui: &mut Ui, plan: &Value) {
     }
     ui.inline_screen = None;
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
-    // Zoomed Focus draws on the whole pane, so the stream starts at that size.
+    // The optional agent identity strip is outside the terminal viewport.
     let (rows, cols) = if ui.zoomed && ui.view == View::Focus {
-        (rows, cols)
+        let identity = ui.settings.agent_session_ids
+            && ui
+                .terminal_node(&plan.node)
+                .and_then(view::agent_session_label)
+                .is_some();
+        (rows.saturating_sub(u16::from(identity)).max(2), cols)
     } else {
         view::focus_size(cols, rows)
     };
@@ -886,7 +966,7 @@ fn leave_focus(ui: &mut Ui) {
 
 fn paste(ui: &mut Ui, text: &str) -> Step {
     if let Some(query) = ui.binding_search.as_mut() {
-        ui_text::append_query(query, text, 160);
+        ui_text::append_query(query, text, ui.settings.shortcut_query_limit_chars as usize);
         ui.binding_scroll = 0;
         ui.binding_notice = None;
         return Step::Continue;
@@ -916,7 +996,11 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
         return Step::Continue;
     }
     if ui.searching {
-        ui_text::append_query(&mut ui.filter, text, 1024);
+        ui_text::append_query(
+            &mut ui.filter,
+            text,
+            ui.settings.search_query_limit_chars as usize,
+        );
         ui.select(0, true);
         ui.select_tile(0);
     }
@@ -927,7 +1011,7 @@ fn paste(ui: &mut Ui, text: &str) -> Step {
 fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -> io::Result<bool> {
     #[cfg(windows)]
     if dialog.mode == "input" && clipboard::paste_key(key) {
-        match clipboard::read() {
+        match clipboard::read(ui.settings.clipboard_read_limit_bytes as usize) {
             Ok(text) => dialog.insert_text(&text),
             Err(message) => dialog.description = message.into(),
         }
@@ -963,8 +1047,16 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
             }
             dialog.moved = Some(Instant::now());
         }
-        KeyCode::PageDown => dialog.scroll = dialog.scroll.saturating_add(10),
-        KeyCode::PageUp => dialog.scroll = dialog.scroll.saturating_sub(10),
+        KeyCode::PageDown => {
+            dialog.scroll = dialog
+                .scroll
+                .saturating_add(ui.settings.list_page_rows as usize)
+        }
+        KeyCode::PageUp => {
+            dialog.scroll = dialog
+                .scroll
+                .saturating_sub(ui.settings.list_page_rows as usize)
+        }
         KeyCode::Home if dialog.mode == "choose" => {
             dialog.selected = 0;
             dialog.moved = Some(Instant::now());
@@ -977,6 +1069,12 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
         KeyCode::End if dialog.mode != "input" => dialog.scroll = usize::MAX,
         KeyCode::Backspace if dialog.mode == "input" => {
             dialog.erase_input(true);
+        }
+        KeyCode::Char('u')
+            if dialog.mode == "input" && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            dialog.input.clear();
+            dialog.input_cursor = Some(0);
         }
         KeyCode::Delete if dialog.mode == "input" => dialog.erase_input(false),
         KeyCode::Left if dialog.mode == "input" => dialog.move_cursor(false),
@@ -1032,19 +1130,25 @@ fn dialog_mouse(ui: &mut Ui, mouse: MouseEvent) {
         MouseEventKind::ScrollDown if dialog.mode == "choose" => {
             dialog.selected = dialog
                 .selected
-                .saturating_add(1)
+                .saturating_add(ui.settings.choice_wheel_items as usize)
                 .min(dialog.options.len().saturating_sub(1));
             dialog.moved = Some(Instant::now());
         }
         MouseEventKind::ScrollUp if dialog.mode == "choose" => {
-            dialog.selected = dialog.selected.saturating_sub(1);
+            dialog.selected = dialog
+                .selected
+                .saturating_sub(ui.settings.choice_wheel_items as usize);
             dialog.moved = Some(Instant::now());
         }
         MouseEventKind::ScrollDown if dialog.mode != "input" => {
-            dialog.scroll = dialog.scroll.saturating_add(3)
+            dialog.scroll = dialog
+                .scroll
+                .saturating_add(ui.settings.mouse_scroll_rows as usize)
         }
         MouseEventKind::ScrollUp if dialog.mode != "input" => {
-            dialog.scroll = dialog.scroll.saturating_sub(3)
+            dialog.scroll = dialog
+                .scroll
+                .saturating_sub(ui.settings.mouse_scroll_rows as usize)
         }
         _ => {}
     }
@@ -1167,12 +1271,16 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
         && let Some(text) = select::text(ui)
         && !text.is_empty()
     {
-        ui.status_error = clipboard::write(&text).is_err();
-        ui.status = if ui.status_error {
-            "Could not copy.".into()
-        } else {
-            "Copied".into()
-        };
+        match clipboard::write(&text, ui.settings.clipboard_write_limit_bytes as usize) {
+            Ok(()) => {
+                ui.status = clipboard::COPY_STATUS.into();
+                ui.status_error = false;
+            }
+            Err(message) => {
+                ui.status = message.into();
+                ui.status_error = true;
+            }
+        }
         return Step::Continue;
     }
 
@@ -1239,7 +1347,7 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             if embed.live() && ui.inline_screen.is_some() {
                 #[cfg(windows)]
                 if clipboard::paste_key(key) {
-                    match clipboard::read() {
+                    match clipboard::read(ui.settings.clipboard_read_limit_bytes as usize) {
                         Ok(text) => {
                             embed.paste(&text);
                             ui.status = "Pasted".into();
@@ -1259,6 +1367,21 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             return Step::Continue;
         }
     }
+    if matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Esc
+            | KeyCode::Char('/')
+    ) {
+        ui.note_navigation();
+    }
     if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return open_switcher(ui);
     }
@@ -1273,6 +1396,11 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             }
             _ => {}
         }
+    }
+    if key.code == KeyCode::Enter && ui.action_pending {
+        ui.status = ACTION_WAIT.into();
+        ui.status_error = false;
+        return Step::Continue;
     }
     if ui.switching {
         if key.code == KeyCode::Esc {
@@ -1295,11 +1423,13 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
     if ui.detail_view.area.is_some() && key.modifiers.contains(KeyModifiers::ALT) {
         match key.code {
             KeyCode::PageUp => {
-                ui.detail_view.scroll_by(-8);
+                ui.detail_view
+                    .scroll_by(-(ui.settings.details_page_rows as isize));
                 return Step::Continue;
             }
             KeyCode::PageDown => {
-                ui.detail_view.scroll_by(8);
+                ui.detail_view
+                    .scroll_by(ui.settings.details_page_rows as isize);
                 return Step::Continue;
             }
             _ => {}
@@ -1319,12 +1449,12 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             KeyCode::Down if tiles => ui.move_tile(row),
             KeyCode::Up => ui.move_by(-1),
             KeyCode::Down => ui.move_by(1),
-            KeyCode::PageUp if tiles => ui.move_tile(-10),
-            KeyCode::PageDown if tiles => ui.move_tile(10),
+            KeyCode::PageUp if tiles => ui.move_tile(-(ui.settings.list_page_rows as isize)),
+            KeyCode::PageDown if tiles => ui.move_tile(ui.settings.list_page_rows as isize),
             KeyCode::Home if tiles => ui.select_tile(0),
             KeyCode::End if tiles => ui.select_tile(usize::MAX),
-            KeyCode::PageUp => ui.move_by(-10),
-            KeyCode::PageDown => ui.move_by(10),
+            KeyCode::PageUp => ui.move_by(-(ui.settings.list_page_rows as isize)),
+            KeyCode::PageDown => ui.move_by(ui.settings.list_page_rows as isize),
             KeyCode::Home => ui.select(0, true),
             KeyCode::End => ui.select(usize::MAX, false),
             KeyCode::Backspace => {
@@ -1337,7 +1467,11 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
                 ) =>
             {
-                ui_text::append_query(&mut ui.filter, &c.to_string(), 1024);
+                ui_text::append_query(
+                    &mut ui.filter,
+                    &c.to_string(),
+                    ui.settings.search_query_limit_chars as usize,
+                );
                 ui.select(0, true);
                 ui.select_tile(0);
             }
@@ -1410,8 +1544,8 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
     match key.code {
         KeyCode::Up => ui.move_by(-1),
         KeyCode::Down => ui.move_by(1),
-        KeyCode::PageUp => ui.move_by(-10),
-        KeyCode::PageDown => ui.move_by(10),
+        KeyCode::PageUp => ui.move_by(-(ui.settings.list_page_rows as isize)),
+        KeyCode::PageDown => ui.move_by(ui.settings.list_page_rows as isize),
         KeyCode::Home => ui.select(0, true),
         KeyCode::End => ui.select(usize::MAX, false),
         KeyCode::Right | KeyCode::Left if workspaces => fold(ui, key.code == KeyCode::Right),
@@ -1987,6 +2121,9 @@ fn quick_action(ui: &mut Ui, action: &str) -> Step {
 }
 
 fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
+    if mouse.kind == MouseEventKind::Down(event::MouseButton::Left) {
+        ui.note_navigation();
+    }
     if ui.binding_search.is_some() {
         return Step::Continue;
     }
@@ -2004,12 +2141,11 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         if mouse.kind == MouseEventKind::Down(event::MouseButton::Right)
             && let Some((id, _)) = select::cell_at(ui, mouse.column, mouse.row)
             && ui.inline_screen.is_some()
-            && ui
-                .embed
-                .as_ref()
-                .is_some_and(|embed| embed.plan.node == id && embed.mode == Mode::Control && embed.live())
+            && ui.embed.as_ref().is_some_and(|embed| {
+                embed.plan.node == id && embed.mode == Mode::Control && embed.live()
+            })
         {
-            match clipboard::read() {
+            match clipboard::read(ui.settings.clipboard_read_limit_bytes as usize) {
                 Ok(text) => {
                     if let Some(embed) = ui.embed.as_mut() {
                         embed.paste(&text);
@@ -2047,11 +2183,13 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                ui.detail_view.scroll_by(3);
+                ui.detail_view
+                    .scroll_by(ui.settings.mouse_scroll_rows as isize);
                 return Step::Continue;
             }
             MouseEventKind::ScrollUp => {
-                ui.detail_view.scroll_by(-3);
+                ui.detail_view
+                    .scroll_by(-(ui.settings.mouse_scroll_rows as isize));
                 return Step::Continue;
             }
             _ => {}
@@ -2060,10 +2198,14 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     if ui.focus_tree_area.is_some_and(|r| r.contains(position)) {
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                ui.focus_tree_offset = ui.focus_tree_offset.saturating_add(3)
+                ui.focus_tree_offset = ui
+                    .focus_tree_offset
+                    .saturating_add(ui.settings.mouse_scroll_rows as usize)
             }
             MouseEventKind::ScrollUp => {
-                ui.focus_tree_offset = ui.focus_tree_offset.saturating_sub(3)
+                ui.focus_tree_offset = ui
+                    .focus_tree_offset
+                    .saturating_sub(ui.settings.mouse_scroll_rows as usize)
             }
             MouseEventKind::Down(event::MouseButton::Left) => {
                 if let Some((_, id)) = ui
@@ -2112,8 +2254,8 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     }
     if ui.inline_screen.is_some()
         && let Some(embed) = ui.embed.as_mut()
-        && embed.mode == Mode::Control
-        && embed.mouse(mouse)
+        && (embed.mode == Mode::Control || embed.plan.adapter == "native-session")
+        && embed.mouse(mouse, ui.settings.terminal_scroll_rows)
     {
         return Step::Continue;
     }
@@ -2152,8 +2294,12 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         }
         MouseEventKind::ScrollDown if tiles => ui.move_tile(row),
         MouseEventKind::ScrollUp if tiles => ui.move_tile(-row),
-        MouseEventKind::ScrollDown if ui.view != View::Focus => ui.move_by(3),
-        MouseEventKind::ScrollUp if ui.view != View::Focus => ui.move_by(-3),
+        MouseEventKind::ScrollDown if ui.view != View::Focus => {
+            ui.move_by(ui.settings.mouse_scroll_rows as isize)
+        }
+        MouseEventKind::ScrollUp if ui.view != View::Focus => {
+            ui.move_by(-(ui.settings.mouse_scroll_rows as isize))
+        }
         MouseEventKind::Down(event::MouseButton::Left) => {
             if let Some(&(_, page)) = ui.nav_hits.iter().find(|(r, _)| r.contains(p)) {
                 leave_focus(ui);
@@ -2229,9 +2375,9 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                     ui.clicked = None;
                     return quick_action(ui, "terminal.attach");
                 }
-                let again = ui
-                    .clicked
-                    .is_some_and(|(i, at)| i == index && at.elapsed() < Duration::from_millis(500));
+                let again = ui.clicked.is_some_and(|(i, at)| {
+                    i == index && at.elapsed() < Duration::from_millis(ui.settings.double_click_ms)
+                });
                 ui.clicked = Some((index, Instant::now()));
                 if again {
                     return quick_action(ui, "terminal.attach");
@@ -2262,11 +2408,16 @@ fn options_mouse(ui: &mut Ui, mouse: MouseEvent) {
     let last = Item::ALL.len() - 1;
     match mouse.kind {
         MouseEventKind::ScrollDown => {
-            menu.selected = (menu.selected + 1).min(last);
+            menu.selected = menu
+                .selected
+                .saturating_add(ui.settings.choice_wheel_items as usize)
+                .min(last);
             menu.moved = Some(Instant::now());
         }
         MouseEventKind::ScrollUp => {
-            menu.selected = menu.selected.saturating_sub(1);
+            menu.selected = menu
+                .selected
+                .saturating_sub(ui.settings.choice_wheel_items as usize);
             menu.moved = Some(Instant::now());
         }
         MouseEventKind::Down(event::MouseButton::Left) => match hit {
@@ -2291,6 +2442,32 @@ fn pane_resize_request(
     layout: model::Layout,
     cells: i32,
 ) -> Step {
+    let policy = &ui.snapshot.resize_settings;
+    if !policy.validate() || layout.panes.len() as u64 > policy.pane_limit {
+        ui.status = "Resize pane limit reached; review Terminals and discovery settings".into();
+        ui.status_error = true;
+        return Step::Continue;
+    }
+    let a = layout.panes.iter().find(|pane| pane.id == divider.leading);
+    let b = layout.panes.iter().find(|pane| pane.id == divider.trailing);
+    let Some((a, b)) = a.zip(b) else {
+        return Step::Continue;
+    };
+    let minimum = policy.minimum(divider.horizontal);
+    let (a_size, b_size) = if divider.horizontal {
+        (a.w, b.w)
+    } else {
+        (a.h, b.h)
+    };
+    if i32::from(a_size) < minimum || i32::from(b_size) < minimum {
+        ui.status = "Resize minimum changed; review the current divider".into();
+        ui.status_error = true;
+        return Step::Continue;
+    }
+    let cells = cells.clamp(
+        (-(i32::from(a_size) - minimum)).max(-(policy.max_cells as i32)),
+        (i32::from(b_size) - minimum).min(policy.max_cells as i32),
+    );
     let cells = cells.clamp(divider.minimum, divider.maximum);
     if cells == 0 {
         ui.status = "Pane size unchanged".into();
@@ -2332,6 +2509,14 @@ fn focus_resize_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
         .terminal_node(&ui.focus_target)
         .map(|node| node.id.clone())
         .unwrap_or_default();
+    if ui
+        .tab_layout(&current)
+        .is_some_and(|layout| layout.panes.len() as u64 > ui.snapshot.resize_settings.pane_limit)
+    {
+        ui.status = "Resize pane limit reached; review Terminals and discovery settings".into();
+        ui.status_error = true;
+        return Some(Step::Continue);
+    }
     let divider = ui
         .pane_dividers
         .iter()
@@ -2414,7 +2599,8 @@ fn border_mouse(ui: &mut Ui, mouse: MouseEvent, p: ratatui::layout::Position) ->
         MouseEventKind::Down(event::MouseButton::Left) => {
             let handle = under?;
             let again = ui.handle_clicked.is_some_and(|(s, at)| {
-                s == handle.split && at.elapsed() < Duration::from_millis(500)
+                s == handle.split
+                    && at.elapsed() < Duration::from_millis(ui.settings.double_click_ms)
             });
             ui.handle_clicked = Some((handle.split, Instant::now()));
             if again {
@@ -2532,11 +2718,11 @@ fn toggle_saver(ui: &mut Ui) {
     ui.status = if !ui.saver.enabled {
         "Screensaver off · s turns it on".into()
     } else if !ui.theme.backdrop {
-        "Screensaver on, but it needs true color and Unicode symbols, \
-         and DAEDALUS_BACKDROP not set to 0"
+        "Screensaver on, but artwork needs true color, Unicode symbols \
+         and an enabled background in Interface settings"
             .into()
     } else if after == 0 {
-        "Screensaver on, but DAEDALUS_SCREENSAVER=0 keeps it from starting".into()
+        "Screensaver on, but its idle delay is disabled in settings or the environment".into()
     } else {
         format!(
             "Screensaver on · starts after {} idle · s turns it off",
@@ -2557,9 +2743,8 @@ fn idle(seconds: u64) -> String {
 /// The screensaver may start only over the plain interface: not during the
 /// splash, an action you started, a question, an open terminal, a search or
 /// a drag.
-/// Whether `request` is an action. Only an action's answer may move the page
-/// to where the backend left it; a refresh, like the automatic one, leaves
-/// the page as it is.
+/// Only an action's answer may move the page, provided no newer local navigation
+/// supersedes it. Automatic refreshes leave the page as it is.
 fn is_action(request: &Value) -> bool {
     request["op"] == "action"
 }
@@ -2640,8 +2825,8 @@ fn toggle_sidebar(ui: &mut Ui) {
 fn cycle_look(ui: &mut Ui, forward: bool) {
     ui.status_error = false;
     if !ui.theme.backdrop {
-        ui.status = "The background light and artwork need true color and \
-                     Unicode symbols, and DAEDALUS_BACKDROP not set to 0"
+        ui.status = "The background light and artwork need true color, \
+                     Unicode symbols and an enabled background in Interface settings"
             .into();
         return;
     }
@@ -2693,11 +2878,16 @@ fn options_key(ui: &mut Ui, key: KeyEvent) {
             menu.moved = Some(Instant::now());
         }
         KeyCode::PageUp => {
-            menu.selected = menu.selected.saturating_sub(5);
+            menu.selected = menu
+                .selected
+                .saturating_sub(ui.settings.options_page_items as usize);
             menu.moved = Some(Instant::now());
         }
         KeyCode::PageDown => {
-            menu.selected = menu.selected.saturating_add(5).min(last);
+            menu.selected = menu
+                .selected
+                .saturating_add(ui.settings.options_page_items as usize)
+                .min(last);
             menu.moved = Some(Instant::now());
         }
         KeyCode::Home => {
@@ -2761,8 +2951,8 @@ fn change_option(ui: &mut Ui, item: Item, forward: bool) {
             };
         }
         Item::Motion if ui.still => {
-            ui.status = "Reduced motion is set for this terminal (DAEDALUS_REDUCED_MOTION); \
-                         unset it for neon motion"
+            ui.status = "Reduced motion is enabled in Interface settings or the environment; \
+                         change that preference to enable transitions"
                 .into();
         }
         _ => {
@@ -2845,28 +3035,34 @@ fn end_splash(ui: &mut Ui) {
 
 /// Redraw quickly only while something moves; idle frames stay cheap.
 fn frame_interval(ui: &Ui) -> Duration {
-    let recent = |at: Option<Instant>| at.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+    let recent = |at: Option<Instant>| {
+        at.is_some_and(|t| t.elapsed() < Duration::from_millis(ui.settings.animation_window_ms))
+    };
     if ui
         .embed
         .as_ref()
         .is_some_and(|e| !matches!(e.phase, embed::Phase::Ended(_)))
     {
         // A streaming terminal redraws as its output arrives.
-        Duration::from_millis(16)
+        Duration::from_millis(ui.settings.live_frame_ms)
     } else if ui.splash.is_some() && ui.theme.animated() {
-        Duration::from_millis(33)
+        Duration::from_millis(ui.settings.animation_frame_ms)
     } else if ui.saver.since.is_some() {
-        Duration::from_millis(if ui.theme.animated() { 50 } else { 1000 })
+        Duration::from_millis(if ui.theme.animated() {
+            ui.settings.saver_frame_ms
+        } else {
+            ui.settings.still_saver_frame_ms
+        })
     } else if !ui.theme.animated() {
-        Duration::from_millis(250)
+        Duration::from_millis(ui.settings.reduced_motion_frame_ms)
     } else if ui.busy
         || recent(ui.moved_at)
         || recent(ui.paged_at)
         || ui.options.as_ref().is_some_and(|menu| recent(menu.moved))
     {
-        Duration::from_millis(33)
+        Duration::from_millis(ui.settings.animation_frame_ms)
     } else {
-        Duration::from_millis(100)
+        Duration::from_millis(ui.settings.idle_frame_ms)
     }
 }
 
@@ -2917,6 +3113,291 @@ fn activate(ui: &mut Ui) -> Option<Value> {
 mod cli_tests {
     use super::*;
     #[test]
+    fn delayed_action_reply_keeps_a_newer_command_search_and_selection() {
+        let mut ui = Ui {
+            page: COMMANDS,
+            busy: true,
+            view: View::Cube,
+            snapshot: initial_snapshot(),
+            ..Ui::default()
+        };
+        ui.begin_request(true, ui.navigation_revision);
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        for character in "Terminals and discovery".chars() {
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        let selected = ui.selected_row().unwrap().id;
+        let mut reply = Snapshot {
+            page: 6,
+            focus: "old focus".into(),
+            message: "Previous action completed".into(),
+            warnings: 2,
+            ..Snapshot::default()
+        };
+        reply.workspace.apply.mode = "focus".into();
+        reply.workspace.apply.selected = "old terminal".into();
+        reply
+            .workspace
+            .apply
+            .switches
+            .insert("keys".into(), json!("off"));
+        reply.ui_settings.colors = false;
+        apply_state(&mut ui, reply);
+        assert_eq!(
+            ui.page, COMMANDS,
+            "an older action reply replaced newer navigation"
+        );
+        assert_eq!(ui.filter, "Terminals and discovery");
+        assert!(ui.searching);
+        assert_eq!(ui.selected_row().unwrap().id, selected);
+        assert_eq!(ui.view, View::Cube);
+        assert_eq!(ui.snapshot.warnings, 2);
+        assert_eq!(ui.status, "Previous action completed");
+        assert!(!ui.settings.colors && ui.hide_keys);
+        assert!(!ui.busy && !ui.action_pending);
+        assert!(ui.request_navigation_revision.is_none());
+    }
+    #[test]
+    fn enter_during_a_pending_action_keeps_search_and_never_defers_activation() {
+        let mut ui = Ui {
+            busy: true,
+            snapshot: initial_snapshot(),
+            ..Ui::default()
+        };
+        ui.begin_request(true, ui.navigation_revision);
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        for character in "Discovery warnings".chars() {
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                key_event(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Step::Continue
+            ));
+            assert!(ui.action_pending && ui.busy && ui.searching);
+            assert_eq!(ui.filter, "Discovery warnings");
+            assert_eq!(ui.status, ACTION_WAIT);
+        }
+        apply_state(
+            &mut ui,
+            Snapshot {
+                page: 6,
+                ..Snapshot::default()
+            },
+        );
+        assert!(ui.dialog.is_none() && ui.searching && !ui.action_pending);
+        assert!(matches!(
+            key_event(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Step::Continue
+        ));
+        let Step::Send(request) =
+            key_event(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        else {
+            panic!("explicit action after completion was lost")
+        };
+        assert_eq!(request["action"], "action:activity.discovery");
+    }
+    #[test]
+    fn unchanged_navigation_follows_action_page_but_refresh_never_moves_page() {
+        for action in [false, true] {
+            let mut ui = Ui {
+                page: COMMANDS,
+                busy: true,
+                snapshot: initial_snapshot(),
+                ..Ui::default()
+            };
+            ui.begin_request(action, ui.navigation_revision);
+            let mut reply = Snapshot {
+                page: 5,
+                ..Snapshot::default()
+            };
+            reply.workspace.apply.mode = "tiles".into();
+            apply_state(&mut ui, reply);
+            assert_eq!(ui.page, if action { 5 } else { COMMANDS });
+            assert_eq!(ui.view, View::Tiles);
+            assert!(!ui.action_pending && !ui.busy);
+        }
+    }
+    #[test]
+    fn initial_inventory_restore_does_not_erase_a_new_search() {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            busy: true,
+            snapshot: initial_snapshot(),
+            ..Ui::default()
+        };
+        ui.begin_request(false, ui.navigation_revision);
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        );
+        for character in "Instance settings".chars() {
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        let mut reply = Snapshot {
+            page: WORKSPACES,
+            focus: "saved node".into(),
+            ..Snapshot::default()
+        };
+        reply.workspace.apply.mode = "focus".into();
+        reply.workspace.apply.selected = "saved terminal".into();
+        apply_state(&mut ui, reply);
+        assert_eq!(ui.page, COMMANDS);
+        assert!(ui.searching);
+        assert_eq!(ui.filter, "Instance settings");
+        assert_ne!(ui.view, View::Focus);
+        assert_eq!(ui.selected_row().unwrap().id, "action:settings.instance");
+    }
+    #[test]
+    fn late_replies_respect_inline_search_mouse_and_keyboard_browsing() {
+        for mode in ["slash", "mouse", "arrow"] {
+            let mut ui = Ui {
+                page: COMMANDS,
+                busy: true,
+                snapshot: initial_snapshot(),
+                ..Ui::default()
+            };
+            ui.begin_request(true, ui.navigation_revision);
+            match mode {
+                "mouse" => {
+                    ui.search_area = Some(ratatui::layout::Rect::new(1, 1, 40, 1));
+                    mouse_event(
+                        &mut ui,
+                        MouseEvent {
+                            kind: MouseEventKind::Down(event::MouseButton::Left),
+                            column: 2,
+                            row: 1,
+                            modifiers: KeyModifiers::NONE,
+                        },
+                    );
+                }
+                "slash" => {
+                    key_event(
+                        &mut ui,
+                        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+                    );
+                }
+                _ => {
+                    key_event(&mut ui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                }
+            }
+            if mode != "arrow" {
+                for character in "Instance settings".chars() {
+                    key_event(
+                        &mut ui,
+                        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                    );
+                }
+            }
+            let selected = ui.selected_row().unwrap().id;
+            let reply = Snapshot {
+                page: if mode == "arrow" { 6 } else { COMMANDS },
+                focus: "old focus".into(),
+                ..Snapshot::default()
+            };
+            apply_state(&mut ui, reply);
+            assert_eq!(ui.page, COMMANDS);
+            assert_eq!(ui.selected_row().unwrap().id, selected);
+            if mode != "arrow" {
+                assert!(ui.searching);
+                assert_eq!(ui.filter, "Instance settings");
+            }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn queued_request_keeps_original_navigation_and_sends_only_the_wire_request() {
+        let mut ui = Ui {
+            page: COMMANDS,
+            busy: true,
+            snapshot: initial_snapshot(),
+            ..Ui::default()
+        };
+        let queued = PendingRequest::new(
+            &ui,
+            json!({"op":"action","page":COMMANDS,"action":"action:activity.discovery"}),
+        );
+        ui.navigate(WORKSPACES);
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut host = Host { child, input };
+        queued.send(&mut ui, &mut host).unwrap();
+        let wire = daedalus_tui::protocol::read_frame(&mut BufReader::new(output), 4096)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wire,
+            json!({"version":2,"op":"action","page":COMMANDS,"action":"action:activity.discovery"})
+        );
+        assert!(ui.action_pending && ui.busy);
+        apply_state(
+            &mut ui,
+            Snapshot {
+                page: 6,
+                ..Snapshot::default()
+            },
+        );
+        assert_eq!(ui.page, WORKSPACES);
+        assert!(!ui.action_pending && !ui.busy);
+    }
+    #[test]
+    fn commands_can_be_selected_before_the_first_inventory_arrives() {
+        let mut ui = Ui {
+            busy: true,
+            snapshot: initial_snapshot(),
+            ..Ui::default()
+        };
+        assert!(matches!(
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            ),
+            Step::Continue
+        ));
+        for character in "Terminals and discovery".chars() {
+            assert!(matches!(
+                key_event(
+                    &mut ui,
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+                ),
+                Step::Continue
+            ));
+        }
+        assert!(matches!(
+            key_event(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Step::Continue
+        ));
+        let Step::Send(request) =
+            key_event(&mut ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        else {
+            panic!("early command was lost")
+        };
+        assert_eq!(request["action"], "action:settings.runtime");
+        assert!(ui.busy); // The main loop queues it until the refresh completes.
+        ui.update(Snapshot::default());
+        assert_eq!(ui.selected_row().unwrap().id, "action:settings.runtime");
+    }
+    #[test]
     fn command_search_and_quit_work_while_a_filter_is_active() {
         let mut ui = Ui {
             page: WORKSPACES,
@@ -2943,9 +3424,9 @@ mod cli_tests {
         ));
     }
     #[test]
-    fn ctrl_c_copies_selected_terminal_text_from_any_view() {
+    fn copy_refusal_shows_the_configured_limit_reason_and_keeps_the_selection() {
         let mut ui = Ui::default();
-        ui.page = WORKSPACES;
+        ui.settings.clipboard_write_limit_bytes = 2;
         ui.previews
             .insert("a".into(), model::Preview::new("hello copy", ""));
         ui.selection = Some(("a".into(), (0, 0), (0, 9)));
@@ -2956,7 +3437,48 @@ mod cli_tests {
             ),
             Step::Continue
         ));
-        assert_eq!(ui.status, "Copied");
+        assert!(ui.status_error);
+        assert!(ui.status.contains("configured clipboard copy limit"));
+        assert!(ui.selection.is_some());
+        ui.settings.clipboard_write_limit_bytes = 64;
+        key_event(
+            &mut ui,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(!ui.status_error);
+        assert_eq!(
+            ui.status,
+            if cfg!(windows) {
+                "Copied"
+            } else {
+                "Copy request sent to terminal"
+            }
+        );
+    }
+    #[test]
+    fn ctrl_c_copies_selected_terminal_text_from_any_view() {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            ..Ui::default()
+        };
+        ui.previews
+            .insert("a".into(), model::Preview::new("hello copy", ""));
+        ui.selection = Some(("a".into(), (0, 0), (0, 9)));
+        assert!(matches!(
+            key_event(
+                &mut ui,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Step::Continue
+        ));
+        assert_eq!(
+            ui.status,
+            if cfg!(windows) {
+                "Copied"
+            } else {
+                "Copy request sent to terminal"
+            }
+        );
     }
     #[test]
     fn clicking_search_focuses_the_query_without_opening_a_terminal() {
@@ -3000,6 +3522,8 @@ mod cli_tests {
     #[test]
     fn details_scroll_does_not_move_or_activate_the_selected_action() {
         let mut ui = Ui::default();
+        ui.settings.details_page_rows = 6;
+        ui.settings.mouse_scroll_rows = 2;
         ui.detail_view.area = Some(ratatui::layout::Rect::new(80, 4, 40, 20));
         ui.detail_view.max_scroll = 25;
         let selected = ui.selected;
@@ -3007,7 +3531,7 @@ mod cli_tests {
             key_event(&mut ui, KeyEvent::new(KeyCode::PageDown, KeyModifiers::ALT)),
             Step::Continue
         ));
-        assert_eq!(ui.detail_view.scroll, 8);
+        assert_eq!(ui.detail_view.scroll, 6);
         let event = MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 82,
@@ -3015,7 +3539,7 @@ mod cli_tests {
             modifiers: KeyModifiers::NONE,
         };
         assert!(matches!(mouse_event(&mut ui, event), Step::Continue));
-        assert_eq!(ui.detail_view.scroll, 11);
+        assert_eq!(ui.detail_view.scroll, 8);
         assert_eq!(ui.selected, selected);
         assert!(!ui.busy);
     }
@@ -3081,6 +3605,156 @@ mod cli_tests {
         assert_eq!(ui.dialog.as_ref().unwrap().input, "unchanged");
     }
     use std::process::Command;
+    #[test]
+    fn saved_local_page_and_wheel_steps_clamp_without_activating_list_items() {
+        let mut ui = Ui::default();
+        ui.snapshot.sections = vec![model::Section {
+            items: (0..20)
+                .map(|i| model::Item {
+                    id: format!("item-{i}"),
+                    title: format!("Item {i:02}"),
+                    ..model::Item::default()
+                })
+                .collect(),
+            ..model::Section::default()
+        }];
+        ui.settings.list_page_rows = 4;
+        ui.settings.mouse_scroll_rows = 2;
+        ui.select(0, true);
+        assert_eq!(ui.selected_row().unwrap().id, "item-0");
+        assert!(press(&mut ui, KeyCode::PageDown).is_none());
+        assert_eq!(ui.selected_row().unwrap().id, "item-4");
+        let mut wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(mouse_event(&mut ui, wheel), Step::Continue));
+        assert_eq!(ui.selected_row().unwrap().id, "item-6");
+        ui.searching = true;
+        ui.filter = "Item".into();
+        assert!(press(&mut ui, KeyCode::PageDown).is_none());
+        assert_eq!(ui.selected_row().unwrap().id, "item-10");
+        ui.settings.list_page_rows = 1000;
+        press(&mut ui, KeyCode::PageDown);
+        assert_eq!(ui.selected_row().unwrap().id, "item-19");
+        press(&mut ui, KeyCode::PageUp);
+        assert_eq!(ui.selected_row().unwrap().id, "item-0");
+        wheel.kind = MouseEventKind::ScrollUp;
+        mouse_event(&mut ui, wheel);
+        assert_eq!(ui.selected_row().unwrap().id, "item-0");
+        ui.focus_tree_area = Some(ratatui::layout::Rect::new(0, 0, 10, 10));
+        wheel.kind = MouseEventKind::ScrollDown;
+        mouse_event(&mut ui, wheel);
+        assert_eq!(ui.focus_tree_offset, 2);
+        assert!(!ui.busy && !ui.action_pending);
+    }
+    #[test]
+    fn saved_choice_and_options_steps_select_locally_and_dialog_page_keys_keep_the_choice() {
+        let mut ui = Ui::default();
+        ui.settings.choice_wheel_items = 3;
+        ui.settings.options_page_items = 2;
+        ui.settings.list_page_rows = 4;
+        ui.settings.mouse_scroll_rows = 2;
+        let mut wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        open_options(&mut ui);
+        options_key(
+            &mut ui,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
+        assert_eq!(ui.options.as_ref().unwrap().selected, 2);
+        options_mouse(&mut ui, wheel);
+        assert_eq!(ui.options.as_ref().unwrap().selected, 5);
+        ui.settings.choice_wheel_items = 1000;
+        options_mouse(&mut ui, wheel);
+        assert_eq!(ui.options.as_ref().unwrap().selected, Item::ALL.len() - 1);
+        wheel.kind = MouseEventKind::ScrollUp;
+        options_mouse(&mut ui, wheel);
+        assert_eq!(ui.options.as_ref().unwrap().selected, 0);
+        ui.options = None;
+        ui.settings.choice_wheel_items = 3;
+        ui.dialog = Some(Dialog {
+            mode: "choose".into(),
+            options: (0..8)
+                .map(|i| (i.to_string(), format!("Choice {i}"), String::new()))
+                .collect(),
+            ..Dialog::default()
+        });
+        wheel.kind = MouseEventKind::ScrollDown;
+        dialog_mouse(&mut ui, wheel);
+        assert_eq!(ui.dialog.as_ref().unwrap().selected, 3);
+        // This child supplies an inert cross-platform stdin; page movement must
+        // leave the modal open without submitting a reply.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut host = Host { child, input };
+        for (code, scroll) in [(KeyCode::PageDown, 4), (KeyCode::PageUp, 0)] {
+            let dialog = ui.dialog.take().unwrap();
+            assert!(
+                !dialog_key(
+                    &mut ui,
+                    dialog,
+                    KeyEvent::new(code, KeyModifiers::NONE),
+                    &mut host
+                )
+                .unwrap()
+            );
+            assert_eq!(ui.dialog.as_ref().unwrap().selected, 3);
+            assert_eq!(ui.dialog.as_ref().unwrap().scroll, scroll);
+        }
+        ui.dialog.as_mut().unwrap().mode = "output".into();
+        dialog_mouse(&mut ui, wheel);
+        assert_eq!(ui.dialog.as_ref().unwrap().scroll, 2);
+        ui.dialog.as_mut().unwrap().mode = "input".into();
+        dialog_mouse(&mut ui, wheel);
+        assert_eq!(ui.dialog.as_ref().unwrap().scroll, 2);
+        assert!(!ui.busy && !ui.action_pending && !ui.updates_requested);
+    }
+    #[test]
+    fn saved_query_limits_apply_to_typing_and_paste_without_truncating_existing_queries() {
+        let mut ui = Ui {
+            searching: true,
+            ..Ui::default()
+        };
+        ui.settings.search_query_limit_chars = 7;
+        ui.settings.shortcut_query_limit_chars = 5;
+        paste(&mut ui, "界\né🙂abcdef");
+        assert_eq!(ui.filter, "界é🙂abcd");
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.filter, "界é🙂abcd");
+        ui.settings.search_query_limit_chars = 3;
+        paste(&mut ui, "more");
+        assert_eq!(ui.filter, "界é🙂abcd");
+        press(&mut ui, KeyCode::Backspace);
+        assert_eq!(ui.filter, "界é🙂abc");
+        ui.filter.clear();
+        for c in "界é🙂xy".chars() {
+            press(&mut ui, KeyCode::Char(c));
+        }
+        assert_eq!(ui.filter, "界é🙂");
+        ui.binding_search = Some(String::new());
+        paste(&mut ui, "界\né🙂abcd");
+        assert_eq!(ui.binding_search.as_deref(), Some("界é🙂ab"));
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.binding_search.as_deref(), Some("界é🙂ab"));
+        ui.settings.shortcut_query_limit_chars = 2;
+        paste(&mut ui, "more");
+        assert_eq!(ui.binding_search.as_deref(), Some("界é🙂ab"));
+        assert_eq!(ui.filter, "界é🙂");
+        assert!(!ui.busy && !ui.action_pending);
+    }
     fn press(ui: &mut Ui, code: KeyCode) -> Option<Value> {
         match key_event(ui, KeyEvent::new(code, KeyModifiers::NONE)) {
             Step::Send(value) => Some(value),
@@ -4184,6 +4858,30 @@ mod cli_tests {
     }
 
     #[test]
+    fn configured_frame_and_preview_intervals_are_used() {
+        let mut ui = workspace();
+        ui.theme.reduced_motion = true;
+        ui.settings.reduced_motion_frame_ms = 777;
+        assert_eq!(frame_interval(&ui), Duration::from_millis(777));
+        ui.saver.since = Some(Instant::now());
+        ui.settings.still_saver_frame_ms = 888;
+        assert_eq!(frame_interval(&ui), Duration::from_millis(888));
+        ui.saver.since = None;
+        ui.theme.reduced_motion = false;
+        ui.busy = true;
+        ui.settings.animation_frame_ms = 44;
+        assert_eq!(frame_interval(&ui), Duration::from_millis(44));
+        ui.busy = false;
+        ui.view = View::Tiles;
+        ui.preview_targets = vec!["a".into()];
+        ui.preview_sent = ui.preview_targets.clone();
+        ui.last_preview = Some(Instant::now() - Duration::from_millis(1000));
+        ui.settings.preview_interval_ms = 5000;
+        assert!(!previews_due(&ui));
+        ui.settings.preview_interval_ms = 100;
+        assert!(previews_due(&ui));
+    }
+    #[test]
     fn previews_are_requested_only_for_on_screen_terminals_when_idle() {
         let mut ui = workspace();
         ui.view = View::Tiles;
@@ -4212,7 +4910,11 @@ mod cli_tests {
         // A newly selected one is read as soon as the last read has settled.
         ui.preview_targets = vec!["b".into()];
         assert!(!previews_due(&ui));
-        ui.last_preview = Some(Instant::now() - PREVIEW_SETTLE - Duration::from_millis(1));
+        ui.last_preview = Some(
+            Instant::now()
+                - Duration::from_millis(ui.settings.preview_settle_ms)
+                - Duration::from_millis(1),
+        );
         assert!(previews_due(&ui));
         ui.preview_targets.clear();
         ui.last_preview = None;
@@ -4291,7 +4993,7 @@ mod cli_tests {
         let mut host = Host { child, input };
         host.send(json!({"op":"quit","view":{"mode":"tiles"}}))
             .unwrap();
-        assert!(host.wait_exit(QUIT_WAIT));
+        assert!(host.wait_exit(Duration::from_millis(1500), Duration::from_millis(15)));
         drop(host);
         let line = std::fs::read_to_string(&saved).unwrap();
         assert!(line.contains("\"mode\":\"tiles\""), "{line}");
@@ -4312,7 +5014,7 @@ mod cli_tests {
             .unwrap();
         let input = child.stdin.take().unwrap();
         let mut host = Host { child, input };
-        assert!(!host.wait_exit(Duration::from_millis(50)));
+        assert!(!host.wait_exit(Duration::from_millis(50), Duration::from_millis(15)));
     }
     #[test]
     fn switching_views_is_remembered_once_it_settles() {
@@ -4515,6 +5217,7 @@ mod cli_tests {
             home: crate::test_support::path("/home/example").into(),
             now: 1120.0,
             pins: fixture["context"]["pins"].as_array().unwrap().clone(),
+            ..ProjectionContext::default()
         };
         let frame = backend::assemble(&context, &projection, 0, "", true, true).unwrap();
         let expected_nodes = frame["tree"].as_array().unwrap().len();
@@ -4544,6 +5247,18 @@ mod cli_tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+    #[test]
+    fn divider_requests_use_the_latest_saved_movement_policy() {
+        let mut ui = focus_with_divider();
+        let edge = ui.pane_dividers[0].clone();
+        let layout = ui.tab_layout(&edge.leading).unwrap().clone();
+        ui.snapshot.resize_settings.max_cells = 1;
+        let Step::Send(request) = pane_resize_request(&mut ui, edge, layout, 5) else {
+            panic!("valid divider should submit")
+        };
+        assert_eq!(request["resize"]["cells"], 1);
+        assert!(!ui.action_pending);
     }
     #[test]
     fn focus_divider_drag_previews_then_submits_one_exact_native_resize() {

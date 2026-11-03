@@ -8,6 +8,7 @@ use crate::{
     core::{checkpoints::LaunchPlan, layouts},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::{
@@ -25,6 +26,14 @@ use std::{
 #[cfg(unix)]
 use std::{fs::OpenOptions, io::Read};
 type Result<T> = std::result::Result<T, String>;
+pub(crate) const CONFIG_LIMIT: u64 = 16384;
+pub const FIELDS: &[&str] = &[
+    "enabled",
+    "provider",
+    "endpoint",
+    "model",
+    "credential_file",
+];
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
@@ -43,6 +52,78 @@ pub struct Config {
     pub harness: String,
 }
 impl Config {
+    pub fn fresh(provider: &str) -> Result<Self> {
+        let mut config = Self {
+            version: 1,
+            enabled: false,
+            format: Format::AnthropicMessages,
+            endpoint: String::new(),
+            model: String::new(),
+            credential_file: PathBuf::new(),
+            harness: "claude".into(),
+        };
+        config = config.set("provider", provider)?;
+        Ok(config)
+    }
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > CONFIG_LIMIT {
+            return Err("Gateway configuration exceeds 16 KiB".into());
+        }
+        let config: Self =
+            serde_json::from_slice(bytes).map_err(|_| "Invalid gateway configuration")?;
+        config.validate()?;
+        Ok(config)
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        let bytes =
+            serde_json::to_vec_pretty(self).map_err(|_| "Cannot encode gateway configuration")?;
+        if bytes.len() as u64 > CONFIG_LIMIT {
+            return Err("Gateway configuration exceeds 16 KiB".into());
+        }
+        self.validate()?;
+        Ok(bytes)
+    }
+    pub fn set(&self, key: &str, text: &str) -> Result<Self> {
+        let mut updated = self.clone();
+        match key {
+            "enabled" => {
+                updated.enabled = match text {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("Choose true or false".into()),
+                }
+            }
+            "provider" => match text {
+                "claude" => {
+                    updated.format = Format::AnthropicMessages;
+                    updated.harness = "claude".into();
+                }
+                "codex" => {
+                    updated.format = Format::OpenaiResponses;
+                    updated.harness = "codex".into();
+                }
+                _ => return Err("Choose the supported claude or codex gateway provider".into()),
+            },
+            "endpoint" => {
+                validate_endpoint(text)?;
+                updated.endpoint = text.into();
+            }
+            "model" => {
+                if text.is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
+                    return Err("Invalid gateway model".into());
+                }
+                updated.model = text.into();
+            }
+            "credential_file" => {
+                let path = super::hooks::windows_native_path(Path::new(text));
+                layouts::check_path(&path)
+                    .map_err(|_| "Gateway credential path must be absolute and symlink-free")?;
+                updated.credential_file = path;
+            }
+            _ => return Err("Unknown gateway setting".into()),
+        }
+        Ok(updated)
+    }
     pub fn validate(&self) -> Result<()> {
         if self.version != 1
             || !matches!(
@@ -52,22 +133,7 @@ impl Config {
         {
             return Err("Unsupported gateway format and harness combination".into());
         }
-        let url = reqwest::Url::parse(&self.endpoint).map_err(|_| "Invalid gateway endpoint")?;
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.host_str().is_none()
-            || self.endpoint.len() > 2048
-            || !(url.scheme() == "https"
-                || (url.scheme() == "http"
-                    && matches!(
-                        url.host_str(),
-                        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-                    )))
-        {
-            return Err("Gateway requires HTTPS (HTTP only on loopback), no credentials or query in the URL".into());
-        }
+        validate_endpoint(&self.endpoint)?;
         if self.model.is_empty()
             || self.model.len() > 256
             || self.model.chars().any(char::is_control)
@@ -79,8 +145,32 @@ impl Config {
         Ok(())
     }
 }
+fn validate_endpoint(endpoint: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint).map_err(|_| "Invalid gateway endpoint")?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+        || endpoint.len() > 2048
+        || endpoint.trim() != endpoint
+        || endpoint.chars().any(char::is_control)
+        || !(url.scheme() == "https"
+            || (url.scheme() == "http"
+                && matches!(
+                    url.host_str(),
+                    Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+                )))
+    {
+        return Err(
+            "Gateway requires HTTPS (HTTP only on loopback), no credentials or query in the URL"
+                .into(),
+        );
+    }
+    Ok(())
+}
 #[cfg(unix)]
-fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+pub(crate) fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     layouts::check_path(path).map_err(|_| "Unsafe gateway path")?;
     let file = match OpenOptions::new()
         .read(true)
@@ -112,13 +202,10 @@ fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 pub fn load(directory: &Path) -> Result<Option<Config>> {
-    let Some(bytes) = private_bytes(&directory.join("gateway.json"), 16384)? else {
+    let Some(bytes) = private_bytes(&directory.join("gateway.json"), CONFIG_LIMIT)? else {
         return Ok(None);
     };
-    let config: Config =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid gateway configuration")?;
-    config.validate()?;
-    Ok(Some(config))
+    Config::parse(&bytes).map(Some)
 }
 fn fingerprint(config: &Config) -> Result<String> {
     Ok(format!(
@@ -152,8 +239,7 @@ impl Drop for Lock {
         let _ = crate::platform::unlock(&self.0);
     }
 }
-pub fn save(directory: &Path, expected: &Option<Config>, updated: &Config) -> Result<()> {
-    updated.validate()?;
+fn lock(directory: &Path) -> Result<Lock> {
     #[cfg(unix)]
     let file = {
         let meta = std::fs::symlink_metadata(directory)
@@ -194,18 +280,77 @@ pub fn save(directory: &Path, expected: &Option<Config>, updated: &Config) -> Re
             .map_err(|_| "Another gateway update is active")?;
         file
     };
-    let _lock = Lock(file);
-    if &load(directory)? != expected {
-        return Err("Gateway configuration changed; review it again".into());
+    Ok(Lock(file))
+}
+pub struct Plan {
+    directory: PathBuf,
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+    config: Config,
+}
+impl Plan {
+    pub fn prepare(directory: &Path, expected: &Option<Config>, updated: Config) -> Result<Self> {
+        let after = updated.encode()?;
+        let before = private_bytes(&directory.join("gateway.json"), CONFIG_LIMIT)?;
+        let current = before.as_deref().map(Config::parse).transpose()?;
+        if &current != expected {
+            return Err("Gateway configuration changed; review it again".into());
+        }
+        Ok(Self {
+            directory: directory.into(),
+            before,
+            after,
+            config: updated,
+        })
     }
-    if updated.enabled {
-        let mut token = credential(updated)?.into_bytes();
-        token.fill(0);
+    pub fn approval(&self) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(&self.directory, &self.before, &self.after))
+                    .expect("serializable gateway plan")
+            )
+        )
     }
-    layouts::write_private(
-        &directory.join("gateway.json"),
-        &serde_json::to_vec_pretty(updated).map_err(|_| "Cannot encode gateway configuration")?,
-    )
+    pub fn review(&self) -> Value {
+        json!({"configuration":self.config,"previous_configuration":self.before.as_deref().and_then(|bytes|Config::parse(bytes).ok()),"backup_required":self.before.is_some(),"approval":self.approval(),"credential_verified":false,"network_verified":false})
+    }
+    pub fn apply(self, approval: &str) -> Result<()> {
+        if self.approval() != approval {
+            return Err("Gateway approval does not match the reviewed configuration".into());
+        }
+        let _configuration = super::telegram_config::configuration_lock(&self.directory)?;
+        let _legacy = lock(&self.directory)?;
+        if super::telegram_config::read_private(
+            &self.directory.join("cutover-retired.json"),
+            1024 * 1024,
+        )?
+        .is_some()
+        {
+            return Err("This instance was retired; configure its destination".into());
+        }
+        let path = self.directory.join("gateway.json");
+        if private_bytes(&path, CONFIG_LIMIT)? != self.before {
+            return Err("Gateway configuration changed; review it again".into());
+        }
+        if self.config.enabled {
+            let mut token = credential(&self.config)?.into_bytes();
+            token.fill(0);
+        }
+        if let Some(before) = &self.before {
+            let backup = self
+                .directory
+                .join(format!("gateway.backup-{:x}.json", Sha256::digest(before)));
+            match private_bytes(&backup, CONFIG_LIMIT)? {
+                Some(current) if current != *before => {
+                    return Err("Gateway configuration backup conflicts".into());
+                }
+                Some(_) => (),
+                None => layouts::write_private(&backup, before)?,
+            }
+        }
+        layouts::write_private(&path, &self.after)
+    }
 }
 /// Wrap a terminal launch with a credential-free argv. The hash rejects edits
 /// between launch preparation and exec; native account environment is retained.
@@ -303,6 +448,7 @@ pub fn run(args: &[String]) -> Result<()> {
         index += 2;
     }
     let directory = directory.ok_or("Missing gateway configuration directory")?;
+    let active = super::hook_runtime::active_guard(&directory).map_err(|e| e.to_string())?;
     let gateway = load(&directory)?.ok_or("Gateway configuration is missing")?;
     if !gateway.enabled
         || Some(&gateway.harness) != harness.as_ref()
@@ -329,17 +475,24 @@ pub fn run(args: &[String]) -> Result<()> {
     let _error = plan.command().exec();
     #[cfg(windows)]
     {
-        let status = plan
+        let mut child = plan
             .command()
-            .status()
+            .spawn()
             .map_err(|_| "Cannot launch native provider")?;
+        drop(active);
+        let status = child
+            .wait()
+            .map_err(|_| "Cannot wait for native provider")?;
         if status.success() {
             return Ok(());
         }
         Err(format!("Native provider exited with {status}"))
     }
     #[cfg(unix)]
-    Err("Gateway harness did not start".into())
+    {
+        drop(active);
+        Err("Gateway harness did not start".into())
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -351,6 +504,11 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    fn save(directory: &Path, expected: &Option<Config>, updated: &Config) -> Result<()> {
+        let plan = Plan::prepare(directory, expected, updated.clone())?;
+        let approval = plan.approval();
+        plan.apply(&approval)
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -409,6 +567,91 @@ mod tests {
         let mut local = original;
         local.endpoint = "http://127.0.0.1:8080/v1".into();
         assert!(local.validate().is_ok());
+    }
+    #[test]
+    fn reviewed_bytes_backups_retirement_and_cutover_lock_are_enforced() {
+        let f = Fixture::new();
+        let config = f.config();
+        save(&f.0, &None, &config).unwrap();
+        let original = fs::read(f.0.join("gateway.json")).unwrap();
+        let updated = config.set("model", "reviewed-model").unwrap();
+        let plan = Plan::prepare(&f.0, &Some(config.clone()), updated.clone()).unwrap();
+        assert!(plan.apply("unreviewed").unwrap_err().contains("approval"));
+        assert_eq!(fs::read(f.0.join("gateway.json")).unwrap(), original);
+        let plan = Plan::prepare(&f.0, &Some(config.clone()), updated.clone()).unwrap();
+        assert!(!plan.review().to_string().contains("PRIVATE-KEY"));
+        let compact = serde_json::to_vec(&config).unwrap();
+        layouts::write_private(&f.0.join("gateway.json"), &compact).unwrap();
+        let approval = plan.approval();
+        assert!(plan.apply(&approval).unwrap_err().contains("changed"));
+        assert_eq!(fs::read(f.0.join("gateway.json")).unwrap(), compact);
+        let plan = Plan::prepare(&f.0, &Some(config.clone()), updated.clone()).unwrap();
+        let approval = plan.approval();
+        let guard = super::super::telegram_config::configuration_lock(&f.0).unwrap();
+        assert!(plan.apply(&approval).is_err());
+        drop(guard);
+        let plan = Plan::prepare(&f.0, &Some(config.clone()), updated.clone()).unwrap();
+        let approval = plan.approval();
+        let guard = lock(&f.0).unwrap();
+        assert!(
+            plan.apply(&approval)
+                .unwrap_err()
+                .contains("gateway update")
+        );
+        drop(guard);
+        layouts::write_private(&f.0.join("gateway.json"), &original).unwrap();
+        save(&f.0, &Some(config.clone()), &updated).unwrap();
+        let backup = f.0.join(format!(
+            "gateway.backup-{:x}.json",
+            Sha256::digest(&original)
+        ));
+        assert_eq!(fs::read(backup).unwrap(), original);
+        layouts::write_private(&f.0.join("cutover-retired.json"), b"{}").unwrap();
+        let before = fs::read(f.0.join("gateway.json")).unwrap();
+        assert!(
+            save(&f.0, &Some(updated), &config)
+                .unwrap_err()
+                .contains("retired")
+        );
+        assert_eq!(fs::read(f.0.join("gateway.json")).unwrap(), before);
+    }
+    #[test]
+    fn field_edits_preserve_enable_state_and_enforce_supported_pairs_and_byte_budget() {
+        let f = Fixture::new();
+        let mut config = f.config();
+        config.enabled = false;
+        for (key, value) in [
+            ("provider", "codex"),
+            ("endpoint", "http://localhost:8999/v1"),
+            ("model", "updated-model"),
+            ("credential_file", f.0.join("new-key").to_str().unwrap()),
+        ] {
+            assert!(!config.set(key, value).unwrap().enabled);
+        }
+        let changed = config.set("provider", "codex").unwrap();
+        assert_eq!(changed.format, Format::OpenaiResponses);
+        assert_eq!(changed.harness, "codex");
+        assert!(config.set("provider", "cursor").is_err());
+        for url in [
+            "https://example.invalid ",
+            "https://example.invalid\n",
+            "https://example.invalid\t/v1",
+        ] {
+            assert!(config.set("endpoint", url).is_err());
+        }
+        let mut oversized = config.clone();
+        oversized.credential_file = PathBuf::from(format!("/{}", "x".repeat(17000)));
+        assert!(oversized.encode().unwrap_err().contains("16 KiB"));
+        assert!(
+            Config::parse(&vec![b' '; 16385])
+                .unwrap_err()
+                .contains("16 KiB")
+        );
+        let example: Config =
+            serde_json::from_slice(include_bytes!("../../../../config/gateway.example.json"))
+                .unwrap();
+        example.validate().unwrap();
+        assert!(!example.enabled);
     }
     #[test]
     fn gateway_wrap_is_credential_free_and_documented_overrides_are_child_only() {
@@ -483,6 +726,6 @@ mod tests {
 }
 
 #[cfg(windows)]
-fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+pub(crate) fn private_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     layouts::read_private_limit(path, limit)
 }

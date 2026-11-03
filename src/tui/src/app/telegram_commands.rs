@@ -479,24 +479,43 @@ struct Claim {
 const SCHEMA: &str = "PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS telegram_controls(token TEXT PRIMARY KEY,issue_key TEXT NOT NULL UNIQUE,claim TEXT NOT NULL,expires_ms INTEGER NOT NULL,state TEXT NOT NULL,result TEXT); CREATE INDEX IF NOT EXISTS telegram_controls_expiry ON telegram_controls(expires_ms,state);";
 pub struct CallbackStore {
     con: Connection,
+    ttl_ms: u64,
 }
 impl CallbackStore {
     /// Caller supplies a private owned connection. No ambient file paths are opened.
     pub fn from_connection(con: Connection) -> Result<Self> {
-        con.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|_| "Callback store unavailable")?;
+        Self::from_connection_configured(con, &Default::default())
+    }
+    pub fn from_connection_configured(
+        con: Connection,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
+        con.busy_timeout(std::time::Duration::from_millis(
+            settings.callback_busy_timeout_ms,
+        ))
+        .map_err(|_| "Callback store unavailable")?;
         con.execute_batch(SCHEMA)
             .map_err(|_| "Cannot initialize callback store")?;
-        Ok(Self { con })
+        Ok(Self {
+            con,
+            ttl_ms: settings.callback_ttl_ms,
+        })
     }
     pub fn memory() -> Result<Self> {
         Self::from_connection(
             Connection::open_in_memory().map_err(|_| "Cannot initialize callback store")?,
         )
     }
+    pub fn memory_configured(settings: &super::telegram_runtime::Settings) -> Result<Self> {
+        Self::from_connection_configured(
+            Connection::open_in_memory().map_err(|_| "Cannot initialize callback store")?,
+            settings,
+        )
+    }
     fn issue(&mut self, caller: &Caller, claim: Claim, now: u64) -> Result<String> {
         let expires = i64::try_from(
-            now.checked_add(5 * 60 * 1000)
+            now.checked_add(self.ttl_ms)
                 .ok_or("Invalid callback time")?,
         )
         .map_err(|_| "Invalid callback time")?;
@@ -1085,14 +1104,10 @@ impl NativeOperations {
             roots.push(path.into());
         }
         let mut snapshot = super::inventory::collect(&self.config, &self.terminals, &roots);
-        super::hook_runtime::enrich_native_sessions(
-            &self.directory,
-            &mut snapshot,
-            &self.terminals,
-        )
-        .map_err(
-            |_| "Native conversation discovery could not be verified; inspect hook diagnostics",
-        )?;
+        super::session_actions::enrich_sessions(&self.directory, &mut snapshot, &self.terminals)
+            .map_err(
+                |_| "Native conversation discovery could not be verified; inspect hook diagnostics",
+            )?;
         // Existing sessions can predate hook enrollment. Use the same verified
         // native process/session observation as the hook installer, never a title.
         let store = super::session_actions::SessionStore {
@@ -1307,7 +1322,11 @@ impl Operations for NativeOperations {
         if caller.scope.instance != self.instance {
             return Err("Stream instance mismatch".into());
         }
-        super::telegram_stream::Store::open(&self.directory)?.control(caller, setting)
+        let config = super::telegram_config::ServiceConfig::load(
+            &self.directory.join("telegram-service.json"),
+        )?;
+        super::telegram_stream::Store::open_configured(&self.directory, &config.runtime)?
+            .control(caller, setting)
     }
 
     fn prepare_session_rename(
@@ -1437,6 +1456,7 @@ impl NativeOperations {
             .collect())
     }
     fn execute_native(&mut self, action: &Action, target: &Target) -> Result<String> {
+        self.terminals.apply_settings(&self.config.runtime)?;
         use super::session_actions::{LaunchRequest, SaveRequest, SessionStore};
         use crate::{
             adapters::{
@@ -1466,7 +1486,7 @@ impl NativeOperations {
                 let config=super::telegram_config::ServiceConfig::load(&self.directory.join("telegram-service.json"))?;
                 if !config.hook_bindings.contains(&plan.binding){return Err("Stream recipient binding changed".into());}
                 let head=super::diagnostics::with_database(&self.directory.join("delivery.sqlite3"),|con|con.query_row("SELECT COALESCE(MAX(id),0) FROM inbox WHERE channel='hooks' AND bot=?",[&self.instance],|r|r.get::<_,i64>(0)).map_err(|_|"Cannot inspect stream start boundary".into()))?.ok_or("Hook journal unavailable")?;
-                super::telegram_stream::Store::open(&self.directory)?.start(plan,head)
+                super::telegram_stream::Store::open_configured(&self.directory, &config.runtime)?.start(plan,head)
             }
 
             Action::SessionRename(plan) => {
@@ -1552,7 +1572,7 @@ impl NativeOperations {
             }
             Action::CheckpointList => {
                 let rows = store
-                    .list()?
+                    .list_with_settings(&self.config.runtime)?
                     .into_iter()
                     .filter(|row| {
                         row.checkpoint.source.as_ref().is_some_and(|s| {
@@ -1594,7 +1614,7 @@ impl NativeOperations {
             Action::CheckpointRemove(key)
             | Action::CheckpointResume(key)
             | Action::CheckpointFork(key) => {
-                let row = store.get(key)?;
+                let row = store.get_with_settings(key, &self.config.runtime)?;
                 if !row.checkpoint.source.as_ref().is_some_and(|source| {
                     source.backend == target.terminal.backend
                         && source.server == target.terminal.endpoint
@@ -1604,7 +1624,7 @@ impl NativeOperations {
                     return Err("Checkpoint does not belong to this terminal binding".into());
                 }
                 if matches!(action, Action::CheckpointRemove(_)) {
-                    store.remove(key)?;
+                    store.remove_with_settings(key, &self.config.runtime)?;
                     return Ok(
                         "Checkpoint reference removed; native session history is unchanged".into(),
                     );
@@ -2757,6 +2777,66 @@ mod tests {
                 .revision,
             3
         );
+    }
+    #[test]
+    fn configured_confirmation_lifetime_and_storage_wait_do_not_revive_saved_claims() {
+        let (mut dispatcher, mut caller, mut routes, mut operations) = fixture();
+        let mut settings = super::super::telegram_runtime::Settings {
+            callback_ttl_ms: 1000,
+            callback_busy_timeout_ms: 7,
+            ..Default::default()
+        };
+        dispatcher.callbacks = CallbackStore::memory_configured(&settings).unwrap();
+        assert_eq!(
+            dispatcher
+                .callbacks
+                .con
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        let reply = dispatcher
+            .command(
+                &caller,
+                Command::Interrupt,
+                &mut routes,
+                &mut operations,
+                100,
+            )
+            .unwrap();
+        let token = reply.buttons[0][0].callback_data.clone();
+        assert!(dispatcher.callbacks.peek(&caller, &token, 1099).is_ok());
+        let con = dispatcher.callbacks.con;
+        settings.callback_ttl_ms = 2000;
+        dispatcher = Dispatcher {
+            callbacks: CallbackStore::from_connection_configured(con, &settings).unwrap(),
+        };
+        assert!(
+            dispatcher
+                .callback(&caller, &token, &mut routes, &mut operations, 1100)
+                .unwrap_err()
+                .contains("expired")
+        );
+        assert_eq!(operations.effects, 0);
+        caller.event_id = "new-issue".into();
+        let reply = dispatcher
+            .command(
+                &caller,
+                Command::Interrupt,
+                &mut routes,
+                &mut operations,
+                1200,
+            )
+            .unwrap();
+        let token = &reply.buttons[0][0].callback_data;
+        assert!(dispatcher.callbacks.peek(&caller, token, 3199).is_ok());
+        assert!(
+            dispatcher
+                .callback(&caller, token, &mut routes, &mut operations, 3200)
+                .unwrap_err()
+                .contains("expired")
+        );
+        assert_eq!(operations.effects, 0);
     }
     #[test]
     fn confirmation_consumption_survives_restart_and_grant_revocation() {

@@ -109,8 +109,19 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn from_env() -> Self {
-        Self::from_vars(|name| std::env::var(name).ok())
+    pub fn from_env(settings: &daedalus_tui::app::interface_settings::InterfaceSettings) -> Self {
+        Self::from_settings(settings, |name| std::env::var(name).ok())
+    }
+    pub fn from_settings(
+        settings: &daedalus_tui::app::interface_settings::InterfaceSettings,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        let mut theme =
+            Self::from_vars(|name| get(name).or_else(|| settings.environment_default(name)));
+        theme.color &= settings.colors;
+        theme.truecolor &= theme.color;
+        theme.backdrop &= theme.color;
+        theme
     }
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Self {
         let set = |name| get(name).is_some_and(|v| !v.is_empty());
@@ -496,6 +507,47 @@ mod tests {
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "1")]).screensaver, 3);
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "600")]).screensaver, 600);
         assert_eq!(theme(&[("DAEDALUS_SCREENSAVER", "soon")]).screensaver, 15);
+    }
+    #[test]
+    fn saved_display_preferences_respect_environment_and_terminal_capabilities() {
+        use daedalus_tui::app::interface_settings::InterfaceSettings;
+        let settings = InterfaceSettings {
+            icons: "ascii".into(),
+            reduced_motion: true,
+            screensaver_seconds: 45,
+            splash: false,
+            ..InterfaceSettings::default()
+        };
+        let saved = Theme::from_settings(&settings, |name| {
+            (name == "COLORTERM").then(|| "truecolor".into())
+        });
+        assert!(saved.ascii && saved.reduced_motion);
+        assert!(!saved.splash && !saved.backdrop);
+        assert_eq!(saved.screensaver, 45);
+        let overridden = Theme::from_settings(&settings, |name| match name {
+            "COLORTERM" => Some("truecolor".into()),
+            "DAEDALUS_ICONS" => Some("unicode".into()),
+            "DAEDALUS_REDUCED_MOTION" => Some("0".into()),
+            "DAEDALUS_SCREENSAVER" => Some("0".into()),
+            _ => None,
+        });
+        assert!(!overridden.ascii && !overridden.reduced_motion);
+        assert!(overridden.backdrop);
+        assert_eq!(overridden.screensaver, 0);
+        let plain = InterfaceSettings {
+            colors: false,
+            ..settings
+        };
+        let plain = Theme::from_settings(&plain, |name| {
+            (name == "COLORTERM").then(|| "truecolor".into())
+        });
+        assert!(!plain.color && !plain.truecolor && !plain.backdrop);
+        let no_color = Theme::from_settings(&InterfaceSettings::default(), |name| match name {
+            "NO_COLOR" => Some("1".into()),
+            "COLORTERM" => Some("truecolor".into()),
+            _ => None,
+        });
+        assert!(!no_color.color && !no_color.backdrop);
     }
     #[test]
     fn ascii_icons_and_branches_are_single_ascii_cells() {

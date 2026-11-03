@@ -291,7 +291,14 @@ pub fn create(
         return Err("Project backend does not match its selected server".into());
     }
     if backend == Backend::Native {
-        let pane = crate::adapters::native::start(launch, name, name)?;
+        let pane = crate::adapters::native::start(
+            launch,
+            name,
+            name,
+            adapter.native_launch_cols,
+            adapter.native_launch_rows,
+            adapter.native_scrollback_rows,
+        )?;
         return Ok(receipt(
             ReceiptState::Accepted,
             "Native workspace and terminal started",
@@ -592,6 +599,9 @@ impl WorkspaceRequest {
         environment: &BTreeMap<String, String>,
         directory: &Path,
     ) -> Result<Receipt> {
+        let mut adapter = adapter.clone();
+        adapter.apply_settings(&config.runtime)?;
+        let adapter = &adapter;
         match self {
             Self::Create {
                 backend,

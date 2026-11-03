@@ -9,11 +9,23 @@ use std::{
     path::PathBuf,
 };
 
-pub const HELP: &str = "Daedalus configuration\n\n  daedalus config init --config-dir ABS --workspace ABS [--apply]\n  daedalus config import --config-dir ABS --from ABS [--apply]\n  daedalus config validate --from ABS\n  daedalus config import-instance --config-dir NEW_ABS --from OLD_DIR_ABS [--credentials] [--apply]\n\nImport-instance stages settings, checkpoints, layouts, legacy routes and SQLite\nsnapshots in a separate instance. Telegram tokens require --credentials. Polling\noffsets and permissions remain proposals for cutover; no service starts.\n\nInit and import print a JSON preview unless --apply is supplied. Existing\nconfiguration directories must be private (0700 on Unix). Import currently\nhandles portable control.json settings only. It does not migrate routes,\ncheckpoints, layouts, delivery databases, tokens, or custom hooks, and does\nnot install dependencies or sign in to harness accounts.\n";
+pub const HELP: &str = concat!(
+    "Daedalus configuration\n\n  daedalus config init --config-dir ABS --workspace ABS [--apply]\n  daedalus config import --config-dir ABS --from ABS [--apply]\n  daedalus config validate --from ABS\n  daedalus config import-instance --config-dir NEW_ABS --from OLD_DIR_ABS [--credentials] [--apply]\n\nImport-instance stages settings, checkpoints, layouts, viewer history, legacy routes\nand SQLite snapshots in a separate instance. Telegram, memory and gateway credential files\nrequire --credentials. Native harness sign-in files are not copied. Polling\noffsets and permissions remain proposals for cutover; no service starts.\n\nInit and import print a JSON preview unless --apply is supplied. Existing\nconfiguration directories must be private (0700 on Unix). Import currently\nhandles portable control.json settings only. It does not migrate routes,\ncheckpoints, layouts, delivery databases, tokens, or custom hooks, and does\nnot install dependencies or sign in to harness accounts.\n",
+    "\nInstance, interface, runtime and native profile settings:\n  daedalus config show --config-dir ABS\n  daedalus config set --config-dir ABS --key SETTING --value VALUE [--apply]\n\nconfig show lists saved values and editable settings. Instance lists use JSON arrays,\nmetadata bindings use a JSON object with unique keys, and null clears a Telegram hint.\nThese portable hints do not change service identities, credentials or grants. profiles.TOOL accepts an existing\nabsolute directory, or inherit to clear its saved override. config set prints the exact\nold/new value and a file preview; --apply saves with a backup. Settings edited from\nanother process apply on the next launch or instance reopen.\n"
+);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
+    Show {
+        directory: PathBuf,
+    },
+    Set {
+        directory: PathBuf,
+        key: String,
+        value: String,
+        apply: bool,
+    },
     ImportInstance {
         directory: PathBuf,
         source: PathBuf,
@@ -42,6 +54,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         return Ok(Command::Help);
     }
     let verb = args[0].as_str();
+    if matches!(verb, "show" | "set") {
+        return parse_setting_command(args);
+    }
     if !matches!(verb, "init" | "import" | "import-instance" | "validate") {
         return Err("Unknown configuration command; use config --help".into());
     }
@@ -112,8 +127,89 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn parse_setting_command(args: &[String]) -> Result<Command, String> {
+    let mut directory = None;
+    let mut key = None;
+    let mut value = None;
+    let mut apply = false;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        if flag == "--apply" && args[0] == "set" && !apply {
+            apply = true;
+            index += 1;
+            continue;
+        }
+        let slot = match flag {
+            "--config-dir" => &mut directory,
+            "--key" if args[0] == "set" => &mut key,
+            "--value" if args[0] == "set" => &mut value,
+            _ => return Err("Unknown or duplicate settings option".into()),
+        };
+        if slot.is_some() {
+            return Err("Duplicate settings option".into());
+        }
+        index += 1;
+        *slot = Some(
+            args.get(index)
+                .ok_or("Missing settings option value")?
+                .clone(),
+        );
+        index += 1;
+    }
+    let path = directory.ok_or("Missing --config-dir")?;
+    let directory = PathBuf::from(&path);
+    crate::core::layouts::check_path(&directory)
+        .map_err(|_| "Use an absolute configuration path without symlinks or parent traversal")?;
+    if args[0] == "show" {
+        return Ok(Command::Show { directory });
+    }
+    Ok(Command::Set {
+        directory,
+        key: key.ok_or("Missing --key")?,
+        value: value.ok_or("Missing --value")?,
+        apply,
+    })
+}
+
 pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
     let (plan, apply) = match parse(args)? {
+        Command::Show { directory } => {
+            let bytes =
+                super::telegram_config::read_private(&directory.join("control.json"), 1024 * 1024)?
+                    .ok_or("Configuration missing")?;
+            let config = ControlConfig::parse(&bytes)?;
+            return write_json(
+                output,
+                &json!({"configuration":config,"interface_settings":super::interface_settings::SETTINGS,
+                "runtime_settings":super::runtime_settings::SETTINGS,
+                "instance_settings":super::control_settings::FIELDS,
+                "profile_settings":super::config::HARNESSES.iter().map(|tool|json!({"key":format!("profiles.{tool}"),"saved_override":config.profiles.get(*tool),"inherit_value":"inherit","description":"Existing absolute native profile root, or inherit to remove the saved override. Native account files are retained."})).collect::<Vec<_>>(),
+                "note":"Saved settings; matching environment overrides and terminal capabilities still apply."}),
+            );
+        }
+        Command::Set {
+            directory,
+            key,
+            value,
+            apply,
+        } => {
+            let bytes =
+                super::telegram_config::read_private(&directory.join("control.json"), 1024 * 1024)?
+                    .ok_or("Configuration missing")?;
+            let expected = ControlConfig::parse(&bytes)?;
+            let before = expected.setting_value(&key)?;
+            let updated = expected.with_setting(&key, &value)?;
+            let after = updated.setting_value(&key)?;
+            let plan = SetupPlan::edit_if_current(&directory, &expected, updated)?;
+            let preview =
+                json!({"setting":key,"before":before,"after":after,"configuration":plan.preview});
+            return if apply {
+                write_json(output, &json!({"preview":preview,"result":plan.apply()?}))
+            } else {
+                write_json(output, &json!({"preview":preview}))
+            };
+        }
         Command::ImportInstance {
             directory,
             source,
@@ -269,6 +365,20 @@ mod tests {
             vec!["validate", "--from", "/a", "--from", "/b"],
             vec!["init", "--config-dir", "relative"],
             vec!["import", "--from"],
+            vec!["show", "--apply"],
+            vec!["show", "--config-dir", "/a", "--key", "ui.colors"],
+            vec!["set", "--config-dir", "/a", "--key", "ui.colors"],
+            vec![
+                "set",
+                "--config-dir",
+                "/a",
+                "--key",
+                "ui.colors",
+                "--value",
+                "on",
+                "--apply",
+                "--apply",
+            ],
             vec!["secret-token"],
         ] {
             let error = parse(&args(&input)).unwrap_err();
@@ -339,5 +449,133 @@ mod tests {
         .unwrap_err();
         assert!(!error.contains("secret-token"));
         assert!(output.is_empty());
+    }
+    #[test]
+    fn runtime_edits_preview_apply_back_up_and_preserve_other_settings() {
+        let temp = Temp::new();
+        let directory = temp.0.join("instance");
+        let mut initial = ControlConfig::fresh(&temp.0).unwrap();
+        initial.ui.colors = false;
+        SetupPlan::fresh(&directory, initial.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let path = directory.join("control.json");
+        let before = fs::read(&path).unwrap();
+        let mut command = args(&[
+            "set",
+            "--config-dir",
+            directory.to_str().unwrap(),
+            "--key",
+            "runtime.harness_probe_timeout_ms",
+            "--value",
+            "700",
+        ]);
+        let mut output = vec![];
+        run(&command, &mut output).unwrap();
+        let review: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(review["preview"]["before"], 2000);
+        assert_eq!(review["preview"]["after"], 700);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        command.push("--apply".into());
+        output.clear();
+        run(&command, &mut output).unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            fs::read(result["result"]["backup"].as_str().unwrap()).unwrap(),
+            before
+        );
+        let mut expected = initial;
+        expected.runtime.harness_probe_timeout_ms = 700;
+        assert_eq!(
+            ControlConfig::parse(&fs::read(&path).unwrap()).unwrap(),
+            expected
+        );
+        command[6] = "0".into();
+        output.clear();
+        assert!(run(&command, &mut output).is_err());
+        assert!(output.is_empty());
+        assert_eq!(
+            ControlConfig::parse(&fs::read(&path).unwrap()).unwrap(),
+            expected
+        );
+        run(
+            &args(&["show", "--config-dir", directory.to_str().unwrap()]),
+            &mut output,
+        )
+        .unwrap();
+        let shown: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            shown["runtime_settings"].as_array().unwrap().len(),
+            super::super::runtime_settings::SETTINGS.len()
+        );
+        assert_eq!(
+            shown["configuration"]["runtime"]["harness_probe_timeout_ms"],
+            700
+        );
+    }
+    #[test]
+    fn interface_edits_preview_apply_backup_and_reject_bad_values() {
+        let temp = Temp::new();
+        let directory = temp.0.join("instance");
+        let mut initial = ControlConfig::fresh(&temp.0).unwrap();
+        initial.subscriptions.push("codex".into());
+        SetupPlan::fresh(&directory, initial.clone())
+            .unwrap()
+            .apply()
+            .unwrap();
+        let path = directory.join("control.json");
+        let before = fs::read(&path).unwrap();
+        let mut command = args(&[
+            "set",
+            "--config-dir",
+            directory.to_str().unwrap(),
+            "--key",
+            "ui.preview_interval_ms",
+            "--value",
+            "700",
+        ]);
+        let mut output = Vec::new();
+        run(&command, &mut output).unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(preview["preview"]["before"], 2000);
+        assert_eq!(preview["preview"]["after"], 700);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        command.push("--apply".into());
+        output.clear();
+        run(&command, &mut output).unwrap();
+        let applied: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            fs::read(applied["result"]["backup"].as_str().unwrap()).unwrap(),
+            before
+        );
+        let mut expected = initial;
+        expected.ui.preview_interval_ms = 700;
+        assert_eq!(
+            ControlConfig::parse(&fs::read(&path).unwrap()).unwrap(),
+            expected
+        );
+        let saved = fs::read(&path).unwrap();
+        command[6] = "secret-value".into();
+        output.clear();
+        assert!(
+            !run(&command, &mut output)
+                .unwrap_err()
+                .contains("secret-value")
+        );
+        assert!(output.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        output.clear();
+        run(
+            &args(&["show", "--config-dir", directory.to_str().unwrap()]),
+            &mut output,
+        )
+        .unwrap();
+        let shown: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(shown["configuration"]["ui"]["preview_interval_ms"], 700);
+        assert_eq!(
+            shown["interface_settings"].as_array().unwrap().len(),
+            super::super::interface_settings::SETTINGS.len()
+        );
     }
 }

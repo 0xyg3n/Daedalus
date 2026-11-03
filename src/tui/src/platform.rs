@@ -36,10 +36,14 @@ pub fn random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
 /// Windows environment names are case insensitive, unlike BTreeMap keys.
 /// Keep the same explicit runtime allowlists at each launch boundary.
 pub fn environment() -> std::collections::BTreeMap<String, String> {
+    // Unix permits non-UTF-8 environment bytes. Unrelated entries must not
+    // panic discovery or the TUI; our explicit launch maps accept text only.
+    let text = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)));
     #[cfg(unix)]
-    let values = std::env::vars().collect();
+    let values = text.collect();
     #[cfg(windows)]
-    let mut values: std::collections::BTreeMap<String, String> = std::env::vars()
+    let mut values: std::collections::BTreeMap<String, String> = text
         .map(|(key, value)| (key.to_ascii_uppercase(), value))
         .collect();
     #[cfg(windows)]
@@ -49,4 +53,38 @@ pub fn environment() -> std::collections::BTreeMap<String, String> {
         values.insert("HOME".into(), home);
     }
     values
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt, process::Command};
+    #[test]
+    #[ignore = "isolated child fixture, executed by the non-UTF-8 environment regression"]
+    fn environment_child_fixture() {
+        let values = environment();
+        assert_eq!(
+            values.get("DAEDALUS_TEST_ENV_VALID").map(String::as_str),
+            Some("kept")
+        );
+        assert!(!values.contains_key("DAEDALUS_TEST_ENV_INVALID"));
+    }
+    #[test]
+    fn non_utf8_environment_entries_cannot_crash_discovery() {
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::environment_child_fixture",
+                "--ignored",
+            ])
+            .env("DAEDALUS_TEST_ENV_VALID", "kept")
+            .env("DAEDALUS_TEST_ENV_INVALID", OsString::from_vec(vec![0xff]))
+            .env(OsString::from_vec(vec![b'x', 0xff]), "invalid-name")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "Isolated environment fixture failed"
+        );
+    }
 }

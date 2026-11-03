@@ -329,8 +329,15 @@ impl Terminals {
         let actual = self.verify(parent)?;
         let id = identity(&actual)?;
         if id.backend == Backend::Native {
-            let workspace = field(&actual, "workspace_id").unwrap_or_else(|_| "local".into());
-            let pane = super::native::start(launch, &workspace, "Terminal")?;
+            let workspace = field(&actual, "workspace_id").unwrap_or("local");
+            let pane = super::native::start(
+                launch,
+                workspace,
+                "Terminal",
+                self.native_launch_cols,
+                self.native_launch_rows,
+                self.native_scrollback_rows,
+            )?;
             return Ok(Receipt {
                 state: ReceiptState::Accepted,
                 message: "Native terminal started".into(),

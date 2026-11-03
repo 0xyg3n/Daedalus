@@ -1,7 +1,7 @@
 //! Bounded local discovery. Never return account identities, tokens or raw status output.
 use super::config::ControlConfig;
 use crate::adapters::{harnesses, process};
-use std::{collections::BTreeMap, process::Command, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 #[derive(Clone, Debug)]
 pub struct Detected {
     pub id: String,
@@ -58,18 +58,36 @@ fn detect_with(config: &ControlConfig, environment: &BTreeMap<String, String>) -
                     } else {
                         "Installed · sign-in unverified"
                     };
-                    if let (Some(binary), Some(profile)) = (&binary, &profile) {
+                    if let (Some(binary), Some(_)) = (&binary, &profile) {
                         let args: &[&str] = match tool.id {
                             "codex" => &["login", "status"],
                             "claude" => &["auth", "status", "--json"],
                             _ => &[],
                         };
-                        if !args.is_empty() {
-                            let mut command = Command::new(binary);
-                            command.args(args).env(tool.profile_variable, profile);
-                            if let Ok(result) =
-                                process::run(&mut command, Duration::from_secs(2), 16384)
-                            {
+                        let cwd = environment
+                            .get("HOME")
+                            .or_else(|| environment.get("USERPROFILE"))
+                            .map(String::as_str)
+                            .unwrap_or(&config.agent_home);
+                        if !args.is_empty()
+                            && config.runtime.validate().is_ok()
+                            && let Ok(plan) = harnesses::launch_plan(
+                                &tool,
+                                binary,
+                                Path::new(cwd),
+                                environment,
+                                &config.profiles,
+                            )
+                        {
+                            // Match the native launch environment, including Claude's
+                            // distinction between its default and an explicit profile.
+                            let mut command = plan.command();
+                            command.args(args);
+                            if let Ok(result) = process::run(
+                                &mut command,
+                                Duration::from_millis(config.runtime.harness_probe_timeout_ms),
+                                config.runtime.harness_probe_limit_bytes as usize,
+                            ) {
                                 state = status(
                                     tool.id,
                                     result.status.success(),
@@ -94,6 +112,89 @@ fn detect_with(config: &ControlConfig, environment: &BTreeMap<String, String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn local_probes_obey_saved_budgets_and_native_profile_environment() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        struct Root(std::path::PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut random = [0; 16];
+        crate::platform::random_bytes(&mut random).unwrap();
+        let root = Root(std::env::temp_dir().join(format!(
+            "daedalus-discovery-{:x}",
+            u128::from_le_bytes(random)
+        )));
+        fs::create_dir(&root.0).unwrap();
+        let bin = root.0.join("bin");
+        fs::create_dir(&bin).unwrap();
+        for name in [".codex", ".claude"] {
+            fs::create_dir(root.0.join(name)).unwrap();
+        }
+        let environment = BTreeMap::from([
+            ("HOME".into(), root.0.to_str().unwrap().into()),
+            ("PATH".into(), bin.to_str().unwrap().into()),
+            (
+                "TELEGRAM_BOT_TOKEN".into(),
+                "fixture-secret-must-not-enter-probe".into(),
+            ),
+        ]);
+        let mut config = ControlConfig::fresh(&root.0).unwrap();
+        let write = |name: &str, script: &str| {
+            let path = bin.join(name);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let codex = |config: &ControlConfig| {
+            detect_with(config, &environment)
+                .into_iter()
+                .find(|d| d.id == "codex")
+                .unwrap()
+        };
+        write(
+            "codex",
+            "#!/bin/sh\n[ -z \"${TELEGRAM_BOT_TOKEN-}\" ] || exit 9\n[ \"$1 $2\" = 'login status' ] || exit 8\n/bin/sleep 0.25\nprintf 'Logged in using ChatGPT (private@example.invalid)\\n'\n",
+        );
+        config.runtime.harness_probe_timeout_ms = 100;
+        assert_eq!(codex(&config).status, "Profile found · sign-in unverified");
+        config.runtime.harness_probe_timeout_ms = 2000;
+        assert_eq!(codex(&config).status, "Signed in · native status");
+        write(
+            "codex",
+            &format!(
+                "#!/bin/sh\nprintf 'Logged in using ChatGPT\\n%s' '{}'\n",
+                "x".repeat(1400)
+            ),
+        );
+        config.runtime.harness_probe_limit_bytes = 1024;
+        assert_eq!(codex(&config).status, "Profile found · sign-in unverified");
+        config.runtime.harness_probe_limit_bytes = 4096;
+        assert_eq!(codex(&config).status, "Signed in · native status");
+        write(
+            "claude",
+            "#!/bin/sh\n[ -z \"${TELEGRAM_BOT_TOKEN-}\" ] || exit 9\n[ \"$1 $2 $3\" = 'auth status --json' ] || exit 8\n[ -z \"${CLAUDE_CONFIG_DIR+x}\" ] || exit 7\nprintf '{\"loggedIn\":true}'\n",
+        );
+        let claude = |config: &ControlConfig| {
+            detect_with(config, &environment)
+                .into_iter()
+                .find(|d| d.id == "claude")
+                .unwrap()
+        };
+        assert_eq!(claude(&config).status, "Signed in · native status");
+        let custom = root.0.join("custom");
+        fs::create_dir(&custom).unwrap();
+        config
+            .profiles
+            .insert("claude".into(), custom.to_str().unwrap().into());
+        write(
+            "claude",
+            "#!/bin/sh\n[ \"$CLAUDE_CONFIG_DIR\" = \"$HOME/custom\" ] || exit 7\nprintf '{\"loggedIn\":true}'\n",
+        );
+        assert_eq!(claude(&config).status, "Signed in · native status");
+    }
     #[test]
     fn account_status_never_exposes_native_identity_or_accepts_arbitrary_success() {
         assert_eq!(

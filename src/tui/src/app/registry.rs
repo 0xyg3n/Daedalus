@@ -343,14 +343,58 @@ mod tests {
     #[test]
     fn metadata_matches_reviewed_action_and_navigation_contract() {
         let registry = builtin();
-        assert_eq!(registry.actions.len(), 45);
+        assert_eq!(registry.actions.len(), 51);
         assert_eq!(registry.sections.len(), 11);
-        // Reviewed catalog: release checks replace the redundant install action.
-        // Native-client guidance now includes the built-in backend.
-        // Navigation retains the established action contract.
+        // Add the reviewed interface-settings action to the existing Settings
+        // page; retain all navigation sections and terminal shortcut order.
+        let interface = registry
+            .actions
+            .iter()
+            .find(|a| a.id == "settings.interface")
+            .unwrap();
+        assert_eq!(interface.page, TOOLS);
+        assert_eq!(interface.effects, ["settings"]);
+        let runtime = registry.action("settings.runtime").unwrap();
+        assert_eq!(runtime.page, TOOLS);
+        assert_eq!(runtime.effects, ["settings"]);
+        assert_eq!(runtime.title, "Terminals and discovery");
+        let memory = registry.action("settings.memory").unwrap();
+        assert_eq!(memory.page, TOOLS);
+        assert_eq!(memory.effects, ["settings"]);
+        let dashboard = registry.action("settings.dashboard").unwrap();
+        assert_eq!(dashboard.page, TOOLS);
+        assert_eq!(dashboard.effects, ["settings"]);
+        assert!(super::super::session_menu::available(&dashboard.id));
+        assert!(super::super::session_menu::available("settings.history"));
+        let instance = registry.action("settings.instance").unwrap();
+        assert_eq!(instance.page, TOOLS);
+        assert_eq!(instance.effects, ["settings"]);
+        assert!(super::super::session_menu::available(&instance.id));
+        let existing: Vec<_> = registry
+            .actions
+            .iter()
+            .filter(|a| {
+                ![
+                    "settings.runtime",
+                    "settings.instance",
+                    "settings.memory",
+                    "settings.dashboard",
+                    "settings.history",
+                ]
+                .contains(&a.id.as_str())
+            })
+            .cloned()
+            .map(|mut action| {
+                if action.id=="tools.choose" {
+                    assert_eq!(action.note,"Review installed tools, native account status and saved tool selections.");
+                    action.note="Review installed tools, native account status and automatically selected harnesses.".into();
+                }
+                action
+            })
+            .collect();
         assert_eq!(
-            fingerprint(&registry.actions),
-            "a8fcef39e3f2496db4ce441472166ad0a4680f6205187e2b80e2f3efa68b545b"
+            fingerprint(&existing),
+            "c8aa921082f4da7635825faaf1c54e71900cfa6a0b78c4dd0c4d6a94a3c089de"
         );
         assert_eq!(
             fingerprint(&registry.sections),
@@ -416,7 +460,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.execution == Execution::GuidedAction)
                 .count(),
-            45
+            registry.actions.len()
         );
         for entry in &registry.references {
             assert!(registry.catalog_action(&entry.id).is_none());

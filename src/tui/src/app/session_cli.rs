@@ -141,18 +141,21 @@ pub fn run_with(command: Command, source: &mut impl Source, out: &mut impl Write
     let store = SessionStore {
         directory: command.directory.clone(),
     };
+    let settings = store.checkpoint_settings()?;
     let key = command
         .options
         .get("--key")
         .map(String::as_str)
         .unwrap_or("");
     let value = match command.verb.as_str() {
-        "list" => serde_json::to_value(store.list()?).map_err(|_| "Cannot encode checkpoints")?,
-        "show" => serde_json::to_value(store.get(key)?).map_err(|_| "Cannot encode checkpoint")?,
+        "list" => serde_json::to_value(store.list_with_settings(&settings)?)
+            .map_err(|_| "Cannot encode checkpoints")?,
+        "show" => serde_json::to_value(store.get_with_settings(key, &settings)?)
+            .map_err(|_| "Cannot encode checkpoint")?,
         "remove" | "rm" => {
-            let row = store.get(key)?;
+            let row = store.get_with_settings(key, &settings)?;
             if command.apply {
-                store.remove(key)?;
+                store.remove_with_settings(key, &settings)?;
             }
             json!({"operation":"remove","key":row.key,"applied":command.apply,"native_history_unchanged":true})
         }

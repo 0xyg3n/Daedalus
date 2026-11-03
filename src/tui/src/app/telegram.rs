@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    time::Duration,
 };
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -24,6 +25,30 @@ pub struct Attachment {
     pub sha256: String,
     pub bytes: usize,
     pub name: String,
+}
+fn valid_attachment_extension(extension: &str) -> bool {
+    (1..=10).contains(&extension.len()) && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+impl Attachment {
+    /// The captured private path supplies its storage extension; the display
+    /// name may have been truncated and never supplies filesystem authority.
+    pub(crate) fn relative_path(&self, source: &Path) -> Result<PathBuf> {
+        let valid = (|| {
+            if self.sha256.len() != 64 || !self.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let name = self.path.file_name()?.to_str()?;
+            let (stem, extension) = name.rsplit_once('.')?;
+            if stem != self.sha256
+                || !valid_attachment_extension(extension)
+                || self.path != source.join("attachments").join(name)
+            {
+                return None;
+            }
+            Some(PathBuf::from("attachments").join(name))
+        })();
+        valid.ok_or_else(|| "Attachment reference does not match private content store".into())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frame {
@@ -73,9 +98,7 @@ impl Files for PrivateFiles {
         let extension = name
             .rsplit_once('.')
             .map(|(_, ext)| ext.to_ascii_lowercase())
-            .filter(|ext| {
-                (1..=10).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric())
-            })
+            .filter(|ext| valid_attachment_extension(ext))
             .unwrap_or_else(|| "bin".into());
         let path = self.directory.join(format!("{sha}.{extension}"));
         #[cfg(unix)]
@@ -117,6 +140,7 @@ impl Files for PrivateFiles {
 }
 
 pub struct Engine {
+    settings: super::telegram_runtime::Settings,
     pub journal: Journal,
     pub streams: Option<super::telegram_stream::Store>,
     pub routes: Registry,
@@ -144,6 +168,16 @@ struct Message {
 }
 impl Engine {
     pub fn new(journal: Journal, routes: Registry, instance: &str, bot: i64) -> Result<Self> {
+        Self::configured(journal, routes, instance, bot, &Default::default())
+    }
+    pub fn configured(
+        journal: Journal,
+        routes: Registry,
+        instance: &str,
+        bot: i64,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
         if bot <= 0 {
             return Err("Expected a positive Telegram bot ID".into());
         }
@@ -155,6 +189,7 @@ impl Engine {
         .validate()
         .map_err(|e| e.to_string())?;
         Ok(Self {
+            settings: settings.clone(),
             journal,
             streams: None,
             routes,
@@ -204,7 +239,9 @@ impl Engine {
     }
     pub fn poll(&mut self, api: &mut impl Api, now: f64) -> Result<usize> {
         let offset = self.cursor()?;
-        let updates = api.updates(offset, 50).map_err(|e| e.to_string())?;
+        let updates = api
+            .updates(offset, self.settings.poll_timeout_seconds)
+            .map_err(|e| e.to_string())?;
         self.admit_updates(updates, now)
     }
     /// Only durable admission advances this offset. A poll worker must wait for
@@ -239,6 +276,9 @@ impl Engine {
             }
             reviewed.push(serde_json::to_value(binding).map_err(|_| "Invalid hook recipient")?);
         }
+        self.journal
+            .configure_hook_starts(&self.instance, &reviewed)
+            .map_err(|e| e.to_string())?;
         self.hook_registrations = registrations;
         self.hook_bindings = reviewed;
         Ok(())
@@ -264,7 +304,7 @@ impl Engine {
             if serde_json::to_vec(&update)
                 .map_err(|_| "Invalid Telegram update")?
                 .len()
-                > 1024 * 1024
+                > self.settings.update_limit_bytes as usize
             {
                 return Err("Telegram update exceeds limit".into());
             }
@@ -321,7 +361,7 @@ impl Engine {
             .as_str()
             .or_else(|| message["caption"].as_str())
             .unwrap_or("");
-        if text.len() > 60_000 || text.contains('\0') {
+        if text.len() as u64 > self.settings.input_text_limit_bytes || text.contains('\0') {
             return Err("Telegram input exceeds feeder limit".into());
         }
         let listen = self
@@ -358,9 +398,9 @@ impl Engine {
         let file = if let Some(document) = message.get("document") {
             if document["file_size"]
                 .as_u64()
-                .is_some_and(|size| size > FILE_LIMIT as u64)
+                .is_some_and(|size| size > self.settings.file_limit_bytes)
             {
-                return Err("Telegram attachment exceeds 20 MiB".into());
+                return Err("Telegram attachment exceeds configured size limit".into());
             }
             Some((
                 document["file_id"]
@@ -379,7 +419,7 @@ impl Engine {
                 .filter(|p| {
                     p["file_size"]
                         .as_u64()
-                        .is_none_or(|s| s <= FILE_LIMIT as u64)
+                        .is_none_or(|s| s <= self.settings.file_limit_bytes)
                 })
                 .max_by_key(|p| {
                     p["width"]
@@ -427,7 +467,7 @@ impl Engine {
                 &self.bot.to_string(),
                 &["admitted"],
                 self.controls_after,
-                100,
+                self.settings.control_batch_limit as usize,
             )
             .map_err(|e| e.to_string())?;
         if events.is_empty() {
@@ -642,7 +682,7 @@ impl Engine {
         }
         Ok(())
     }
-    /// Stages at most 100 admitted inputs. Downloads occur only after grants and
+    /// Stages a configured bounded page of admitted inputs. Downloads occur only after grants and
     /// exact routes validate; deterministic enqueue keys survive process failure.
     pub fn stage(
         &mut self,
@@ -659,7 +699,7 @@ impl Engine {
                 &self.bot.to_string(),
                 &["admitted"],
                 self.stage_after,
-                100,
+                self.settings.stage_batch_limit as usize,
             )
             .map_err(|e| e.to_string())?;
         if events.is_empty() {
@@ -777,6 +817,16 @@ impl Engine {
                     }
                     Err(_) => continue, // Read-only download may retry on a later pass.
                 };
+                if bytes.len() as u64 > self.settings.file_limit_bytes {
+                    self.journal
+                        .event_state(
+                            event.id,
+                            "failed",
+                            Some("Attachment exceeds configured size limit"),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    continue;
+                }
                 Some(files.save(name, &bytes)?)
             } else {
                 None
@@ -814,7 +864,7 @@ impl Engine {
             self.journal
                 .event_state(event.id, "handled", None)
                 .map_err(|e| e.to_string())?;
-            if self.feedback_acks.len() < 100 {
+            if self.feedback_acks.len() < self.settings.feedback_ack_buffer_limit as usize {
                 self.feedback_acks.push(frame.into());
             }
             count += 1;
@@ -875,7 +925,7 @@ impl Engine {
                 &format!("telegram:{}:{chat}", self.bot),
                 "telegram",
                 now,
-                90.0,
+                self.settings.outbound_lease_ms as f64 / 1000.0,
             )
             .map_err(|e| e.to_string())?
         else {
@@ -964,6 +1014,18 @@ impl Engine {
         }
         true
     }
+    pub(crate) fn outbound_retry_delay(
+        &self,
+        result: &std::result::Result<Value, TransportError>,
+    ) -> Option<Duration> {
+        match result {
+            Err(TransportError::NotSent) => {
+                Some(Duration::from_millis(self.settings.outbound_retry_ms))
+            }
+            Err(TransportError::RateLimited(delay)) => Some(Duration::from_secs((*delay).max(1))),
+            _ => None,
+        }
+    }
     pub fn complete_send(
         &mut self,
         row: &Delivery,
@@ -995,28 +1057,26 @@ impl Engine {
                 )
                 .map_err(|e| e.to_string());
         }
-        let (state, receipt, error, retry) = match result {
-            Ok(receipt) => ("delivered", Some(receipt), None, 0.0),
+        let retry = self
+            .outbound_retry_delay(&result)
+            .map_or(0.0, |delay| delay.as_secs_f64());
+        let (state, receipt, error) = match result {
+            Ok(receipt) => ("delivered", Some(receipt), None),
             Err(TransportError::NotSent) => (
                 "not_sent",
                 None,
                 Some("Connection failed before submission"),
-                5.0,
             ),
-            Err(TransportError::RateLimited(delay)) => {
-                ("not_sent", None, Some("Telegram rate limit"), delay as f64)
-            }
+            Err(TransportError::RateLimited(_)) => ("not_sent", None, Some("Telegram rate limit")),
             Err(TransportError::Invalid(_) | TransportError::Rejected(_)) => (
                 "draft_blocked",
                 None,
                 Some("Telegram rejected this message"),
-                0.0,
             ),
             Err(TransportError::Uncertain) => (
                 "unknown",
                 None,
                 Some("Telegram outcome unknown; reconciliation required"),
-                0.0,
             ),
         };
         self.journal
@@ -1042,7 +1102,13 @@ impl Engine {
         let destination = serde_json::to_string(target).map_err(|_| "Invalid terminal identity")?;
         let Some(row) = self
             .journal
-            .begin("inbound", &destination, "feeder", clock(), 90.0)
+            .begin(
+                "inbound",
+                &destination,
+                "feeder",
+                clock(),
+                self.settings.inbound_lease_ms as f64 / 1000.0,
+            )
             .map_err(|e| e.to_string())?
         else {
             return Ok(false);
@@ -1066,20 +1132,21 @@ impl Engine {
                 .is_some_and(|route| {
                     route.terminal == frame.terminal && route.revision == frame.route_revision
                 });
-        let verified_live = matches!(&live, Ok(ids) if ids.iter().filter(|id| *id == &frame.terminal).count() == 1);
+        let verified_live =
+            matches!(&live, Ok(ids) if ids.iter().filter(|id| *id == &frame.terminal).count() == 1);
         let (state, receipt, error, retry) = if live.is_err() {
             (
                 "not_sent",
                 None,
                 Some("Terminal discovery failed before submission"),
-                2.0,
+                self.settings.feeder_retry_ms as f64 / 1000.0,
             )
         } else if route_bound && !verified_live {
             (
                 "not_sent",
                 None,
                 Some("Waiting for the restarted terminal session to verify; input remains queued"),
-                2.0,
+                self.settings.feeder_retry_ms as f64 / 1000.0,
             )
         } else if !route_bound {
             (
@@ -1097,7 +1164,7 @@ impl Engine {
                     "not_sent",
                     None,
                     Some("Waiting for verified agent readiness; input remains queued"),
-                    2.0,
+                    self.settings.feeder_retry_ms as f64 / 1000.0,
                 ),
                 Ok(Submission::Unavailable) => (
                     "draft_blocked",
@@ -1179,6 +1246,7 @@ mod tests {
         updates: Vec<Value>,
         sent: usize,
         downloads: usize,
+        poll_timeout: u64,
         outcome: std::result::Result<Value, TransportError>,
         bot: i64,
     }
@@ -1188,6 +1256,7 @@ mod tests {
                 updates: vec![],
                 sent: 0,
                 downloads: 0,
+                poll_timeout: 0,
                 outcome: Ok(json!({"message_id":1,"chat_id":42})),
                 bot: 123,
             }
@@ -1197,7 +1266,12 @@ mod tests {
         fn get_me(&mut self) -> crate::adapters::telegram::Result<Value> {
             Ok(json!({"id":self.bot,"is_bot":true,"username":"example_bot"}))
         }
-        fn updates(&mut self, _: i64, _: u64) -> crate::adapters::telegram::Result<Vec<Value>> {
+        fn updates(
+            &mut self,
+            _: i64,
+            timeout: u64,
+        ) -> crate::adapters::telegram::Result<Vec<Value>> {
+            self.poll_timeout = timeout;
             Ok(self.updates.clone())
         }
         fn send_text(
@@ -1255,6 +1329,208 @@ mod tests {
                 name: name.into(),
             })
         }
+    }
+    #[test]
+    fn configured_control_batch_limits_candidates_without_replaying_responses() {
+        use super::super::telegram_commands::{CallbackStore, Dispatcher};
+        let (mut engine, mut api, feeder) = fixture();
+        engine.settings.control_batch_limit = 1;
+        let mut controls = Controls {
+            terminal: engine.routes.terminal(&feeder.target).unwrap().unwrap(),
+            effects: 0,
+        };
+        let mut dispatcher = Dispatcher {
+            callbacks: CallbackStore::memory().unwrap(),
+        };
+        engine
+            .admit_updates(vec![update(1, "/status"), update(2, "/status")], 1.0)
+            .unwrap();
+        assert_eq!(
+            engine
+                .stage_controls(&mut dispatcher, &mut controls, &mut api, 2.0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .journal
+                .events_page("telegram", "123", &["admitted"], 0, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            engine
+                .stage_controls(&mut dispatcher, &mut controls, &mut api, 3.0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(engine.journal.rows().unwrap().len(), 2);
+        assert_eq!(
+            engine
+                .stage_controls(&mut dispatcher, &mut controls, &mut api, 4.0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.journal.rows().unwrap().len(), 2);
+        assert_eq!(controls.effects, 0);
+    }
+    #[test]
+    fn configured_engine_bounds_poll_input_media_and_staging_without_reading_credentials() {
+        let (original, mut api, mut feeder) = fixture();
+        let settings = super::super::telegram_runtime::Settings {
+            poll_timeout_seconds: 3,
+            stage_batch_limit: 1,
+            input_text_limit_bytes: 3,
+            update_limit_bytes: 1024,
+            feedback_ack_buffer_limit: 1,
+            file_limit_bytes: 4,
+            ..Default::default()
+        };
+        let mut engine =
+            Engine::configured(original.journal, original.routes, "example", 123, &settings)
+                .unwrap();
+        engine.start(&mut api).unwrap();
+        api.updates = vec![update(1, "one"), update(2, "two")];
+        assert_eq!(engine.poll(&mut api, 1.0).unwrap(), 2);
+        assert_eq!(api.poll_timeout, 3);
+        assert_eq!(
+            engine
+                .stage(&mut api, &mut feeder, &mut MockFiles, 2.0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .stage(&mut api, &mut feeder, &mut MockFiles, 3.0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(engine.journal.rows().unwrap().len(), 2);
+        assert_eq!(engine.feedback_acks.len(), 1);
+        let photo = json!({"update_id":3,"message":{"message_id":4,"chat":{"id":42,"type":"private"},"from":{"id":42,"is_bot":false},"photo":[{"file_id":"small","file_size":4,"width":10,"height":10},{"file_id":"large","file_size":1000,"width":100,"height":100}]}});
+        assert_eq!(
+            engine.parse(&photo).unwrap().unwrap().file.unwrap().0,
+            "small"
+        );
+        engine.admit_updates(vec![photo], 4.0).unwrap();
+        assert_eq!(
+            engine
+                .stage(&mut api, &mut feeder, &mut MockFiles, 5.0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(api.downloads, 1);
+        assert_eq!(engine.journal.rows().unwrap().len(), 3);
+        let mut too_large = update(4, "bad");
+        too_large["extra"] = json!("x".repeat(1100));
+        let cursor = engine.cursor().unwrap();
+        assert!(engine.admit_updates(vec![too_large], 6.0).is_err());
+        assert_eq!(engine.cursor().unwrap(), cursor);
+        engine.admit_updates(vec![update(4, "four")], 6.0).unwrap();
+        assert_eq!(
+            engine
+                .stage(&mut api, &mut feeder, &mut MockFiles, 7.0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.journal.rows().unwrap().len(), 3);
+        engine.settings.file_limit_bytes = 3;
+        let missing_size = json!({"update_id":5,"message":{"message_id":6,"chat":{"id":42,"type":"private"},"from":{"id":42,"is_bot":false},"document":{"file_id":"file","file_name":"fixture"}}});
+        engine.admit_updates(vec![missing_size], 8.0).unwrap();
+        assert_eq!(
+            engine
+                .stage(&mut api, &mut feeder, &mut MockFiles, 9.0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.journal.rows().unwrap().len(), 3);
+    }
+    #[test]
+    fn configured_attempt_leases_retries_and_late_receipts_keep_exact_ownership() {
+        let (original, mut api, mut feeder) = fixture();
+        let settings = super::super::telegram_runtime::Settings {
+            outbound_lease_ms: 1200,
+            inbound_lease_ms: 1500,
+            outbound_retry_ms: 700,
+            feeder_retry_ms: 400,
+            ..Default::default()
+        };
+        let mut engine =
+            Engine::configured(original.journal, original.routes, "example", 123, &settings)
+                .unwrap();
+        engine.start(&mut api).unwrap();
+        engine
+            .enqueue_text(42, "first", None, "first", 1.0)
+            .unwrap();
+        let Outbound::Ready(row) = engine.claim_send(42, 2.0).unwrap() else {
+            panic!("Missing configured attempt");
+        };
+        assert_eq!(row.lease_until, Some(3.2));
+        engine
+            .complete_send(&row, Err(TransportError::NotSent), 2.1)
+            .unwrap();
+        assert!(matches!(
+            engine.claim_send(42, 2.79).unwrap(),
+            Outbound::Empty
+        ));
+        let Outbound::Ready(retry) = engine.claim_send(42, 2.81).unwrap() else {
+            panic!("Configured retry not ready");
+        };
+        assert_ne!(retry.lease_token, row.lease_token);
+        assert!(
+            engine
+                .complete_send(&row, Ok(json!({"chat_id":42,"message_id":1})), 3.0)
+                .is_err()
+        );
+        engine
+            .complete_send(&retry, Ok(json!({"chat_id":42,"message_id":1})), 100.0)
+            .unwrap();
+        assert_eq!(engine.journal.rows().unwrap()[0].state, "delivered");
+        engine
+            .admit_updates(vec![update(1, "request")], 101.0)
+            .unwrap();
+        engine
+            .stage(&mut api, &mut feeder, &mut MockFiles, 102.0)
+            .unwrap();
+        let target = feeder.target.clone();
+        feeder.outcome = Submission::Busy;
+        engine.feed_one(&mut feeder, &target, || 103.0).unwrap();
+        let row = engine
+            .journal
+            .rows()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.direction == "inbound")
+            .unwrap();
+        assert_eq!(row.state, "retryable");
+        feeder.outcome = Submission::Accepted(json!({"submitted":true}));
+        assert!(!engine.feed_one(&mut feeder, &target, || 103.39).unwrap());
+        let ticks = std::cell::Cell::new(0);
+        assert!(
+            engine
+                .feed_one(&mut feeder, &target, || {
+                    let i = ticks.get();
+                    ticks.set(i + 1);
+                    if i == 0 { 104.0 } else { 105.6 }
+                })
+                .unwrap_err()
+                .contains("Expired")
+        );
+        assert_eq!(
+            engine
+                .journal
+                .rows()
+                .unwrap()
+                .iter()
+                .find(|r| r.direction == "inbound")
+                .unwrap()
+                .state,
+            "unknown"
+        );
+        let submitted = feeder.sends;
+        assert!(!engine.feed_one(&mut feeder, &target, || 106.0).unwrap());
+        assert_eq!(feeder.sends, submitted);
     }
     #[test]
     fn removing_exact_hook_binding_blocks_already_queued_output() {
@@ -1414,6 +1690,42 @@ mod tests {
             Outbound::Blocked
         ));
         assert_eq!(api.sent, 0);
+    }
+    #[test]
+    fn elapsed_retry_release_does_not_restore_revoked_recipient_authority() {
+        use super::super::telegram_commands::{CallbackStore, Dispatcher};
+        let (mut engine, mut api, feeder) = fixture();
+        let mut operations = Controls {
+            terminal: engine.routes.terminal(&feeder.target).unwrap().unwrap(),
+            effects: 0,
+        };
+        let mut dispatcher = Dispatcher {
+            callbacks: CallbackStore::memory().unwrap(),
+        };
+        engine
+            .admit_updates(vec![update(1, "/capture")], 1.0)
+            .unwrap();
+        engine
+            .stage_controls(&mut dispatcher, &mut operations, &mut api, 2.0)
+            .unwrap();
+        api.outcome = Err(TransportError::NotSent);
+        engine.send_one(&mut api, 42, || 2.5).unwrap();
+        let row = engine.journal.rows().unwrap().remove(0);
+        assert_eq!(row.state, "retryable");
+        engine
+            .routes
+            .set_grant(&engine.scope(42), "42", &[])
+            .unwrap();
+        engine
+            .journal
+            .release_outbound_retry(&row.delivery_id, row.lease_token.as_deref().unwrap())
+            .unwrap();
+        assert!(matches!(
+            engine.claim_send(42, 3.0).unwrap(),
+            Outbound::Blocked
+        ));
+        assert_eq!(api.sent, 1);
+        assert_eq!(engine.journal.rows().unwrap()[0].state, "blocked");
     }
     #[test]
     fn late_correlated_receipt_reconciles_same_attempt_without_retry() {
@@ -1847,6 +2159,7 @@ mod tests {
         assert_eq!(feeder.sends, 1);
         assert_eq!(engine.journal.rows().unwrap()[0].state, "accepted");
     }
+    #[test]
     fn stale_update_ids_do_not_replay_or_move_the_cursor() {
         let (mut engine, mut api, _) = fixture();
         api.updates = vec![update(4, "kept")];
@@ -1855,10 +2168,14 @@ mod tests {
         api.updates = vec![update(2, "stale replay"), update(4, "kept again")];
         assert_eq!(engine.poll(&mut api, 2.0).unwrap(), 0);
         assert_eq!(engine.cursor().unwrap(), 5);
-        let events = engine.journal.events("telegram", "123", &["admitted"]).unwrap();
+        let events = engine
+            .journal
+            .events("telegram", "123", &["admitted"])
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["message"]["text"], "kept");
     }
+    #[test]
     fn revoked_route_blocks_queued_input_without_retargeting() {
         let (mut engine, mut api, mut feeder) = fixture();
         api.updates = vec![update(1, "hello")];

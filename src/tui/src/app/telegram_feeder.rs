@@ -52,6 +52,7 @@ pub(super) fn prompt_sha256(harness: super::hooks::Harness, prompt: &str) -> Str
     )
 }
 pub struct NativeFeeder {
+    pub runtime: super::telegram_runtime::Settings,
     pub instance: String,
     /// Explicit private registration paths selected by local service setup.
     pub registrations: Vec<PathBuf>,
@@ -59,7 +60,8 @@ pub struct NativeFeeder {
 }
 impl NativeFeeder {
     fn registrations(&self) -> Result<Vec<(PathBuf, Registration)>> {
-        if self.registrations.len() > 4096 {
+        self.runtime.validate()?;
+        if self.registrations.len() as u64 > self.runtime.feeder_registration_limit {
             return Err("Too many hook registrations".into());
         }
         // Fail closed if the configured inventory cannot be read completely:
@@ -137,7 +139,7 @@ impl Feeder for NativeFeeder {
             Readiness::Idle => (),
         }
         let (text, correlation) = encode_prompt(frame)?;
-        if text.len() > 64000 {
+        if text.len() as u64 > self.runtime.feeder_prompt_limit_bytes {
             return Ok(Submission::Unavailable);
         }
         if !hook_runtime::reserve_ready_for(
@@ -338,6 +340,7 @@ mod tests {
             };
             let path = hook_runtime::install(&registration).unwrap();
             let feeder = NativeFeeder {
+                runtime: Default::default(),
                 instance: "example".into(),
                 registrations: vec![path.clone()],
                 terminals: Terminals {

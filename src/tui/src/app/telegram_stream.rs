@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS stream_inputs(hash TEXT PRIMARY KEY,scope TEXT NOT NU
 ";
 pub struct Store {
     con: Connection,
+    settings: super::telegram_runtime::Settings,
 }
 #[derive(Clone)]
 struct Subscription {
@@ -129,19 +130,38 @@ struct Subscription {
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
-        Self::from_connection(super::telegram_config::private_connection(
-            &directory.join("telegram-stream.sqlite3"),
-        )?)
+        Self::open_configured(directory, &Default::default())
     }
-    pub fn memory() -> Result<Self> {
+    pub fn open_configured(
+        directory: &Path,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
         Self::from_connection(
-            Connection::open_in_memory().map_err(|_| "Cannot create stream store")?,
+            super::telegram_config::private_connection(&directory.join("telegram-stream.sqlite3"))?,
+            settings,
         )
     }
-    fn from_connection(con: Connection) -> Result<Self> {
+    pub fn memory() -> Result<Self> {
+        Self::memory_configured(&Default::default())
+    }
+    pub fn memory_configured(settings: &super::telegram_runtime::Settings) -> Result<Self> {
+        Self::from_connection(
+            Connection::open_in_memory().map_err(|_| "Cannot create stream store")?,
+            settings,
+        )
+    }
+    fn from_connection(
+        con: Connection,
+        settings: &super::telegram_runtime::Settings,
+    ) -> Result<Self> {
+        settings.validate()?;
         con.execute_batch(SCHEMA)
             .map_err(|_| "Cannot initialize stream store")?;
-        Ok(Self { con })
+        Ok(Self {
+            con,
+            settings: settings.clone(),
+        })
     }
     pub fn start(&mut self, plan: &Plan, head: i64) -> Result<String> {
         if head < 0
@@ -157,15 +177,32 @@ impl Store {
             return Err("Invalid stream boundary or DM identity".into());
         }
         let encoded = serde_json::to_string(plan).map_err(|_| "Cannot encode stream binding")?;
-        let input_after: i64 = self
+        let id = key(plan)?;
+        let transaction = self
             .con
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| "Cannot lock stream configuration")?;
+        let other_active: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM stream_subscriptions WHERE enabled=1 AND id<>?",
+                [&id],
+                |r| r.get(0),
+            )
+            .map_err(|_| "Cannot count active streams")?;
+        if other_active >= self.settings.stream_subscription_limit as i64 {
+            return Err("Stream subscription limit exceeded; stop another stream first".into());
+        }
+        let input_after: i64 = transaction
             .query_row(
                 "SELECT COALESCE(MAX(rowid),0) FROM stream_inputs",
                 [],
                 |r| r.get(0),
             )
             .map_err(|_| "Cannot freeze stream input boundary")?;
-        self.con.execute("INSERT INTO stream_subscriptions VALUES(?,?,1,1,?,0,NULL,NULL,?,'waiting_for_future_prompt') ON CONFLICT(id) DO UPDATE SET plan=excluded.plan,epoch=epoch+1,enabled=1,after_id=excluded.after_id,prompt_id=0,turn=NULL,last_text=NULL,input_after=excluded.input_after,diagnostic=excluded.diagnostic",params![key(plan)?,encoded,head,input_after]).map_err(|_|"Cannot persist stream start")?;
+        transaction.execute("INSERT INTO stream_subscriptions VALUES(?,?,1,1,?,0,NULL,NULL,?,'waiting_for_future_prompt') ON CONFLICT(id) DO UPDATE SET plan=excluded.plan,epoch=epoch+1,enabled=1,after_id=excluded.after_id,prompt_id=0,turn=NULL,last_text=NULL,input_after=excluded.input_after,diagnostic=excluded.diagnostic",params![id,encoded,head,input_after]).map_err(|_|"Cannot persist stream start")?;
+        transaction
+            .commit()
+            .map_err(|_| "Cannot commit stream start")?;
         Ok("Streaming enabled for future accepted Telegram turns only. Cadence follows verified assistant/tool hooks; it is not token streaming. No previous transcript will be replayed.".into())
     }
     pub fn control(&mut self, caller: &Caller, setting: Setting) -> Result<String> {
@@ -216,13 +253,13 @@ impl Store {
             .map_err(|_| "Cannot record accepted prompt provenance")?;
         // Bounded recent acceptance ledger. Pruning can only suppress output,
         // never select historical prompts as a fallback.
-        self.con.execute("DELETE FROM stream_inputs WHERE rowid NOT IN (SELECT rowid FROM stream_inputs ORDER BY rowid DESC LIMIT 10000)",[]).map_err(|_|"Cannot bound stream provenance")?;
+        self.con.execute("DELETE FROM stream_inputs WHERE rowid NOT IN (SELECT rowid FROM stream_inputs ORDER BY rowid DESC LIMIT ?)",[self.settings.stream_input_retention as i64]).map_err(|_|"Cannot bound stream provenance")?;
         Ok(())
     }
     fn subscriptions(&self) -> Result<Vec<Subscription>> {
-        let mut statement=self.con.prepare("SELECT id,plan,epoch,after_id,prompt_id,turn,last_text,input_after,diagnostic FROM stream_subscriptions WHERE enabled=1 LIMIT 1025").map_err(|_|"Cannot inspect streams")?;
+        let mut statement=self.con.prepare("SELECT id,plan,epoch,after_id,prompt_id,turn,last_text,input_after,diagnostic FROM stream_subscriptions WHERE enabled=1 LIMIT ?").map_err(|_|"Cannot inspect streams")?;
         let rows = statement
-            .query_map([], |r| {
+            .query_map([self.settings.stream_subscription_limit as i64 + 1], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -252,7 +289,7 @@ impl Store {
                 diagnostic,
             });
         }
-        if subscriptions.len() > 1024 {
+        if subscriptions.len() as u64 > self.settings.stream_subscription_limit {
             return Err("Stream subscription limit exceeded".into());
         }
         Ok(subscriptions)
@@ -299,7 +336,7 @@ impl Store {
                     &config.instance,
                     &["admitted", "handled"],
                     subscription.after,
-                    64,
+                    self.settings.stream_event_batch_limit as usize,
                 )
                 .map_err(|e| e.to_string())?;
             for event in events {
@@ -391,7 +428,11 @@ impl Store {
             _ => None,
         };
         let Some(text) = text else { return Ok(()) };
-        if text.len() > 64000 || text.contains('\0') {
+        if text.len() as u64 > self.settings.stream_text_limit_bytes {
+            s.diagnostic = "stream_text_limit_exceeded".into();
+            return Ok(());
+        }
+        if text.contains('\0') {
             return Ok(());
         }
         let is_text = kind != super::hooks::EventKind::PostToolUse;
@@ -424,7 +465,7 @@ impl Store {
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         {
             let n = c.len_utf16();
-            if length + n > 4000 {
+            if length + n > self.settings.stream_chunk_utf16_limit as usize {
                 chunks.push(std::mem::take(&mut chunk));
                 length = 0;
             }
@@ -433,6 +474,10 @@ impl Store {
         }
         if !chunk.is_empty() {
             chunks.push(chunk)
+        }
+        if chunks.len() as u64 > self.settings.stream_message_limit_per_event {
+            s.diagnostic = "stream_message_limit_exceeded".into();
+            return Ok(());
         }
         let binding = &s.plan.binding;
         let chat = binding
@@ -597,6 +642,7 @@ mod tests {
                 hindsight_bank: None,
             };
             let config = ServiceConfig {
+                runtime: Default::default(),
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 1,
@@ -699,6 +745,177 @@ mod tests {
         fn rows(&self) -> Vec<Delivery> {
             self.journal.rows().unwrap()
         }
+    }
+    #[test]
+    fn tiny_chunks_do_not_expand_one_event_into_thousands_of_drafts() {
+        let mut f = Fixture::new();
+        f.config.runtime.stream_chunk_utf16_limit = 2;
+        f.store = Store::memory_configured(&f.config.runtime).unwrap();
+        f.start();
+        f.accept();
+        f.prompt("prompt", "turn");
+        f.event(
+            "answer",
+            EventKind::AssistantResponse,
+            Some("turn"),
+            None,
+            &"x".repeat(64000),
+        );
+        f.tick();
+        assert_eq!(f.journal.rows().unwrap().len(), 0);
+        assert!(
+            f.store
+                .control(&f.caller(), Setting::Status)
+                .unwrap()
+                .contains("stream_message_limit_exceeded")
+        );
+        for limit in [1, 2] {
+            let mut f = Fixture::new();
+            f.config.runtime.stream_chunk_utf16_limit = 2;
+            f.config.runtime.stream_message_limit_per_event = limit;
+            f.store = Store::memory_configured(&f.config.runtime).unwrap();
+            f.start();
+            f.accept();
+            f.prompt("prompt", "turn");
+            f.event(
+                "answer",
+                EventKind::AssistantResponse,
+                Some("turn"),
+                None,
+                "abcd",
+            );
+            f.tick();
+            assert_eq!(
+                f.journal.rows().unwrap().len(),
+                if limit == 1 { 0 } else { 2 }
+            );
+        }
+    }
+    #[test]
+    fn configured_event_batches_text_budget_and_unicode_chunks_bound_actual_outbox() {
+        let mut f = Fixture::new();
+        f.config.runtime.stream_event_batch_limit = 1;
+        f.config.runtime.stream_text_limit_bytes = 12;
+        f.config.runtime.stream_chunk_utf16_limit = 4;
+        f.store = Store::memory_configured(&f.config.runtime).unwrap();
+        f.start();
+        f.accept();
+        f.prompt("prompt", "turn");
+        f.event(
+            "answer",
+            EventKind::AssistantResponse,
+            Some("turn"),
+            None,
+            "ab😀cd😀",
+        );
+        f.event(
+            "over-budget",
+            EventKind::Stop,
+            Some("turn"),
+            None,
+            "thirteenbytes",
+        );
+        f.tick();
+        assert!(f.journal.rows().unwrap().is_empty());
+        f.tick();
+        let rows = f.journal.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        let parts: Vec<_> = rows
+            .iter()
+            .map(|row| row.payload["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(parts.concat(), "ab😀cd😀");
+        assert!(
+            parts
+                .iter()
+                .all(|part| !part.is_empty() && part.encode_utf16().count() <= 4)
+        );
+        f.tick();
+        assert_eq!(f.journal.rows().unwrap().len(), 2);
+        assert!(
+            f.store
+                .control(&f.caller(), Setting::Status)
+                .unwrap()
+                .contains("stream_text_limit_exceeded")
+        );
+    }
+    #[test]
+    fn configured_input_retention_suppresses_pruned_provenance_without_fallback() {
+        let mut f = Fixture::new();
+        f.config.runtime.stream_input_retention = 1;
+        f.store = Store::memory_configured(&f.config.runtime).unwrap();
+        f.start();
+        f.accept();
+        let mut other = f.frame.clone();
+        other.message_id += 1;
+        other.update_id += 1;
+        other.text = "another accepted request".into();
+        f.store.accepted(&other).unwrap();
+        assert_eq!(
+            f.store
+                .con
+                .query_row("SELECT COUNT(*) FROM stream_inputs", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        f.prompt("pruned", "old-turn");
+        f.event(
+            "old-answer",
+            EventKind::Stop,
+            Some("old-turn"),
+            None,
+            "not authorized by newer provenance",
+        );
+        f.tick();
+        assert!(f.journal.rows().unwrap().is_empty());
+        f.frame = other;
+        f.prompt("current", "new-turn");
+        f.event(
+            "current-answer",
+            EventKind::Stop,
+            Some("new-turn"),
+            None,
+            "authorized current answer",
+        );
+        f.tick();
+        assert_eq!(f.journal.rows().unwrap().len(), 1);
+        assert_eq!(
+            f.journal.rows().unwrap()[0].payload["text"],
+            "authorized current answer"
+        );
+    }
+    #[test]
+    fn configured_subscription_cap_refuses_new_stream_without_disrupting_existing_one() {
+        let mut f = Fixture::new();
+        f.config.runtime.stream_subscription_limit = 1;
+        f.store = Store::memory_configured(&f.config.runtime).unwrap();
+        f.start();
+        f.start(); // Restarting the existing subscription does not consume a slot.
+        let mut other = f.plan.clone();
+        other.binding.route_scope.chat = "3".into();
+        other.binding.actor = "3".into();
+        assert!(
+            f.store
+                .start(&other, 0)
+                .unwrap_err()
+                .contains("subscription limit")
+        );
+        assert_eq!(f.store.subscriptions().unwrap().len(), 1);
+        f.accept();
+        f.prompt("prompt", "turn");
+        f.event(
+            "answer",
+            EventKind::Stop,
+            Some("turn"),
+            None,
+            "still available",
+        );
+        f.tick();
+        assert_eq!(f.journal.rows().unwrap().len(), 1);
+        f.store.control(&f.caller(), Setting::Off).unwrap();
+        f.store.start(&other, 0).unwrap();
+        assert_eq!(f.store.subscriptions().unwrap()[0].plan, other);
     }
     #[test]
     fn future_native_events_stream_only_assistant_text_and_tool_names_once() {

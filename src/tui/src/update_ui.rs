@@ -93,6 +93,17 @@ impl Controller {
     pub fn visible(&self) -> bool {
         self.visible
     }
+    pub fn set_automatic(&mut self, enabled: bool) {
+        if self.automatic == enabled {
+            return;
+        }
+        self.automatic = enabled;
+        if enabled {
+            self.start_check(update::check);
+        } else {
+            self.pending_prompt = false;
+        }
+    }
     /// Caller must defer opening while another dialog, embedded terminal or splash owns input.
     pub fn open(&mut self) {
         self.open_with(update::check);
@@ -166,10 +177,11 @@ impl Controller {
                 } else {
                     format!("{} (installed {})", status.message, status.current_version)
                 };
-                self.pending_prompt =
-                    status.review.as_ref().is_some_and(|review| {
+                self.pending_prompt = self.automatic
+                    && status.review.as_ref().is_some_and(|review| {
                         self.offered_version.as_ref() != Some(&review.version)
-                    }) && !self.visible;
+                    })
+                    && !self.visible;
                 if let Some(review) = &status.review {
                     self.offered_version = Some(review.version.clone());
                 }
@@ -570,6 +582,8 @@ mod tests {
     fn disabled_and_deferred_checks_never_capture_terminal_input() {
         let mut ui = Controller::new(false);
         assert!(ui.worker.is_none());
+        // Simulate an automatic response without starting a network request.
+        ui.automatic = true;
         ui.complete(available());
         ui.poll(false);
         assert!(!ui.key(key(KeyCode::Char('y'))));
@@ -581,6 +595,20 @@ mod tests {
         assert!(ui.review.is_some());
         ui.poll(true);
         assert!(!ui.visible());
+    }
+    #[test]
+    fn disabling_automatic_checks_suppresses_an_in_flight_offer() {
+        let mut ui = Controller::new(false);
+        ui.automatic = true;
+        ui.set_automatic(false);
+        ui.complete(available());
+        ui.poll(true);
+        assert!(!ui.visible());
+        assert!(!ui.pending_prompt);
+        assert!(ui.review.is_some());
+        ui.show();
+        assert!(ui.visible());
+        assert!(ui.consent().is_some());
     }
     #[test]
     fn consent_is_exact_single_use_and_preserves_receipt() {

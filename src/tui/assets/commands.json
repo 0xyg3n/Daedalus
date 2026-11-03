@@ -689,12 +689,118 @@
       "quick": ""
     },
     {
+      "id": "settings.interface",
+      "key": "interface-settings",
+      "page": 4,
+      "group": "Interface",
+      "title": "Interface settings",
+      "note": "Appearance, accessibility, refresh timing, rendering and input behavior.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "appearance",
+        "interface",
+        "refresh timing",
+        "screensaver delay"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "settings.runtime",
+      "key": "runtime-settings",
+      "page": 4,
+      "group": "Terminals and discovery",
+      "title": "Terminals and discovery",
+      "note": "Saved terminal dimensions, query deadlines and local account discovery budgets.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "terminal dimensions",
+        "discovery timeout",
+        "runtime settings"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "settings.dashboard",
+      "key": "dashboard-settings",
+      "page": 4,
+      "group": "Dashboard",
+      "title": "Dashboard and instance discovery",
+      "note": "Global saved instances, search roots and discovery limits.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "dashboard settings",
+        "instance discovery",
+        "saved instances"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "settings.history",
+      "key": "settings.history",
+      "page": 4,
+      "group": "History",
+      "title": "Control action history",
+      "note": "Configure receipt retention, review unresolved outcomes and archive history.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "receipt history",
+        "audit history",
+        "unresolved outcomes"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "settings.memory",
+      "key": "memory-settings",
+      "page": 4,
+      "group": "Memory",
+      "title": "Hindsight settings",
+      "note": "Review memory enable state, endpoint, credential file, recall text, timeout and exact registration banks.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "hindsight",
+        "memory settings",
+        "memory endpoint"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
+    },
+    {
       "id": "tools.choose",
       "key": "a",
       "page": 4,
       "group": "Harnesses and accounts",
       "title": "Detected harnesses",
-      "note": "Review installed tools, native account status and automatically selected harnesses.",
+      "note": "Review installed tools, native account status and saved tool selections.",
       "icon": "choose",
       "effects": [
         "settings"
@@ -1070,6 +1176,29 @@
       "context_note": "Reuse this project directory; choose a shell or installed agent.",
       "listed": false,
       "quick": "N"
+    },
+    {
+      "id": "settings.instance",
+      "key": "instance-settings",
+      "page": 4,
+      "group": "Instance",
+      "title": "Instance settings",
+      "note": "Saved identity, workspace, preferred tools, exact terminal endpoints and portable Telegram hints.",
+      "icon": "options",
+      "effects": [
+        "settings"
+      ],
+      "aliases": [
+        "instance configuration",
+        "preferred tools",
+        "automatic discovery",
+        "metadata connections",
+        "default workspace"
+      ],
+      "context": "",
+      "context_note": "",
+      "listed": true,
+      "quick": ""
     }
   ],
   "effects": {

@@ -13,14 +13,42 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 type Result<T> = std::result::Result<T, String>;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+const CONFIG_LIMIT: usize = 1024 * 1024;
+pub const FIELDS: &[(&str, &str, &str)] = &[
+    (
+        "enabled",
+        "Memory enabled",
+        "Allow memory effects for explicitly bound hooks.",
+    ),
+    (
+        "endpoint",
+        "API endpoint",
+        "HTTPS, or HTTP on the local loopback interface.",
+    ),
+    (
+        "credential_file",
+        "Credential file",
+        "Private absolute file path, or none. Enter a path, never a token.",
+    ),
+    (
+        "recall_query",
+        "Recall query",
+        "Reference context requested when a conversation starts.",
+    ),
+    (
+        "timeout_ms",
+        "Request timeout (ms)",
+        "100 to 8000 milliseconds, also bounded by the hook deadline.",
+    ),
+];
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub registration_id: String,
     pub scope: Scope,
     pub bank: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
@@ -32,6 +60,117 @@ pub struct Config {
     pub timeout_ms: u64,
 }
 impl Config {
+    pub fn fresh() -> Self {
+        Self {
+            version: 1,
+            enabled: false,
+            endpoint: String::new(),
+            credential_file: None,
+            bindings: Vec::new(),
+            recall_query: "Relevant context for this agent conversation".into(),
+            timeout_ms: 5000,
+        }
+    }
+    pub fn value(&self, key: &str) -> Result<Value> {
+        match key {
+            "enabled" => Ok(json!(self.enabled)),
+            "endpoint" => Ok(json!(self.endpoint)),
+            "credential_file" => serde_json::to_value(&self.credential_file)
+                .map_err(|_| "Invalid credential path".into()),
+            "recall_query" => Ok(json!(self.recall_query)),
+            "timeout_ms" => Ok(json!(self.timeout_ms)),
+            _ => Err("Unknown memory setting".into()),
+        }
+    }
+    /// Validate an edited field independently so first-time setup may fill the
+    /// required endpoint in any order. Plan::prepare validates the whole draft.
+    pub fn set(&self, key: &str, text: &str) -> Result<Self> {
+        let mut next = self.clone();
+        match key {
+            "enabled" => {
+                next.enabled = match text {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("Choose true or false".into()),
+                }
+            }
+            "endpoint" => {
+                hindsight::endpoint(text).map_err(|e| e.to_string())?;
+                next.endpoint = text.into();
+            }
+            "credential_file" => {
+                next.credential_file = if text == "none" {
+                    None
+                } else {
+                    let path = super::hooks::windows_native_path(Path::new(text));
+                    crate::core::layouts::check_path(&path)?;
+                    Some(path)
+                }
+            }
+            "recall_query" => {
+                if text.trim().is_empty() || text.len() > 8192 || text.contains('\0') {
+                    return Err("Recall query requires 1 to 8192 bytes without NUL".into());
+                }
+                next.recall_query = text.into();
+            }
+            "timeout_ms" => {
+                let number = text
+                    .parse::<u64>()
+                    .map_err(|_| "Enter a whole number from 100 to 8000")?;
+                if !(100..=8000).contains(&number) {
+                    return Err("Request timeout must be from 100 to 8000 milliseconds".into());
+                }
+                next.timeout_ms = number;
+            }
+            _ => return Err("Unknown memory setting".into()),
+        }
+        Ok(next)
+    }
+    pub fn bind(&self, registration: &Registration, bank: &str) -> Result<Self> {
+        registration
+            .validate()
+            .map_err(|_| "Invalid memory registration")?;
+        if !registration.options.hindsight || !valid_bank(bank) {
+            return Err("Choose a memory-enabled hook and a bank of 1 to 256 bytes without control characters".into());
+        }
+        let mut next = self.clone();
+        let binding = Binding {
+            registration_id: registration.id.clone(),
+            scope: registration.scope.clone(),
+            bank: bank.into(),
+        };
+        if let Some(current) = next
+            .bindings
+            .iter_mut()
+            .find(|b| b.registration_id == registration.id)
+        {
+            *current = binding;
+        } else {
+            next.bindings.push(binding);
+        }
+        if next.bindings.len() > 1000 {
+            return Err("Memory supports at most 1000 bindings".into());
+        }
+        Ok(next)
+    }
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > CONFIG_LIMIT {
+            return Err("Memory configuration exceeds 1 MiB".into());
+        }
+        let config: Self =
+            serde_json::from_slice(bytes).map_err(|_| "Invalid memory configuration JSON")?;
+        config.validate()?;
+        Ok(config)
+    }
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes =
+            serde_json::to_vec_pretty(self).map_err(|_| "Cannot encode memory configuration")?;
+        if bytes.len() > CONFIG_LIMIT {
+            return Err("Memory configuration exceeds 1 MiB".into());
+        }
+        Ok(bytes)
+    }
     pub fn validate(&self) -> Result<()> {
         if self.version != 1
             || !(100..=8000).contains(&self.timeout_ms)
@@ -55,10 +194,7 @@ impl Config {
             if binding.registration_id.is_empty()
                 || binding.registration_id.len() > 256
                 || binding.registration_id.chars().any(char::is_control)
-                || binding.bank.is_empty()
-                || binding.bank.len() > 256
-                || binding.bank.chars().any(char::is_control)
-                || matches!(binding.bank.as_str(), "." | "..")
+                || !valid_bank(&binding.bank)
                 || !seen.insert(binding.registration_id.clone())
             {
                 return Err("Invalid or duplicate memory binding".into());
@@ -86,16 +222,49 @@ impl Config {
             .transpose()
     }
 }
+fn valid_bank(bank: &str) -> bool {
+    !bank.is_empty()
+        && bank.len() <= 256
+        && !bank.chars().any(char::is_control)
+        && !matches!(bank, "." | "..")
+}
+pub fn registrations(directory: &Path) -> Result<Vec<Registration>> {
+    crate::core::layouts::check_path(directory)?;
+    let entries = match std::fs::read_dir(directory.join("hooks")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Cannot inspect memory hook registrations".into()),
+    };
+    let mut result = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err("Too many hook registrations".into());
+        }
+        let path = entry
+            .map_err(|_| "Cannot inspect memory hook registration")?
+            .path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let registration =
+            super::hook_runtime::inspect(&path).map_err(|_| "Invalid memory hook registration")?;
+        if registration.directory != directory || registration.path() != path {
+            return Err("Memory hook registration belongs to another instance".into());
+        }
+        if registration.options.hindsight {
+            result.push(registration);
+        }
+    }
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(result)
+}
 pub fn load(directory: &Path) -> Result<Option<Config>> {
     let Some(bytes) =
-        telegram_config::read_private(&directory.join("hindsight.json"), 1024 * 1024)?
+        telegram_config::read_private(&directory.join("hindsight.json"), CONFIG_LIMIT as u64)?
     else {
         return Ok(None);
     };
-    let config: Config =
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid memory configuration JSON")?;
-    config.validate()?;
-    Ok(Some(config))
+    Config::parse(&bytes).map(Some)
 }
 /// Caller must have verified registration/process/event and hold its cutover
 /// guard. A recalled result is reference data, never a tool or goal directive.
@@ -330,49 +499,97 @@ pub struct Plan {
     before: Option<Vec<u8>>,
     after: Vec<u8>,
     config: Config,
+    registrations: Vec<(PathBuf, Vec<u8>)>,
 }
 impl Plan {
     pub fn update(directory: &Path, expected: Option<&Config>, updated: Config) -> Result<Self> {
         let _lock = telegram_config::configuration_lock(directory)?;
-        let current = load(directory)?;
-        if serde_json::to_value(current.as_ref()).map_err(|_| "Invalid memory configuration")?
-            != serde_json::to_value(expected).map_err(|_| "Invalid memory configuration")?
-        {
+        let plan = Self::prepare(directory, updated)?;
+        let current = plan.before.as_deref().map(Config::parse).transpose()?;
+        if current.as_ref() != expected {
             return Err("Memory configuration changed; reopen settings".into());
         }
-        Self::prepare(directory, updated)
+        Ok(plan)
     }
     pub fn prepare(directory: &Path, config: Config) -> Result<Self> {
-        config.validate()?;
+        let after = config.encode()?;
         if config.enabled {
             config.key()?;
         }
-        let before = telegram_config::read_private(&directory.join("hindsight.json"), 1024 * 1024)?;
-        let after =
-            serde_json::to_vec_pretty(&config).map_err(|_| "Cannot encode memory configuration")?;
+        let before =
+            telegram_config::read_private(&directory.join("hindsight.json"), CONFIG_LIMIT as u64)?;
         Ok(Self {
             directory: directory.into(),
             before,
             after,
             config,
+            registrations: Vec::new(),
         })
+    }
+    /// Capture the exact installed identity used by an edited bank binding.
+    /// Other bindings remain untouched, including inactive or stale entries.
+    pub fn guard_registration(mut self, expected: &Registration) -> Result<Self> {
+        if expected.directory != self.directory
+            || !expected.options.hindsight
+            || self
+                .config
+                .bindings
+                .iter()
+                .find(|b| b.registration_id == expected.id)
+                .is_none_or(|binding| binding.scope != expected.scope)
+        {
+            return Err("Memory binding does not match the selected hook registration".into());
+        }
+        let path = expected.path();
+        let before = telegram_config::read_private(&path, CONFIG_LIMIT as u64)?
+            .ok_or("Memory hook registration disappeared")?;
+        let current: Registration =
+            serde_json::from_slice(&before).map_err(|_| "Invalid memory hook registration")?;
+        current
+            .validate()
+            .map_err(|_| "Invalid memory hook registration")?;
+        if serde_json::to_value(&current).ok() != serde_json::to_value(expected).ok() {
+            return Err("Memory hook registration changed; review again".into());
+        }
+        self.registrations.push((path, before));
+        Ok(self)
     }
     pub fn approval(&self) -> String {
         format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&(&self.directory, &self.before, &self.after))
-                    .expect("serializable memory plan")
+                serde_json::to_vec(&(
+                    &self.directory,
+                    &self.before,
+                    &self.after,
+                    &self.registrations
+                ))
+                .expect("serializable memory plan")
             )
         )
     }
     pub fn review(&self) -> Value {
-        json!({"enabled":self.config.enabled,"endpoint":self.config.endpoint,"bindings":self.config.bindings,"credential_file":self.config.credential_file,"backup_required":self.before.is_some(),"approval":self.approval(),"network_verified":false})
+        let previous = self
+            .before
+            .as_deref()
+            .and_then(|bytes| Config::parse(bytes).ok());
+        let replaced: Vec<_> = previous
+            .as_ref()
+            .into_iter()
+            .flat_map(|config| &config.bindings)
+            .filter(|old| !self.config.bindings.contains(old))
+            .collect();
+        json!({"enabled":self.config.enabled,"endpoint":self.config.endpoint,"bindings":self.config.bindings,"bindings_replaced_or_removed":replaced,"credential_file":self.config.credential_file,"recall_query":self.config.recall_query,"timeout_ms":self.config.timeout_ms,"backup_required":self.before.is_some(),"registration_files_checked":self.registrations.iter().map(|(path,_)| path).collect::<Vec<_>>(),"approval":self.approval(),"network_verified":false})
     }
     pub fn apply(self, approval: &str) -> Result<Value> {
         if self.approval() != approval {
             return Err("Memory approval does not match reviewed configuration".into());
         }
+        let _hooks = if self.registrations.is_empty() {
+            None
+        } else {
+            Some(super::hook_install::lock(&self.directory)?)
+        };
         let _lock = telegram_config::configuration_lock(&self.directory)?;
         if telegram_config::read_private(&self.directory.join("cutover-retired.json"), 1024 * 1024)?
             .is_some()
@@ -380,8 +597,13 @@ impl Plan {
             return Err("This instance was retired; configure its destination".into());
         }
         let path = self.directory.join("hindsight.json");
-        if telegram_config::read_private(&path, 1024 * 1024)? != self.before {
+        if telegram_config::read_private(&path, CONFIG_LIMIT as u64)? != self.before {
             return Err("Memory configuration changed; review again".into());
+        }
+        for (path, before) in &self.registrations {
+            if telegram_config::read_private(path, CONFIG_LIMIT as u64)?.as_ref() != Some(before) {
+                return Err("Memory hook registration changed; review again".into());
+            }
         }
         if self.config.enabled {
             self.config.key()?;
@@ -391,7 +613,7 @@ impl Plan {
                 "hindsight.backup-{:x}.json",
                 Sha256::digest(before)
             ));
-            match telegram_config::read_private(&backup, 1024 * 1024)? {
+            match telegram_config::read_private(&backup, CONFIG_LIMIT as u64)? {
                 Some(current) if current != *before => {
                     return Err("Memory configuration backup conflicts".into());
                 }
@@ -401,6 +623,88 @@ impl Plan {
         }
         crate::core::layouts::write_private(&path, &self.after)?;
         Ok(json!({"state":"saved","network_verified":false}))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod configuration_fixture {
+    use super::*;
+    use crate::app::{backend::NativeSource, config::ControlConfig};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    pub struct Fixture {
+        pub root: PathBuf,
+        pub control: ControlConfig,
+        pub config: Config,
+        pub registration: Registration,
+    }
+    impl Fixture {
+        pub fn new(configured: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "daedalus-memory-editor-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut control = ControlConfig::fresh(&root).unwrap();
+            control.agent_name = "fixture".into();
+            crate::core::layouts::write_private(
+                &root.join("control.json"),
+                &control.encode().unwrap(),
+            )
+            .unwrap();
+            let registration:Registration=serde_json::from_value(json!({
+                "version":1,"id":"fixture-hook","directory":root,
+                "scope":{"instance":"fixture","terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"},"conversation":"session","harness":"claude"},
+                "goal_id":null,"harness_process":null,"transcript":null,"events":["Stop"],
+                "options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":true},
+                "activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000,
+            })).unwrap();
+            crate::core::layouts::write_private(
+                &registration.path(),
+                &serde_json::to_vec(&registration).unwrap(),
+            )
+            .unwrap();
+            let mut config = Config::fresh()
+                .set("endpoint", "http://127.0.0.1:8888")
+                .unwrap()
+                .bind(&registration, "initial-bank")
+                .unwrap();
+            let mut other = config.bindings[0].clone();
+            other.registration_id = "inactive-other-hook".into();
+            other.scope.conversation = "other-session".into();
+            other.bank = "keep-this-bank".into();
+            config.bindings.push(other);
+            if configured {
+                crate::core::layouts::write_private(
+                    &root.join("hindsight.json"),
+                    &config.encode().unwrap(),
+                )
+                .unwrap();
+            }
+            Self {
+                root,
+                control,
+                config,
+                registration,
+            }
+        }
+        pub fn source(&self) -> NativeSource {
+            let terminals = crate::adapters::terminals::Terminals {
+                tmux: self.root.join("no-live-tmux"),
+                herdr: self.root.join("no-live-herdr"),
+                ..Default::default()
+            };
+            NativeSource {
+                directory: self.root.clone(),
+                terminals,
+                last_snapshot: json!({}),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }
 
@@ -682,5 +986,163 @@ mod tests {
                 .starts_with("hindsight.backup-")
         }));
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn configuration_write_budget_matches_loader_before_creating_files() {
+        let (mut config, _, _, _) = fixture();
+        let binding = config.bindings[0].clone();
+        config.bindings = (0..800)
+            .map(|index| {
+                let mut next = binding.clone();
+                next.registration_id = format!("hook-{index}");
+                next.scope.terminal.generation = "g".repeat(1000);
+                next
+            })
+            .collect();
+        config.validate().unwrap();
+        let compact = serde_json::to_vec(&config).unwrap();
+        let pretty = serde_json::to_vec_pretty(&config).unwrap();
+        assert!(compact.len() < CONFIG_LIMIT);
+        assert!(pretty.len() > CONFIG_LIMIT);
+        assert_eq!(Config::parse(&compact).unwrap(), config);
+        assert!(Config::parse(&pretty).unwrap_err().contains("1 MiB"));
+        assert!(config.encode().unwrap_err().contains("1 MiB"));
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-memory-size-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        assert!(
+            Plan::prepare(&root, config.clone())
+                .err()
+                .unwrap()
+                .contains("1 MiB")
+        );
+        assert!(!root.exists());
+        crate::core::layouts::write_private(&root.join("hindsight.json"), &compact).unwrap();
+        assert_eq!(load(&root).unwrap().unwrap(), config);
+        assert!(
+            Plan::update(&root, Some(&config), config.clone())
+                .err()
+                .unwrap()
+                .contains("1 MiB")
+        );
+        assert_eq!(std::fs::read(root.join("hindsight.json")).unwrap(), compact);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hindsight.backup-")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reviewed_updates_check_captured_bytes_and_show_query_and_deadline() {
+        let (config, _, _, _) = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-memory-snapshot-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let first = Plan::prepare(&root, config.clone()).unwrap();
+        let approval = first.approval();
+        first.apply(&approval).unwrap();
+        let mut updated = config.clone();
+        updated.recall_query = "Reviewed decisions for this conversation".into();
+        updated.timeout_ms = 2500;
+        let plan = Plan::update(&root, Some(&config), updated.clone()).unwrap();
+        assert_eq!(plan.review()["recall_query"], updated.recall_query);
+        assert_eq!(plan.review()["timeout_ms"], 2500);
+        assert_eq!(plan.review()["network_verified"], false);
+        assert!(Plan::update(&root, None, updated.clone()).is_err());
+        assert!(Plan::update(&root, Some(&updated), updated.clone()).is_err());
+        // Even a semantically equivalent rewrite invalidates this byte snapshot.
+        let mut equivalent = serde_json::to_vec(&config).unwrap();
+        equivalent.push(b'\n');
+        crate::core::layouts::write_private(&root.join("hindsight.json"), &equivalent).unwrap();
+        let approval = plan.approval();
+        assert!(plan.apply(&approval).unwrap_err().contains("changed"));
+        assert_eq!(
+            std::fs::read(root.join("hindsight.json")).unwrap(),
+            equivalent
+        );
+        let plan = Plan::update(&root, Some(&config), updated.clone()).unwrap();
+        let approval = plan.approval();
+        plan.apply(&approval).unwrap();
+        assert_eq!(load(&root).unwrap().unwrap(), updated);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in std::fs::read_dir(&root).unwrap() {
+                let entry = entry.unwrap();
+                assert_eq!(
+                    entry.metadata().unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn all_memory_fields_are_editable_without_implicit_enable_or_binding_changes() {
+        let f = configuration_fixture::Fixture::new(true);
+        let keys: std::collections::BTreeSet<_> = FIELDS.iter().map(|field| field.0).collect();
+        let encoded = serde_json::to_value(&f.config).unwrap();
+        let expected: std::collections::BTreeSet<_> = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !["version", "bindings"].contains(key))
+            .collect();
+        assert_eq!(keys, expected);
+        let example =
+            Config::parse(include_bytes!("../../../../config/hindsight.example.json")).unwrap();
+        assert_eq!(
+            example,
+            Config::fresh()
+                .set("endpoint", "https://memory.example.invalid")
+                .unwrap()
+        );
+        for (key, value) in [
+            ("enabled", "true"),
+            ("endpoint", "http://localhost:8999"),
+            ("credential_file", "none"),
+            ("recall_query", "  Exact text\nwith \\\"quotes\\\" and 界  "),
+            ("timeout_ms", "8000"),
+        ] {
+            let updated = f.config.set(key, value).unwrap();
+            assert_eq!(updated.bindings, f.config.bindings);
+            if key != "enabled" {
+                assert!(!updated.enabled);
+            }
+        }
+        let unicode = "界".repeat(2730) + "ab";
+        assert_eq!(unicode.len(), 8192);
+        assert!(f.config.set("recall_query", &unicode).is_ok());
+        assert!(f.config.set("recall_query", &(unicode + "c")).is_err());
+        for (key, value) in [
+            ("enabled", "yes"),
+            ("endpoint", "https://user:token@example.invalid"),
+            ("credential_file", "paste-token-here"),
+            ("recall_query", "\0"),
+            ("recall_query", " "),
+            ("timeout_ms", "99"),
+            ("timeout_ms", "8001"),
+            ("version", "2"),
+            ("bindings", "[]"),
+        ] {
+            assert!(f.config.set(key, value).is_err(), "{key}");
+        }
+        let edited = f.config.bind(&f.registration, "replacement").unwrap();
+        assert!(!edited.enabled);
+        assert!(edited.bindings.contains(&f.config.bindings[1]));
     }
 }

@@ -530,7 +530,8 @@ fn live_service(directory: &Path) -> Result<Option<Record>> {
         Ok(process) => process,
         Err(_) => return Ok(None),
     };
-    let owner = crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
+    let owner =
+        crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
     if record.version != 1
         || record.boot_id != owner
         || process.owner != owner
@@ -539,7 +540,10 @@ fn live_service(directory: &Path) -> Result<Option<Record>> {
     {
         return Ok(None);
     }
-    let name = process.executable.file_name().and_then(|name| name.to_str());
+    let name = process
+        .executable
+        .file_name()
+        .and_then(|name| name.to_str());
     if !name.is_some_and(|name| name.eq_ignore_ascii_case("daedalus.exe")) {
         return Ok(None);
     }
@@ -612,7 +616,8 @@ fn stop_one_for_install(directory: &Path, timeout: std::time::Duration) -> Resul
 fn confirm_same_process(record: &Record) -> Result<()> {
     let process = crate::platform::process_identity(record.pid)
         .map_err(|_| "Service process is unavailable")?;
-    let owner = crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
+    let owner =
+        crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
     if record.version != 1
         || process.owner != owner
         || record.boot_id != owner
@@ -658,8 +663,8 @@ fn installed_executable() -> Result<PathBuf> {
 }
 #[cfg(windows)]
 fn file_identity(path: &Path) -> Result<(u64, u64)> {
-    let file = crate::platform::open_regular(path)
-        .map_err(|_| "Cannot inspect executable".to_string())?;
+    let file =
+        crate::platform::open_regular(path).map_err(|_| "Cannot inspect executable".to_string())?;
     crate::platform::file_identity(&file).map_err(|_| "Cannot identify executable".to_string())
 }
 #[cfg(windows)]
@@ -784,9 +789,7 @@ pub fn start(directory: &Path) -> Result<Value> {
 #[cfg(windows)]
 pub(crate) fn spawn_installed_service(directory: &Path, executable: &Path) -> Result<Value> {
     if !installed_target(executable)? {
-        return Err(
-            "Refusing to start Telegram from a temporary updater path".into(),
-        );
+        return Err("Refusing to start Telegram from a temporary updater path".into());
     }
     spawn_service(directory, executable)
 }
@@ -837,6 +840,7 @@ mod windows_tests {
         crate::platform::ensure_private_dir(&directory).unwrap();
         let global = directory.join("owners");
         let config = ServiceConfig {
+            runtime: Default::default(),
             version: 1,
             instance: "fixture".into(),
             bot_id: 123,

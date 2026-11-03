@@ -30,20 +30,102 @@ pub struct TerminalRef {
     pub place: String,
 }
 impl TerminalRef {
+    /// Decode identity without retaining potentially large display decorations.
+    pub fn decode_identity(value: &serde_json::Value) -> Option<Self> {
+        let backend = match value.get("backend")?.as_str()? {
+            "tmux" => Backend::Tmux,
+            "herdr" => Backend::Herdr,
+            "native" => Backend::Native,
+            _ => return None,
+        };
+        let field = |name: &str| -> Option<String> {
+            let text = value.get(name)?.as_str()?;
+            (text.len() <= 4096 && !text.chars().any(char::is_control)).then(|| text.to_owned())
+        };
+        for name in ["label", "place"] {
+            if value.get(name).is_some_and(|field| !field.is_string()) {
+                return None;
+            }
+        }
+        let reference = Self {
+            backend,
+            server: field("server")?,
+            pane_id: field("pane_id")?,
+            terminal_id: field("terminal_id")?,
+            generation: if value.get("generation").is_some() {
+                field("generation")?
+            } else {
+                String::new()
+            },
+            label: String::new(),
+            place: String::new(),
+        };
+        reference.validate().ok()?;
+        Some(reference)
+    }
+    /// Canonical endpoint identity, including the two historical display aliases.
+    /// No filesystem canonicalization or identity inference is performed.
+    pub fn identity(&self) -> Result<super::identity::TerminalId> {
+        let endpoint = match self.backend {
+            Backend::Native if self.server == "local" => self.pane_id.clone(),
+            Backend::Tmux if self.server.starts_with("tmux@") => {
+                let mut decoded = Vec::new();
+                let mut bytes = self.server[5..].bytes();
+                while let Some(byte) = bytes.next() {
+                    if byte == b'%' {
+                        let high = bytes.next().and_then(|b| (b as char).to_digit(16));
+                        let low = bytes.next().and_then(|b| (b as char).to_digit(16));
+                        let (Some(high), Some(low)) = (high, low) else {
+                            return Err("Invalid saved tmux endpoint encoding".into());
+                        };
+                        decoded.push((high * 16 + low) as u8);
+                    } else {
+                        decoded.push(byte);
+                    }
+                }
+                String::from_utf8(decoded).map_err(|_| "Invalid saved tmux endpoint encoding")?
+            }
+            _ => self.server.clone(),
+        };
+        let identity = super::identity::TerminalId {
+            backend: self.backend.clone(),
+            endpoint,
+            pane: self.pane_id.clone(),
+            generation: self.terminal_id.clone(),
+        };
+        identity.validate().map_err(str::to_owned)?;
+        Ok(identity)
+    }
     pub fn validate(&self) -> Result<()> {
         for field in [&self.server, &self.pane_id, &self.terminal_id] {
             if field.is_empty() || field.len() > 4096 || field.chars().any(char::is_control) {
                 return Err("Terminal identity is incomplete or invalid".into());
             }
         }
+        if self.generation.len() > 4096 || self.generation.chars().any(char::is_control) {
+            return Err("Invalid supplemental terminal generation".into());
+        }
+        self.identity()?;
         Ok(())
     }
     pub fn same_identity(&self, other: &Self) -> bool {
-        self.backend == other.backend
-            && self.server == other.server
-            && self.pane_id == other.pane_id
-            && self.terminal_id == other.terminal_id
-            && self.generation == other.generation
+        self.generation == other.generation
+            && self
+                .identity()
+                .ok()
+                .zip(other.identity().ok())
+                .is_some_and(|(a, b)| a == b)
+    }
+    /// Opaque UI selector includes every saved identity field, never labels.
+    pub fn key(&self) -> String {
+        serde_json::to_string(&(
+            &self.backend,
+            &self.server,
+            &self.pane_id,
+            &self.terminal_id,
+            &self.generation,
+        ))
+        .expect("Terminal reference strings serialize")
     }
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -66,9 +148,13 @@ pub fn resolve(reference: &TerminalRef, live: &[TerminalRef]) -> Resolution {
         1 => Resolution::Live(exact[0].0),
         n if n > 1 => Resolution::Ambiguous,
         _ if live.iter().any(|p| {
-            p.backend == reference.backend
-                && p.server == reference.server
-                && p.pane_id == reference.pane_id
+            reference
+                .identity()
+                .ok()
+                .zip(p.identity().ok())
+                .is_some_and(|(a, b)| {
+                    a.backend == b.backend && a.endpoint == b.endpoint && a.pane == b.pane
+                })
         }) =>
         {
             Resolution::Stale
@@ -488,6 +574,65 @@ mod tests {
             resolve(&saved, &[saved.clone(), saved.clone()]),
             Resolution::Ambiguous
         );
+    }
+    #[test]
+    fn legacy_display_endpoints_resolve_exactly_and_full_selectors_keep_generations() {
+        let live = reference();
+        let mut saved = live.clone();
+        saved.server = format!(
+            "tmux@{}",
+            live.server
+                .bytes()
+                .map(|b| format!("%{b:02X}"))
+                .collect::<String>()
+        );
+        assert!(saved.same_identity(&live));
+        assert_eq!(
+            resolve(&saved, std::slice::from_ref(&live)),
+            Resolution::Live(0)
+        );
+        saved.generation = "older".into();
+        assert_eq!(
+            resolve(&saved, std::slice::from_ref(&live)),
+            Resolution::Stale
+        );
+        assert_ne!(saved.key(), live.key());
+        saved.server = "tmux@%ZZ".into();
+        assert!(saved.validate().is_err());
+        let mut native = live;
+        native.backend = Backend::Native;
+        native.server = "native-1".into();
+        native.pane_id = "native-1".into();
+        let mut old = native.clone();
+        old.server = "local".into();
+        assert!(old.same_identity(&native));
+        old.generation = "bad\nidentity".into();
+        assert!(old.validate().is_err());
+    }
+    #[test]
+    fn identity_decoder_preserves_serde_validation_without_copying_display_labels() {
+        let mut value = serde_json::to_value(reference()).unwrap();
+        value["label"] = serde_json::json!("label".repeat(100000));
+        value["place"] = serde_json::json!("place".repeat(100000));
+        let decoded = TerminalRef::decode_identity(&value).unwrap();
+        assert!(decoded.same_identity(&reference()));
+        assert!(decoded.label.is_empty() && decoded.place.is_empty());
+        assert!(serde_json::to_vec(&decoded).unwrap().len() < 1024);
+        for key in [
+            "server",
+            "pane_id",
+            "terminal_id",
+            "generation",
+            "label",
+            "place",
+        ] {
+            let mut invalid = value.clone();
+            invalid[key] = serde_json::json!(17);
+            assert!(TerminalRef::decode_identity(&invalid).is_none());
+            assert!(serde_json::from_value::<TerminalRef>(invalid).is_err());
+        }
+        value["generation"] = serde_json::json!("x".repeat(4097));
+        assert!(TerminalRef::decode_identity(&value).is_none());
     }
     #[test]
     fn opening_layout_keeps_preferences() {

@@ -6,8 +6,12 @@ use std::{
     path::Path,
 };
 
-#[cfg(target_os = "linux")]
-const PROCESS_LIMIT: usize = 65_536;
+#[cfg(test)]
+pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String> {
+    let settings = crate::app::runtime_settings::Settings::default();
+    let budget = crate::app::discovery_budget::Budget::new(&settings)?;
+    collect_with(proc_root, managed, &settings, &budget)
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
@@ -96,7 +100,12 @@ fn is_shell(name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn project(processes: Vec<Process>, managed: &[Value]) -> Vec<Value> {
+fn project_with(
+    processes: Vec<Process>,
+    managed: &[Value],
+    deadline: std::time::Instant,
+    budget: &crate::app::discovery_budget::Budget,
+) -> Result<Vec<Value>, String> {
     let parents = processes.iter().map(|p| (p.pid, p.parent)).collect();
     let managed_pids = managed_pids(managed);
     let explicit_ttys: BTreeSet<_> = managed.iter().filter_map(|p| p["tty"].as_str()).collect();
@@ -111,8 +120,14 @@ fn project(processes: Vec<Process>, managed: &[Value]) -> Vec<Value> {
         })
         .map(|p| p.tty)
         .collect();
+    if std::time::Instant::now() >= deadline {
+        return Err("External process discovery deadline reached".into());
+    }
     let mut groups: BTreeMap<i64, Vec<&Process>> = BTreeMap::new();
     for process in &processes {
+        if std::time::Instant::now() >= deadline {
+            return Err("External process discovery deadline reached".into());
+        }
         if process.tty != 0
             && !managed_ttys.contains(&process.tty)
             && !matches!(process.state, 'Z' | 'X' | 'x')
@@ -120,13 +135,19 @@ fn project(processes: Vec<Process>, managed: &[Value]) -> Vec<Value> {
             groups.entry(process.tty).or_default().push(process);
         }
     }
-    groups.into_values().map(|mut group| {
+    let mut result = Vec::new();
+    for mut group in groups.into_values() {
+        if std::time::Instant::now() >= deadline {
+            return Err("External process discovery deadline reached".into());
+        }
         group.sort_by_key(|p| (p.start, p.pid));
         let root = group[0];
-        let foreground = group.iter().filter(|p| p.group == root.foreground_group)
+        let foreground = group
+            .iter()
+            .filter(|p| p.group == root.foreground_group)
             .min_by_key(|p| (p.start, p.pid));
         let names: BTreeSet<_> = group.iter().map(|p| p.name.as_str()).collect();
-        json!({
+        let row = json!({
             "id": format!("external:{}:{}", root.pid, root.start),
             "backend": "external", "kind": if is_shell(&root.name) { "shell" } else { "terminal" }, "pid": root.pid,
             "parent_pid": root.parent, "start_time": root.start,
@@ -136,8 +157,19 @@ fn project(processes: Vec<Process>, managed: &[Value]) -> Vec<Value> {
             "state": match root.state { 'R' => "running", 'T' | 't' => "stopped", _ => "waiting" },
             "controllable": false, "capture_available": false,
             "detail": "External terminal · process information only"
-        })
-    }).collect()
+        });
+        if budget.admit_value(&row).is_err() {
+            break;
+        }
+        result.push(row);
+    }
+    Ok(result)
+}
+#[cfg(all(test, target_os = "linux"))]
+fn project(processes: Vec<Process>, managed: &[Value]) -> Vec<Value> {
+    let settings = crate::app::runtime_settings::Settings::default();
+    let budget = crate::app::discovery_budget::Budget::new(&settings).unwrap();
+    project_with(processes, managed, budget.deadline, &budget).unwrap()
 }
 
 #[cfg(target_os = "linux")]
@@ -162,20 +194,29 @@ fn parse_stat(text: &str) -> Option<Process> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String> {
+pub(crate) fn collect_with(
+    proc_root: &Path,
+    managed: &[Value],
+    settings: &crate::app::runtime_settings::Settings,
+    budget: &crate::app::discovery_budget::Budget,
+) -> Result<Vec<Value>, String> {
     use std::{
         fs,
         io::Read,
         os::unix::fs::MetadataExt,
         time::{Duration, Instant},
     };
+    let deadline = budget
+        .deadline
+        .min(Instant::now() + Duration::from_millis(settings.external_discovery_timeout_ms));
     let entries =
         fs::read_dir(proc_root).map_err(|_| "Cannot enumerate local terminal processes")?;
-    let started = Instant::now();
     let uid = unsafe { libc::geteuid() };
     let mut processes = Vec::new();
-    let mut count = 0;
-    for entry in entries {
+    for (count, entry) in entries.enumerate() {
+        if count >= settings.external_discovery_entry_limit as usize || Instant::now() >= deadline {
+            return Err("External process discovery entry limit or deadline reached".into());
+        }
         let entry = entry.map_err(|_| "Process discovery changed during enumeration")?;
         let Some(number) = entry
             .file_name()
@@ -184,10 +225,6 @@ pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String
         else {
             continue;
         };
-        count += 1;
-        if count > PROCESS_LIMIT || started.elapsed() > Duration::from_secs(2) {
-            return Err("Local process discovery exceeded its safety bound".into());
-        }
         let directory = entry.path();
         let Ok(metadata) = fs::symlink_metadata(&directory) else {
             continue;
@@ -238,27 +275,66 @@ pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String
         }
         processes.push(process);
     }
-    Ok(project(processes, managed))
+    if Instant::now() >= deadline {
+        return Err("External process discovery deadline reached".into());
+    }
+    project_with(processes, managed, deadline, budget)
 }
 
 #[cfg(windows)]
-pub fn collect(_proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String> {
-    let snapshot = crate::platform::terminal_processes()
-        .map_err(|_| "Cannot enumerate owned Windows shell processes")?;
+pub(crate) fn collect_with(
+    _proc_root: &Path,
+    managed: &[Value],
+    settings: &crate::app::runtime_settings::Settings,
+    budget: &crate::app::discovery_budget::Budget,
+) -> Result<Vec<Value>, String> {
+    let deadline = budget.deadline.min(
+        std::time::Instant::now()
+            + std::time::Duration::from_millis(settings.external_discovery_timeout_ms),
+    );
+    let snapshot = crate::platform::terminal_processes(
+        settings.external_discovery_entry_limit as usize,
+        settings.external_discovery_query_limit as usize,
+        deadline,
+    )
+    .map_err(|_| "Cannot enumerate owned Windows shell processes")?;
     let managed = managed_pids(managed);
-    Ok(snapshot.processes.into_iter().filter(|p| !excluded(p.pid, &snapshot.parents, &managed)).map(|p| {
-        let name = clean(&p.executable.file_name().unwrap_or_default().to_string_lossy());
-        json!({"id": format!("external:{}:{}", p.pid, p.creation_time),
+    let mut rows = Vec::new();
+    for p in snapshot
+        .processes
+        .into_iter()
+        .filter(|p| !excluded(p.pid, &snapshot.parents, &managed))
+    {
+        if std::time::Instant::now() >= deadline {
+            return Err("External process discovery deadline reached".into());
+        }
+        let name = clean(
+            &p.executable
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+        );
+        let row = json!({"id": format!("external:{}:{}", p.pid, p.creation_time),
             "backend": "external", "kind": if is_shell(&name) { "shell" } else { "terminal_host" },
             "pid": p.pid, "parent_pid": p.parent_pid, "start_time": p.creation_time,
             "name": name, "executable": clean(&p.executable.to_string_lossy()),
             "cwd": null, "tty": null, "state": "running", "controllable": false,
-            "capture_available": false, "detail": "External process · window association unavailable"})
-    }).collect())
+            "capture_available": false, "detail": "External process · window association unavailable"});
+        if budget.admit_value(&row).is_err() {
+            break;
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn collect(_proc_root: &Path, _managed: &[Value]) -> Result<Vec<Value>, String> {
+pub(crate) fn collect_with(
+    _proc_root: &Path,
+    _managed: &[Value],
+    _settings: &crate::app::runtime_settings::Settings,
+    _budget: &crate::app::discovery_budget::Budget,
+) -> Result<Vec<Value>, String> {
     Err("External terminal process discovery is available on Linux and Windows".into())
 }
 
@@ -349,6 +425,28 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["cwd"], "/different/workspace");
         assert!(!serde_json::to_string(&rows).unwrap().contains("secret"));
+        let mut settings = crate::app::runtime_settings::Settings {
+            external_discovery_entry_limit: 1,
+            ..Default::default()
+        };
+        let budget = crate::app::discovery_budget::Budget::new(&settings).unwrap();
+        assert!(
+            collect_with(&root, &[], &settings, &budget)
+                .unwrap_err()
+                .contains("entry limit")
+        );
+        settings.external_discovery_entry_limit = 2;
+        let mut budget = crate::app::discovery_budget::Budget::new(&settings).unwrap();
+        assert_eq!(
+            collect_with(&root, &[], &settings, &budget).unwrap().len(),
+            2
+        );
+        budget.deadline = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        assert!(
+            collect_with(&root, &[], &settings, &budget)
+                .unwrap_err()
+                .contains("deadline")
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

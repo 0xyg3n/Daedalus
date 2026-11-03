@@ -1,0 +1,70 @@
+name: Native checks
+
+on:
+  push:
+    branches: [main, 'fix/session-identities*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 4
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust tools
+        shell: bash
+        run: rustup update stable --no-self-update && rustup component add clippy rustfmt
+      - name: Linux checks
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/check.sh
+      - name: Windows checks including native ConPTY
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows.ps1
+      - name: Linux executable and checksum
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          version="$(cat VERSION)"
+          mkdir dist
+          cp src/tui/target/release/daedalus-tui "dist/daedalus-$version-x86_64-linux"
+          cd dist
+          sha256sum "daedalus-$version-x86_64-linux" > "daedalus-$version-x86_64-linux.sha256"
+      - name: Windows executable, installer and checksums
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item src/tui/target/release/daedalus-tui.exe "dist/daedalus-$version-x86_64-windows.exe"
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path $nsis)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          & $nsis "/DPRODUCT_VERSION=$version" "/DBINARY=$pwd/dist/daedalus-$version-x86_64-windows.exe" "/DOUTPUT=$pwd/dist/Daedalus-$version-setup.exe" "/DICON=$pwd/assets/daedalus.ico" scripts/windows-installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
+          Get-ChildItem dist -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            [IO.File]::WriteAllText($_.FullName + '.sha256', "$hash  $($_.Name)`n", [Text.UTF8Encoding]::new($false))
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ runner.os }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

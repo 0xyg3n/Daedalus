@@ -13,7 +13,7 @@ use crate::{
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Modifier},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -834,6 +834,11 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         return 0;
     };
     let tile = node.tile.clone().unwrap_or_default();
+    let identity = ui
+        .settings
+        .agent_session_ids
+        .then(|| agent_session_label(node))
+        .flatten();
     let tone = terminal_status(node).1;
     let edge = if selected {
         Tone::Accent
@@ -883,14 +888,31 @@ fn wall_cell(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         ]))
         .title_top(Line::from(right).right_aligned())
         .style(theme.surface());
-    if rect.width >= 30 {
-        let place = fit(&tile.place, rect.width.saturating_sub(6) as usize, &theme);
+    if rect.width >= 10 && (identity.is_some() || rect.width >= 30) {
+        let place = fit(
+            identity.as_deref().unwrap_or(&tile.place),
+            rect.width.saturating_sub(6) as usize,
+            &theme,
+        );
         block = block.title_bottom(
-            Line::from(Span::styled(format!(" {place} "), theme.fg(Tone::Faint))).right_aligned(),
+            Line::from(Span::styled(
+                format!(" {place} "),
+                theme.fg(if identity.is_some() {
+                    Tone::Info
+                } else {
+                    Tone::Faint
+                }),
+            ))
+            .right_aligned(),
         );
     }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+    if let Some(label) = identity
+        && hovered(ui, Rect::new(rect.x, rect.bottom() - 1, rect.width, 1))
+    {
+        ui.tooltip = Some(detail_tip(rect, label));
+    }
     if inner.height == 0 || inner.width == 0 {
         return 0;
     }
@@ -968,7 +990,19 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
         let prefix = format!("{badge}{icon} ");
         let suffix = format!(" {status} ");
         let room = usize::from(inner.width).saturating_sub(width(&prefix) + width(&suffix));
-        let title = fit(&clean(title), room, &theme);
+        let identity = ui
+            .settings
+            .agent_session_ids
+            .then(|| node.and_then(agent_session_label))
+            .flatten();
+        let title = if height == 1
+            && let Some(label) = &identity
+        {
+            format!("{label} · {}", clean(title))
+        } else {
+            clean(title)
+        };
+        let title = fit(&title, room, &theme);
         let pad = room.saturating_sub(width(&title));
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -985,7 +1019,10 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
                 Paragraph::new(format!(
                     "   {}",
                     fit(
-                        &clean(place),
+                        &identity
+                            .as_ref()
+                            .map(|label| format!("{label} · {}", clean(place)))
+                            .unwrap_or_else(|| clean(place)),
                         usize::from(inner.width).saturating_sub(3),
                         &theme
                     )
@@ -997,6 +1034,11 @@ pub(super) fn wall_roster(f: &mut Frame, area: Rect, ui: &mut Ui, tiles: &[TileR
                     ..rect
                 },
             );
+        }
+        if let Some(label) = identity
+            && hovered(ui, rect)
+        {
+            ui.tooltip = Some(detail_tip(rect, label));
         }
         ui.tile_hits.push((rect, index));
     }
@@ -1059,6 +1101,15 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
             ),
         };
         let room = (rect.width as usize).saturating_sub(width(&age) + 4);
+        let identity = ui
+            .settings
+            .agent_session_ids
+            .then(|| node.and_then(agent_session_label))
+            .flatten();
+        let title = identity
+            .as_ref()
+            .map(|label| format!("{label} · {title}"))
+            .unwrap_or(title);
         let title = fit(&title, room, &theme);
         let pad = (rect.width as usize).saturating_sub(width(&title) + width(&age) + 3);
         let style = if selected {
@@ -1075,6 +1126,11 @@ fn wall_chips(f: &mut Frame, grid: Rect, ui: &mut Ui, tiles: &[TileRow]) {
             ])),
             rect,
         );
+        if let Some(label) = identity
+            && hovered(ui, rect)
+        {
+            ui.tooltip = Some(detail_tip(rect, label));
+        }
         ui.tile_hits.push((rect, n));
     }
 }
@@ -1189,7 +1245,12 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
             theme.fg(warm.unwrap_or(Tone::Faint)),
         ));
     }
-    let block = Block::default()
+    let identity = ui
+        .settings
+        .agent_session_ids
+        .then(|| agent_session_label(node))
+        .flatten();
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_set(if selected {
             theme.border_strong()
@@ -1207,23 +1268,40 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         ]))
         .title_top(Line::from(right).right_aligned())
         .style(theme.surface());
+    if identity.is_some() {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {} ", terminal_status(node).0),
+                theme.fg(tone),
+            ))
+            .right_aligned(),
+        );
+    }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     if inner.height == 0 {
         return 0;
     }
     let w = inner.width as usize;
-    let mut facts = vec![tile.place.clone()];
-    if !tile.harness.is_empty() {
+    let mut facts = vec![identity.clone().unwrap_or_else(|| tile.place.clone())];
+    if identity.is_none() && !tile.harness.is_empty() {
         facts.push(format!("{} {}", theme.icon(&tile.harness), tile.harness));
     }
-    if tile.viewer {
+    if identity.is_none() && tile.viewer {
         facts.push("Daedalus view".into());
     }
-    let state = fit(terminal_status(node).0, 16, &theme);
+    let state = if identity.is_some() {
+        String::new()
+    } else {
+        fit(terminal_status(node).0, 16, &theme)
+    };
     let left = fit(
         &facts.join(" · "),
-        w.saturating_sub(width(&state) + 3),
+        w.saturating_sub(if identity.is_some() {
+            1
+        } else {
+            width(&state) + 3
+        }),
         &theme,
     );
     let pad = w.saturating_sub(width(&left) + width(&state) + 2);
@@ -1235,6 +1313,11 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
         ])),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    if let Some(label) = identity
+        && hovered(ui, Rect::new(inner.x, inner.y, inner.width, 1))
+    {
+        ui.tooltip = Some(detail_tip(rect, label));
+    }
     let screen = Rect::new(
         inner.x + 1,
         inner.y + 1,
@@ -1283,10 +1366,7 @@ pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str)
                 );
                 map.push((row, left));
             }
-            Some((
-                Rect::new(screen.x, y, screen.width, map.len() as u16),
-                map,
-            ))
+            Some((Rect::new(screen.x, y, screen.width, map.len() as u16), map))
         }
         Some(preview) if preview.error.is_empty() => {
             // Bottom-aligned: the latest lines matter most.
@@ -1327,10 +1407,11 @@ pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str)
             None
         }
     };
-    if let Some((rect, rows)) = recorded {
-        if rect.width > 0 && rect.height > 0 {
-            ui.screens.push((rect, id.to_string(), rows));
-        }
+    if let Some((rect, rows)) = recorded
+        && rect.width > 0
+        && rect.height > 0
+    {
+        ui.screens.push((rect, id.to_string(), rows));
     }
 }
 
@@ -1367,8 +1448,16 @@ pub(super) fn session_field<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
         .map(|f| f.value.trim())
         .filter(|v| !v.is_empty() && !v.starts_with("not reported"))
 }
-pub(super) fn session_meta(node: &Node) -> String {
+pub(crate) fn agent_session_label(node: &Node) -> Option<String> {
+    let field = node.fields.iter().find(|f| f.key == "Agent session")?;
+    (field.tone == "id" && !field.value.trim().is_empty())
+        .then(|| format!("SID: {}", clean(field.value.trim()).replace('\n', " ")))
+}
+pub(super) fn session_meta(node: &Node, show_session_ids: bool) -> String {
     let mut facts = Vec::new();
+    if show_session_ids && let Some(label) = agent_session_label(node) {
+        facts.push(label);
+    }
     if let Some(tile) = &node.tile
         && !tile.harness.is_empty()
     {
@@ -1386,9 +1475,6 @@ pub(super) fn session_meta(node: &Node) -> String {
         });
     if let Some(pane) = pane {
         facts.push(clean(pane));
-    }
-    if let Some(sid) = session_field(node, "Agent session") {
-        facts.push(format!("#{}", sid.chars().take(8).collect::<String>()));
     }
     facts.extend(
         node.parts
@@ -1494,7 +1580,7 @@ pub(super) fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
         f.render_widget(Block::default().style(style), hit);
         f.render_widget(
             Paragraph::new(Line::from(tree_node_spans(
-                &theme,
+                ui,
                 row,
                 Some(node),
                 style,
@@ -1506,7 +1592,7 @@ pub(super) fn focus_structure(f: &mut Frame, area: Rect, ui: &mut Ui) {
         );
         let branch = node.tile.is_none() && row.children;
         let name = &row.title;
-        let metadata = session_meta(node);
+        let metadata = session_meta(node, ui.settings.agent_session_ids);
         let raw_branch: String = row.branch.chars().skip(3).collect();
         let continued = raw_branch
             .strip_suffix("├─ ")
@@ -1601,7 +1687,7 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         Some((Phase::Live, Mode::Control)) => ("CONTROL", Tone::Warn),
         Some((Phase::Live, Mode::Observe)) => ("OBSERVE", Tone::Accent),
     };
-    // Zoomed, the terminal is the pane. A frame would hide a row and a column.
+    // Zoomed, the optional identity strip reserves a row outside the terminal.
     let full = ui.zoomed;
     let inner = if full {
         area
@@ -1668,11 +1754,44 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         return None;
     }
     let _ = input;
-    let screen = inner;
+    let screen = if full
+        && ui.settings.agent_session_ids
+        && let Some(label) = node.as_ref().and_then(agent_session_label)
+    {
+        let label = if ui.snapshot.freshness.starts_with("STALE") {
+            format!("STALE · {label}")
+        } else {
+            label
+        };
+        let line = format!(
+            " {label} · {} · {chip}",
+            node.as_ref().map(session_name).unwrap_or_default()
+        );
+        f.render_widget(
+            Paragraph::new(fit(&line, inner.width as usize, &theme)).style(theme.fg(Tone::Info)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        if hovered(ui, Rect::new(inner.x, inner.y, inner.width, 1)) {
+            ui.tooltip = Some(detail_tip(inner, label));
+        }
+        Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(1),
+        )
+    } else {
+        inner
+    };
     let hints = if full {
         Rect::new(area.x, area.bottom() - 1, area.width, 1)
     } else {
-        Rect::new(area.x + 1, area.bottom() - 1, area.width.saturating_sub(2), 1)
+        Rect::new(
+            area.x + 1,
+            area.bottom() - 1,
+            area.width.saturating_sub(2),
+            1,
+        )
     };
     // A terminal in a split tab is shown with its neighbors, where the
     // backend places them; z zooms it alone.
@@ -1770,19 +1889,42 @@ pub(super) fn focus_screen(
 ) -> Option<(u16, u16)> {
     let theme = ui.theme;
     let Some(embed) = ui.embed.as_mut() else {
-        let lines: &[&str] = if known {
-            &[
-                "Not connected. Nothing is read from or sent to this terminal yet.",
-                "Enter or w watches it read-only. a attaches to type into it.",
-                "Esc returns. Detaching never stops the terminal.",
-            ]
+        let mut title = "Focus".to_owned();
+        let mut lines = Vec::new();
+        if known {
+            if let Some(node) = ui.terminal_node(&ui.focus_target) {
+                title = format!("Focus · {}", session_name(node));
+                lines.push(session_meta(
+                    node,
+                    !ui.zoomed && ui.settings.agent_session_ids,
+                ));
+                if let Some((topic, _)) = node.parts.iter().find(|(_, role)| role == "topic") {
+                    lines.push(clean(topic));
+                }
+                if let Some(folder) = session_field(node, "Folder") {
+                    lines.push(format!("Folder: {}", clean(folder)));
+                }
+                lines.push(String::new());
+            }
+            lines.extend(
+                [
+                    "Not connected. Nothing is read from or sent to this terminal yet.",
+                    "Enter or w watches it read-only. a attaches to type into it.",
+                    "Esc returns. Detaching never stops the terminal.",
+                ]
+                .map(str::to_owned),
+            );
         } else {
-            &[
-                "This terminal is no longer in the inventory.",
-                "Esc returns.",
-            ]
-        };
-        notice_box(f, screen, &theme, "Focus", lines);
+            lines.extend(
+                [
+                    "This terminal is no longer in the inventory.",
+                    "Esc returns.",
+                ]
+                .map(str::to_owned),
+            );
+        }
+        let borrowed: Vec<_> = lines.iter().map(String::as_str).collect();
+        notice_box(f, screen, &theme, &title, &borrowed);
         return None;
     };
     if screen.width < 20 || screen.height < 4 {
@@ -1841,23 +1983,54 @@ fn split_panes(
         .embed
         .as_ref()
         .is_some_and(|e| e.mode == Mode::Control && e.live());
+    if layout.geometry().is_none() {
+        notice_box(
+            f,
+            screen,
+            &theme,
+            "Layout unavailable",
+            &["Refresh before moving dividers. Terminal identities remain available in the tree."],
+        );
+        return None;
+    }
+    let mut nodes = std::collections::HashMap::new();
+    for (index, node) in ui.snapshot.tree.iter().enumerate() {
+        nodes.entry(node.id.clone()).or_insert(index);
+    }
     // Edges scale exactly, so neighbors share their borders without gaps.
     let scale = |at: u16, size: u16, origin: u16, room: u16| {
-        origin + (u32::from(at.min(size)) * u32::from(room) / u32::from(size.max(1))) as u16
+        origin.saturating_add(
+            (u32::from(at.min(size)) * u32::from(room) / u32::from(size.max(1))) as u16,
+        )
     };
+    let mut visible = std::collections::HashSet::new();
     let mut cursor = None;
     let mut most = 0;
     for pane in &layout.panes {
         let x0 = scale(pane.x, layout.width, screen.x, screen.width);
-        let x1 = scale(pane.x + pane.w, layout.width, screen.x, screen.width);
+        let x1 = scale(
+            pane.x.saturating_add(pane.w),
+            layout.width,
+            screen.x,
+            screen.width,
+        );
         let y0 = scale(pane.y, layout.height, screen.y, screen.height);
-        let y1 = scale(pane.y + pane.h, layout.height, screen.y, screen.height);
+        let y1 = scale(
+            pane.y.saturating_add(pane.h),
+            layout.height,
+            screen.y,
+            screen.height,
+        );
         let rect = Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0));
         if rect.width < 4 || rect.height < 3 {
             continue;
         }
+        visible.insert(pane.id.as_str());
         let here = pane.id == current;
-        let (title, state, age, edge) = match ui.snapshot.tree.iter().find(|n| n.id == pane.id) {
+        let (title, state, age, edge) = match nodes
+            .get(pane.id.as_str())
+            .map(|index| &ui.snapshot.tree[*index])
+        {
             Some(node) => {
                 let tile = node.tile.clone().unwrap_or_default();
                 let edge = if here {
@@ -1910,7 +2083,10 @@ fn split_panes(
     if most > 0 {
         ui.preview_rows = most;
     }
-    ui.pane_dividers = layout.dividers(screen);
+    ui.pane_dividers = layout.dividers(screen, &ui.snapshot.resize_settings);
+    ui.pane_dividers.retain(|edge| {
+        visible.contains(edge.leading.as_str()) && visible.contains(edge.trailing.as_str())
+    });
     for divider in &ui.pane_dividers {
         let hovered = ui
             .pointer
@@ -1934,21 +2110,21 @@ fn split_panes(
     }
     if let Some(drag) = &ui.pane_resize {
         let divider = &drag.divider;
-        let offset =
-            drag.cells * i32::from(divider.screen_length) / i32::from(divider.native_length.max(1));
+        let offset = i64::from(drag.cells) * i64::from(divider.screen_length)
+            / i64::from(divider.native_length.max(1));
         if divider.horizontal {
-            let x = (i32::from(divider.area.x) + offset).clamp(
-                i32::from(screen.x),
-                i32::from(screen.right().saturating_sub(1)),
+            let x = (i64::from(divider.area.x) + offset).clamp(
+                i64::from(screen.x),
+                i64::from(screen.right().saturating_sub(1)),
             ) as u16;
             for y in divider.area.y..divider.area.bottom() {
                 f.buffer_mut()
                     .set_string(x, y, theme.glyph("┃", "|"), theme.fg(Tone::Accent));
             }
         } else {
-            let y = (i32::from(divider.area.y) + offset).clamp(
-                i32::from(screen.y),
-                i32::from(screen.bottom().saturating_sub(1)),
+            let y = (i64::from(divider.area.y) + offset).clamp(
+                i64::from(screen.y),
+                i64::from(screen.bottom().saturating_sub(1)),
             ) as u16;
             for x in divider.area.x..divider.area.right() {
                 f.buffer_mut()
@@ -1993,4 +2169,38 @@ fn notice_box(f: &mut Frame, area: Rect, theme: &Theme, title: &str, lines: &[&s
         ),
         inner,
     );
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn hidden_scaled_panels_never_expose_resize_dividers() {
+        let layout: crate::model::Layout = serde_json::from_value(serde_json::json!({
+            "width":100,"height":40,"zoomed":false,"panes":[
+                {"id":"left","x":0,"y":0,"w":49,"h":40},
+                {"id":"right","x":50,"y":0,"w":50,"h":40}
+            ]
+        }))
+        .unwrap();
+        for (width, visible) in [(6, false), (40, true)] {
+            let mut ui = Ui::default();
+            let screen = Rect::new(0, 0, width, 12);
+            assert!(
+                !layout
+                    .dividers(screen, &ui.snapshot.resize_settings)
+                    .is_empty()
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    split_panes(frame, screen, &mut ui, &layout, "left");
+                })
+                .unwrap();
+            assert_eq!(!ui.pane_dividers.is_empty(), visible);
+            assert_eq!(ui.pane_hits.len(), if visible { 2 } else { 0 });
+        }
+    }
 }

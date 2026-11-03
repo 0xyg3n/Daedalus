@@ -124,7 +124,7 @@ impl Item {
                 "Show the artwork after the idle interval (15 seconds by default). Any key returns to work."
             }
             Item::Motion => {
-                "Enable transition effects. Your system reduced-motion preference takes priority."
+                "Enable transition effects. The reduced-motion setting or environment override takes priority."
             }
             Item::Keys => {
                 "Show contextual shortcuts along the bottom. F1 always opens searchable bindings."
@@ -136,7 +136,7 @@ impl Item {
                 "Review the latest release before downloading. Ctrl+U opens the same update check."
             }
             Item::Settings => {
-                "Open persistent configuration for Telegram, detected harnesses, accounts and hooks."
+                "Open interface, refresh, input, Telegram, harness, account and hook settings."
             }
         }
     }
@@ -198,13 +198,15 @@ pub fn value(ui: &Ui, item: Item) -> String {
         Item::Look if !ui.theme.backdrop => "Plain · background disabled".into(),
         Item::Look => ui.look.describe().into(),
         Item::Saver if !ui.saver.enabled => "Off".into(),
+        Item::Saver if ui.theme.screensaver == 0 => "Paused · idle delay disabled".into(),
+        Item::Saver if !ui.theme.backdrop => "Paused · artwork unavailable".into(),
         Item::Saver => "On".into(),
         Item::Motion if ui.still => "Still · reduced motion is set".into(),
         Item::Motion if ui.prefs.motion => "On".into(),
         Item::Motion => "Still".into(),
         Item::Keys => shown(!ui.hide_keys),
         Item::Reset => "Every border back to its default".into(),
-        Item::Settings => "Telegram, harnesses and accounts".into(),
+        Item::Settings => "Interface, connections and accounts".into(),
         Item::Updates => format!(
             "Installed {} · check GitHub releases",
             env!("CARGO_PKG_VERSION")

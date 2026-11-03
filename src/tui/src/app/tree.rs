@@ -1,6 +1,7 @@
 //! Pure projection of discovered topology into the existing TUI protocol.
 //! Display names never identify terminals. Callers supply time/home/hostname;
 //! projecting a snapshot performs no filesystem, terminal or network reads.
+use super::tree_relations::{Budget as RelationshipBudget, Index as RelationshipIndex};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,6 +11,8 @@ pub struct ProjectionContext {
     pub home: String,
     pub now: f64,
     pub pins: Vec<Value>,
+    pub runtime: super::runtime_settings::Settings,
+    pub checkpoint_matches: super::interface_settings::CheckpointMatches,
 }
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -20,13 +23,23 @@ pub struct Node {
     pub kind: String,
     pub pane: Option<Value>,
     pub attributes: Map<String, Value>,
+    shared_views: Option<std::sync::Arc<Value>>,
 }
 impl Node {
     pub fn id(&self) -> String {
         key_id(&self.key)
     }
+    fn attr_ref(&self, key: &str) -> Option<&Value> {
+        if key == "views" {
+            self.shared_views
+                .as_deref()
+                .or_else(|| self.attributes.get(key))
+        } else {
+            self.attributes.get(key)
+        }
+    }
     fn attr(&self, key: &str) -> Value {
-        self.attributes.get(key).cloned().unwrap_or(Value::Null)
+        self.attr_ref(key).cloned().unwrap_or(Value::Null)
     }
 }
 #[derive(Debug, Clone, Default)]
@@ -34,6 +47,9 @@ pub struct Tree {
     pub nodes: Vec<Node>,
     pub roots: Vec<usize>,
     by_id: BTreeMap<String, usize>,
+    pub relationships_limited: bool,
+    pub layout_warnings: Vec<&'static str>,
+    pub observation_warnings: Vec<&'static str>,
 }
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
@@ -93,6 +109,7 @@ pub fn is_agent(pane: &Value) -> bool {
         !agent.is_empty() && !SHELLS.contains(&agent.as_str())
     } else {
         HARNESSES.contains(&agent.as_str())
+            || crate::adapters::harnesses::canonical_id(&agent).is_some()
     }
 }
 fn graphics_title(title: &str) -> bool {
@@ -165,12 +182,9 @@ fn label_parts(pane: &Value, title: &str, hostname: &str) -> Value {
     parts.into()
 }
 fn native_sid(pane: &Value) -> String {
-    let native = &pane["agent_session"];
-    if native["kind"] == "id" && native.get("agent") == pane.get("agent") {
-        first(native, &["value"])
-    } else {
-        String::new()
-    }
+    crate::adapters::terminals::reported_session(pane)
+        .unwrap_or_default()
+        .into()
 }
 fn session_gap(pane: &Value, health: &Value) -> Value {
     if s(pane, "backend") == "native" {
@@ -284,6 +298,7 @@ impl Tree {
             kind: kind.into(),
             pane: pane.cloned(),
             attributes: Map::new(),
+            shared_views: None,
         });
         self.by_id.insert(id, index);
         if let Some(parent) = parent {
@@ -293,12 +308,124 @@ impl Tree {
         }
         index
     }
+    fn add_lazy(
+        &mut self,
+        key: Vec<Value>,
+        parent: Option<usize>,
+        label: impl FnOnce() -> String,
+        kind: &str,
+    ) -> usize {
+        if let Some(index) = self.by_id.get(&key_id(&key)) {
+            return *index;
+        }
+        self.add(key, parent, label(), kind, None)
+    }
     pub fn find(&self, id: &str) -> Option<&Node> {
         self.by_id.get(id).map(|i| &self.nodes[*i])
     }
+    fn add_relationship(
+        &mut self,
+        budget: &mut RelationshipBudget,
+        key: Vec<Value>,
+        parent: usize,
+        label: String,
+        kind: &str,
+        attribute: Option<(&str, &Value)>,
+    ) -> bool {
+        if self.by_id.contains_key(&key_id(&key)) {
+            return true;
+        }
+        if !budget.admit(&(&key, &label, kind, attribute)) {
+            return false;
+        }
+        let node = self.add(key, Some(parent), label, kind, None);
+        if let Some((key, value)) = attribute {
+            self.nodes[node]
+                .attributes
+                .insert(key.into(), value.clone());
+        }
+        true
+    }
+    fn add_checkpoint(
+        &mut self,
+        budget: &mut RelationshipBudget,
+        parent: usize,
+        saved: &Value,
+        pane: &Value,
+        mode: super::interface_settings::CheckpointMatches,
+    ) -> bool {
+        let key = extend(
+            &self.nodes[parent].key,
+            ["checkpoint".into(), v(saved, "key")],
+        );
+        if self.by_id.contains_key(&key_id(&key)) {
+            return true;
+        }
+        let origin = saved
+            .get("source")
+            .and_then(crate::core::layouts::TerminalRef::decode_identity)
+            .zip(crate::adapters::terminals::reference(pane).ok())
+            .is_some_and(|(a, b)| a.same_identity(&b));
+        if mode == super::interface_settings::CheckpointMatches::Off
+            || (mode == super::interface_settings::CheckpointMatches::Source && !origin)
+        {
+            return true;
+        }
+        let prefix = if origin {
+            "Checkpoint saved here"
+        } else {
+            "Checkpoint ID match"
+        };
+        let label = format!("{prefix} · {}", s(saved, "name"));
+        let evidence = json!({"kind":if origin{"source_origin"}else{"native_id_only"},"message":if origin{"Saved from this terminal; current profile is unverified."}else{"Native ID match only; current profile and source affiliation are unverified."}});
+        let parts = json!([
+            [prefix, "rose"],
+            [s(saved, "name"), "title"],
+            ["Profile unverified", "warn"]
+        ]);
+        if !budget.admit(&(
+            &key,
+            &label,
+            "checkpoint",
+            ("checkpoint", saved),
+            ("checkpoint_match", &evidence),
+            ("parts", &parts),
+        )) {
+            return false;
+        }
+        let node = self.add(key, Some(parent), label, "checkpoint", None);
+        self.nodes[node]
+            .attributes
+            .insert("checkpoint".into(), saved.clone());
+        self.nodes[node]
+            .attributes
+            .insert("checkpoint_match".into(), evidence);
+        self.nodes[node].attributes.insert("parts".into(), parts);
+        true
+    }
     pub fn build(snapshot: &Value, health: &Value, context: &ProjectionContext) -> Self {
         let mut tree = Self::default();
-        let mut panes: Vec<&Value> = array(snapshot, "panes").iter().collect();
+        let mut relationship_budget = RelationshipBudget::new(&context.runtime);
+        let mut relationships = RelationshipIndex::new(
+            snapshot,
+            health,
+            &mut relationship_budget,
+            context.checkpoint_matches != super::interface_settings::CheckpointMatches::Off,
+        );
+        let observations = crate::adapters::pane_observations::index(array(snapshot, "panes"));
+        if observations.conflicts > 0 {
+            tree.observation_warnings
+                .push(crate::adapters::pane_observations::WARNING);
+            relationships.views_complete = false;
+        }
+        let admitted: Vec<_> = observations
+            .panes
+            .iter()
+            .map(|pane| pane.as_ref())
+            .collect();
+        let view_index = view_index(&admitted);
+        let mut view_cache = std::collections::HashMap::new();
+        let mut panes: Vec<&Value> = admitted;
         panes.sort_by_key(|p| {
             [
                 "backend",
@@ -312,20 +439,22 @@ impl Tree {
             .map(|k| s(p, k))
         });
         let mut groups: BTreeMap<(String, String), BTreeMap<String, String>> = BTreeMap::new();
-        let mut kept: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut kept = std::collections::HashMap::new();
         for (index, pane) in panes.iter().enumerate() {
             if s(pane, "backend") == "tmux" && !first(pane, &["session_group"]).is_empty() {
                 groups
                     .entry((s(pane, "socket"), s(pane, "session_group")))
                     .or_default()
                     .insert(s(pane, "session_id"), s(pane, "session"));
-                let selected = kept
-                    .entry((s(pane, "socket"), s(pane, "pane_id")))
-                    .or_insert(index);
-                if s(pane, "session") == s(pane, "session_group")
-                    && s(panes[*selected], "session") != s(pane, "session")
-                {
-                    *selected = index;
+                if let Ok(identity) = crate::adapters::terminals::identity(pane) {
+                    let selected = kept
+                        .entry((identity, s(pane, "session_group")))
+                        .or_insert(index);
+                    if s(pane, "session") == s(pane, "session_group")
+                        && s(panes[*selected], "session") != s(pane, "session")
+                    {
+                        *selected = index;
+                    }
                 }
             }
         }
@@ -335,38 +464,34 @@ impl Tree {
             .filter(|(i, p)| {
                 s(p, "backend") != "tmux"
                     || first(p, &["session_group"]).is_empty()
-                    || kept.get(&(s(p, "socket"), s(p, "pane_id"))) == Some(i)
+                    || crate::adapters::terminals::identity(p)
+                        .map_or(true, |id| kept.get(&(id, s(p, "session_group"))) == Some(i))
             })
             .map(|(_, p)| *p)
             .collect();
-        let identity = |pane: &Value| {
-            (
-                s(pane, "backend"),
-                first(pane, &["socket", "server", "session"]),
-                first(pane, &["terminal_id", "pane_id"]),
-            )
-        };
-        let mut identities: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+        let mut identities = std::collections::HashMap::new();
         for pane in &panes {
-            *identities.entry(identity(pane)).or_default() += 1;
+            if let Ok(id) = crate::adapters::terminals::identity(pane) {
+                *identities.entry(id).or_insert(0usize) += 1;
+            }
         }
-        let mut placed: BTreeMap<(String, String, String), (usize, usize)> = BTreeMap::new();
         for pane in panes {
             let backend = s(pane, "backend");
             let server = first(pane, &["socket", "server", "session"]);
             let herdr = backend == "herdr";
             let native = backend == "native";
             let root_key = vec![backend.clone().into(), server.clone().into()];
-            let root = tree.add(
+            let root = tree.add_lazy(
                 root_key.clone(),
                 None,
-                if native {
-                    "DAEDALUS · Native terminals".into()
-                } else {
-                    format!("{} · {server}", backend.to_uppercase())
+                || {
+                    if native {
+                        "DAEDALUS · Native terminals".into()
+                    } else {
+                        format!("{} · {server}", backend.to_uppercase())
+                    }
                 },
                 "server",
-                None,
             );
             let project = if herdr {
                 v(pane, "workspace_id")
@@ -376,21 +501,29 @@ impl Tree {
             };
             let project_key = extend(&root_key, ["project".into(), project.clone()]);
             let sessions = groups.get(&(s(pane, "socket"), s(pane, "session_group")));
-            let project_label = if native {
-                first(pane, &["workspace_label", "workspace_id"])
-            } else if herdr {
-                topology_label(snapshot, "workspaces", &server, &project, &text(&project))
-            } else {
-                format!(
-                    "{}{}",
-                    s(pane, "session"),
-                    sessions
-                        .filter(|g| g.len() > 1)
-                        .map(|g| format!(" (+{} grouped)", g.len() - 1))
-                        .unwrap_or_default()
-                )
+            let project_label = || {
+                if native {
+                    first(pane, &["workspace_label", "workspace_id"])
+                } else if herdr {
+                    topology_label(
+                        &relationships,
+                        "workspaces",
+                        &server,
+                        &project,
+                        &text(&project),
+                    )
+                } else {
+                    format!(
+                        "{}{}",
+                        s(pane, "session"),
+                        sessions
+                            .filter(|g| g.len() > 1)
+                            .map(|g| format!(" (+{} grouped)", g.len() - 1))
+                            .unwrap_or_default()
+                    )
+                }
             };
-            let project_node = tree.add(
+            let project_node = tree.add_lazy(
                 project_key.clone(),
                 Some(root),
                 project_label,
@@ -399,7 +532,6 @@ impl Tree {
                 } else {
                     "tmux session"
                 },
-                None,
             );
             let group = if herdr {
                 v(pane, "tab_id")
@@ -408,17 +540,18 @@ impl Tree {
                 Value::String(if id.is_empty() { "?".into() } else { id })
             };
             let group_key = extend(&project_key, ["group".into(), group.clone()]);
-            let group_label = if herdr {
-                topology_label(snapshot, "tabs", &server, &group, &text(&group))
-            } else {
-                pane.get("window").map(text).unwrap_or_else(|| text(&group))
+            let group_label = || {
+                if herdr {
+                    topology_label(&relationships, "tabs", &server, &group, &text(&group))
+                } else {
+                    pane.get("window").map(text).unwrap_or_else(|| text(&group))
+                }
             };
-            let group_node = tree.add(
+            let group_node = tree.add_lazy(
                 group_key.clone(),
                 Some(project_node),
                 group_label,
                 if herdr { "tab" } else { "window" },
-                None,
             );
             let pane_key = extend(
                 &group_key,
@@ -428,11 +561,11 @@ impl Tree {
                     pane.get("terminal_id").cloned().unwrap_or("".into()),
                 ],
             );
-            let viewer = array(snapshot, "daedalus_views").iter().find(|viewer| {
-                s(viewer, "backend") == backend
-                    && s(viewer, "server") == first(pane, &["server", "session"])
-                    && viewer.get("pane_id") == pane.get("pane_id")
-            });
+            let viewer = (!crate::adapters::pane_observations::conflicted(pane))
+                .then(|| crate::adapters::terminals::identity(pane).ok())
+                .flatten()
+                .and_then(|identity| relationships.viewers.get(&identity))
+                .copied();
             let title = viewer
                 .map(|v| {
                     format!(
@@ -462,27 +595,57 @@ impl Tree {
                 "pane",
                 Some(pane),
             );
-            placed.insert(
-                (backend.clone(), server.clone(), s(pane, "pane_id")),
-                (group_node, pane_node),
-            );
             let active_at = pane.get("activity_at").and_then(number).unwrap_or_default();
             let activity = first(pane, &["activity"]);
-            let linked = identities.get(&identity(pane)).copied().unwrap_or_default();
+            let linked = crate::adapters::terminals::identity(pane)
+                .ok()
+                .and_then(|id| identities.get(&id))
+                .copied()
+                .unwrap_or(1);
             let viewed = backend == "tmux"
-                && array(snapshot, "clients").iter().any(|c| {
-                    c.get("socket") == pane.get("socket")
-                        && c.get("pane_id") == pane.get("pane_id")
-                        && sessions
-                            .map(|g| g.contains_key(&s(c, "session_id")))
-                            .unwrap_or_else(|| c.get("session_id") == pane.get("session_id"))
-                });
+                && sessions
+                    .map(|group| {
+                        group.keys().any(|id| {
+                            relationships
+                                .clients
+                                .get(&(s(pane, "socket").as_str(), id.as_str()))
+                                .is_some_and(|stats| {
+                                    stats.active.contains(s(pane, "pane_id").as_str())
+                                })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        relationships
+                            .clients
+                            .get(&(s(pane, "socket").as_str(), s(pane, "session_id").as_str()))
+                            .is_some_and(|stats| stats.active.contains(s(pane, "pane_id").as_str()))
+                    });
             let focused = herdr
-                && array(snapshot, "herdr_focus").iter().any(|f| {
-                    f.get("session") == pane.get("session")
-                        && f.get("pane_id") == pane.get("pane_id")
-                });
-            tree.nodes[pane_node].attributes=json!({"parts":label_parts(pane,&title,&context.hostname),"viewer":viewer,"views":views(pane,snapshot),"state":state,"activity_at":active_at,"activity":activity,"linked":linked,"viewed":viewed,"server_focused":focused}).as_object().unwrap().clone();
+                && relationships
+                    .focus
+                    .contains(&(s(pane, "session").as_str(), s(pane, "pane_id").as_str()));
+            let shared = if let Ok(id) = crate::adapters::terminals::identity(pane) {
+                view_cache
+                    .entry(id)
+                    .or_insert_with(|| {
+                        std::sync::Arc::new(views(
+                            pane,
+                            &view_index,
+                            &relationships,
+                            &mut relationship_budget,
+                        ))
+                    })
+                    .clone()
+            } else {
+                std::sync::Arc::new(views(
+                    pane,
+                    &view_index,
+                    &relationships,
+                    &mut relationship_budget,
+                ))
+            };
+            tree.nodes[pane_node].shared_views = Some(shared);
+            tree.nodes[pane_node].attributes=json!({"parts":label_parts(pane,&title,&context.hostname),"viewer":viewer,"state":state,"activity_at":active_at,"activity":activity,"linked":linked,"viewed":viewed,"server_focused":focused}).as_object().unwrap().clone();
             if let Some(key) = super::workspace_usage::key(pane)
                 && let Some(usage) = snapshot.get("workspace_usage").and_then(|u| u.get(&key))
             {
@@ -490,13 +653,16 @@ impl Tree {
                     .attributes
                     .insert("usage".into(), usage.clone());
             }
-            for client in array(snapshot, "clients") {
-                if backend == "tmux"
-                    && array(client, "outer_panes").iter().any(|outer| {
-                        outer.get("socket") == pane.get("socket")
-                            && outer.get("pane_id") == pane.get("pane_id")
-                    })
+            if backend == "tmux" {
+                for client in relationships
+                    .nested
+                    .get(&(s(pane, "socket").as_str(), s(pane, "pane_id").as_str()))
+                    .into_iter()
+                    .flatten()
                 {
+                    if !relationship_budget.details_left() {
+                        break;
+                    }
                     let key = extend(
                         &pane_key,
                         [
@@ -505,9 +671,10 @@ impl Tree {
                             s(client, "client").into(),
                         ],
                     );
-                    tree.add(
+                    if !tree.add_relationship(
+                        &mut relationship_budget,
                         key,
-                        Some(pane_node),
+                        pane_node,
                         format!(
                             "Nested tmux view → {} / {}",
                             s(client, "socket"),
@@ -515,13 +682,16 @@ impl Tree {
                         ),
                         "nested view",
                         None,
-                    );
+                    ) {
+                        break;
+                    }
                 }
             }
             if backend == "tmux" && !first(pane, &["herdr_session"]).is_empty() {
-                tree.add(
+                tree.add_relationship(
+                    &mut relationship_budget,
                     extend(&pane_key, ["herdr-view".into(), v(pane, "herdr_session")]),
-                    Some(pane_node),
+                    pane_node,
                     format!("Herdr view → {}", s(pane, "herdr_session")),
                     "declared view",
                     None,
@@ -551,114 +721,95 @@ impl Tree {
                 let agent_node = tree.add(
                     key.clone(),
                     Some(pane_node),
-                    format!(
-                        "{harness} · {}",
-                        if sid.is_empty() {
-                            "session ID not reported"
-                        } else {
-                            &short
-                        }
-                    ),
+                    if sid.is_empty() {
+                        harness.clone()
+                    } else {
+                        format!("{harness} · {short}")
+                    },
                     "agent session",
                     Some(pane),
                 );
                 let gap = tree.nodes[pane_node].attr("sid_gap");
                 let brief = gap.get(0).and_then(Value::as_str).unwrap_or_default();
-                let mut parts = vec![
-                    json!([harness, "harness"]),
-                    if !sid.is_empty() {
-                        json!([short, "sid"])
-                    } else {
-                        json!([
-                            if brief.is_empty() {
-                                "session ID not reported"
-                            } else {
-                                "no session ID"
-                            },
-                            "muted"
-                        ])
-                    },
-                ];
+                let mut parts = vec![json!([harness, "harness"])];
+                if !sid.is_empty() {
+                    parts.push(json!([short, "sid"]));
+                }
                 if !brief.is_empty() {
                     parts.push(json!([brief, "warn"]));
                 }
                 tree.nodes[agent_node].attributes=json!({"sid":sid,"sid_gap":gap,"parts":parts,"state":state,"activity_at":active_at,"activity":activity,"linked":linked}).as_object().unwrap().clone();
-                for saved in array(health, "checkpoints") {
-                    if !sid.is_empty()
-                        && s(saved, "sid") == sid
-                        && saved.get("harness") == pane.get("agent")
+                if !sid.is_empty() {
+                    for saved in relationships
+                        .checkpoints
+                        .get(&(s(pane, "agent").as_str(), sid.as_str()))
+                        .into_iter()
+                        .flatten()
                     {
-                        let leaf = tree.add(
-                            extend(&key, ["checkpoint".into(), v(saved, "key")]),
-                            Some(agent_node),
-                            format!("Checkpoint · {}", s(saved, "name")),
-                            "checkpoint",
-                            None,
-                        );
-                        tree.nodes[leaf]
-                            .attributes
-                            .insert("checkpoint".into(), saved.clone());
+                        if !relationship_budget.details_left() {
+                            break;
+                        }
+                        if !tree.add_checkpoint(
+                            &mut relationship_budget,
+                            agent_node,
+                            saved,
+                            pane,
+                            context.checkpoint_matches,
+                        ) {
+                            break;
+                        }
                     }
                 }
             }
             // Native routes carry the complete identity; labels and pane numbers
             // alone must never attach a route to a replacement terminal.
             if let Ok(identity) = crate::adapters::terminals::identity(pane) {
-                for saved in array(health, "native_routes") {
-                    let Ok(route) =
-                        serde_json::from_value::<crate::core::routes::Route>(saved.clone())
-                    else {
-                        continue;
-                    };
-                    if route.terminal == identity
-                        && route.revision > 0
-                        && route.scope.validate().is_ok()
-                    {
-                        let chat = route.scope.chat;
-                        tree.add(
-                            extend(&pane_key, ["telegram".into(), chat.clone().into()]),
-                            Some(pane_node),
-                            format!("Telegram chat · {chat}"),
-                            "saved route",
-                            None,
-                        );
+                for chat in relationships.routes.get(&identity).into_iter().flatten() {
+                    if !relationship_budget.details_left() {
+                        break;
                     }
-                }
-            }
-            let bindings: Vec<_> = array(health, "bindings")
-                .iter()
-                .filter(|b| {
-                    s(b, "backend") == backend
-                        && s(b, "server") == first(pane, &["server", "session"])
-                        && b.get("terminal_id") == pane.get("terminal_id")
-                })
-                .collect();
-            if bindings.len() == 1
-                && bindings[0]
-                    .get("display")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| !name.is_empty())
-                && array(health, "bindings")
-                    .iter()
-                    .filter(|binding| binding.get("display") == bindings[0].get("display"))
-                    .count()
-                    == 1
-                && let Some(routes) = health.get("routes").and_then(Value::as_object)
-            {
-                for (chat, target) in routes {
-                    if Some(target) == bindings[0].get("display") {
-                        tree.add(
-                            extend(&pane_key, ["telegram".into(), chat.clone().into()]),
-                            Some(pane_node),
-                            format!("Telegram chat · {chat}"),
-                            "saved route",
-                            None,
-                        );
+                    if !tree.add_relationship(
+                        &mut relationship_budget,
+                        extend(&pane_key, ["telegram".into(), (*chat).into()]),
+                        pane_node,
+                        format!("Telegram chat · {chat}"),
+                        "saved route",
+                        None,
+                    ) {
+                        break;
                     }
                 }
             }
         }
-        tree.lay_out(snapshot, &placed);
+        let projected = super::tree_layout::project(&tree, snapshot, &context.runtime);
+        tree.layout_warnings = projected.warnings.into_iter().collect();
+        for group in projected.groups {
+            tree.nodes[group.parent]
+                .attributes
+                .insert("layout".into(), group.value);
+            let expected: std::collections::HashSet<_> =
+                tree.nodes[group.parent].children.iter().copied().collect();
+            let ordered: std::collections::HashSet<_> = group.order.iter().copied().collect();
+            let mut children: Vec<_> = group
+                .order
+                .iter()
+                .copied()
+                .filter(|index| expected.contains(index))
+                .collect();
+            children.extend(
+                tree.nodes[group.parent]
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|index| !ordered.contains(index)),
+            );
+            tree.nodes[group.parent].children = children;
+            for index in &group.order {
+                tree.nodes[*index]
+                    .attributes
+                    .insert("split".into(), group.order.len().into());
+            }
+        }
         for (collection, kind) in [("workspaces", "workspace"), ("tabs", "tab")] {
             for item in array(snapshot, collection) {
                 let server = first(item, &["session"]);
@@ -681,7 +832,13 @@ impl Tree {
                 let project_node = tree.add(
                     key.clone(),
                     Some(root),
-                    topology_label(snapshot, "workspaces", &server, &project, &text(&project)),
+                    topology_label(
+                        &relationships,
+                        "workspaces",
+                        &server,
+                        &project,
+                        &text(&project),
+                    ),
                     "workspace",
                     None,
                 );
@@ -761,26 +918,20 @@ impl Tree {
                 .attributes
                 .insert("pane_count".into(), count.into());
         }
+        tree.relationships_limited = relationship_budget.limited;
         tree
     }
 }
 fn topology_label(
-    snapshot: &Value,
+    index: &RelationshipIndex<'_>,
     collection: &str,
     server: &str,
     id: &Value,
     fallback: &str,
 ) -> String {
-    array(snapshot, collection)
-        .iter()
-        .find(|row| {
-            s(row, "session") == server
-                && row.get(if collection == "workspaces" {
-                    "workspace_id"
-                } else {
-                    "tab_id"
-                }) == Some(id)
-        })
+    index
+        .topology
+        .get(&(collection, server, id))
         .map(|row| {
             let name = first(row, &["label", "name"]);
             if name.is_empty() {
@@ -797,24 +948,40 @@ fn number(value: &Value) -> Option<f64> {
         .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
         .filter(|n| n.is_finite())
 }
-fn views(pane: &Value, snapshot: &Value) -> Value {
+type ViewIndex<'a> = std::collections::HashMap<crate::core::identity::TerminalId, Vec<&'a Value>>;
+fn view_index<'a>(panes: &[&'a Value]) -> ViewIndex<'a> {
+    let mut index = ViewIndex::new();
+    for pane in panes {
+        if let Ok(id) = crate::adapters::terminals::identity(pane) {
+            index.entry(id).or_default().push(*pane);
+        }
+    }
+    index
+}
+fn views(
+    pane: &Value,
+    index: &ViewIndex<'_>,
+    relationships: &RelationshipIndex<'_>,
+    budget: &mut RelationshipBudget,
+) -> Value {
+    let id = crate::adapters::terminals::identity(pane).ok();
+    let fallback = [pane];
+    let same = id
+        .as_ref()
+        .and_then(|id| index.get(id))
+        .map(Vec::as_slice)
+        .unwrap_or(&fallback);
+    let viewers = id
+        .as_ref()
+        .and_then(|identity| relationships.sources.get(identity))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let count = same.len() + viewers.len();
     let mut places = Vec::new();
-    let mut typing = Vec::new();
-    let mut watching = Vec::new();
-    let mut control = Vec::new();
-    let same: Vec<_> = if truth(&pane["terminal_id"]) {
-        array(snapshot, "panes")
-            .iter()
-            .filter(|p| {
-                p.get("backend") == pane.get("backend")
-                    && first(p, &["socket", "server"]) == first(pane, &["socket", "server"])
-                    && p.get("terminal_id") == pane.get("terminal_id")
-            })
-            .collect()
-    } else {
-        vec![pane]
-    };
-    for p in &same {
+    for p in same {
+        if !budget.details_left() {
+            break;
+        }
         let session = first(p, &["session"]);
         let backend = s(p, "backend");
         let kind = if session.starts_with("daedalus-view-") {
@@ -845,42 +1012,45 @@ fn views(pane: &Value, snapshot: &Value) -> Value {
                 if window.is_empty() { "?" } else { &window }
             )
         };
-        places.push(format!("{kind} {place}"));
+        let place = format!("{kind} {place}");
+        if budget.admit(&place) {
+            places.push(place);
+        }
     }
+    for viewer in viewers {
+        if !budget.details_left() {
+            break;
+        }
+        let place = format!("Daedalus viewer pane {}", s(viewer, "label"));
+        if budget.admit(&place) {
+            places.push(place);
+        }
+    }
+    // Only aggregate counts are consumed by the renderer. Retaining a full copy
+    // of every client label for every terminal produces a quadratic expansion.
+    let mut typing = 0usize;
+    let mut regular = 0usize;
+    let mut control = 0usize;
     if s(pane, "backend") == "tmux" {
-        for client in array(snapshot, "clients") {
-            if s(client, "backend") != "tmux"
-                || client.get("socket") != pane.get("socket")
-                || !same
-                    .iter()
-                    .any(|p| p.get("session_id") == client.get("session_id"))
+        let socket = s(pane, "socket");
+        let active = s(pane, "pane_id");
+        let mut sessions = std::collections::HashSet::new();
+        for p in same {
+            let session = p.get("session_id").and_then(Value::as_str).unwrap_or("");
+            if sessions.insert(session)
+                && let Some(stats) = relationships.clients.get(&(socket.as_str(), session))
             {
-                continue;
-            }
-            let flags = s(client, "flags");
-            let flags: Vec<_> = flags.split(',').collect();
-            let label = first(client, &["tty", "client"]);
-            let label = format!("client {}", if label.is_empty() { "?" } else { &label });
-            if flags.contains(&"control-mode") {
-                control.push(label);
-            } else if client.get("pane_id") != pane.get("pane_id") {
-                watching.push(format!("{label} (another pane is active)"));
-            } else if flags.contains(&"read-only") {
-                watching.push(format!("{label} (read-only)"));
-            } else {
-                typing.push(label);
+                regular += stats.regular;
+                control += stats.control;
+                typing += stats
+                    .typing
+                    .get(active.as_str())
+                    .copied()
+                    .unwrap_or_default();
             }
         }
     }
-    let source = ["backend", "server", "pane_id", "terminal_id"]
-        .map(|k| first(pane, &[k]))
-        .join("/");
-    for viewer in array(snapshot, "daedalus_views") {
-        if s(viewer, "source") == source {
-            places.push(format!("Daedalus viewer pane {}", s(viewer, "label")));
-        }
-    }
-    let mut result = json!({"count":places.len(),"places":places,"typing":typing,"watching":watching,"control_clients":control,"shared":s(pane,"backend")=="tmux"});
+    let mut result = json!({"count":count,"details_limited":places.len()<count || !relationships.views_complete,"places":places,"typing":typing,"watching":regular.saturating_sub(typing),"control_clients":control,"clients_complete":relationships.clients_complete,"shared":s(pane,"backend")=="tmux"});
     if s(pane, "backend") == "native" {
         result["controlled"] = pane["controlled"].clone();
     }
@@ -906,12 +1076,18 @@ fn input_brief(info: &Value, backend: &str) -> [String; 2] {
             "muted".into(),
         ];
     }
-    let typing = array(info, "typing").len();
+    if info["clients_complete"] == false {
+        return ["Shared · client activity unavailable".into(), "warn".into()];
+    }
+    let typing = info["typing"].as_u64().unwrap_or_default();
     let mut parts = Vec::new();
     for (count, name) in [
         (typing, "typing"),
-        (array(info, "watching").len(), "watching"),
-        (array(info, "control_clients").len(), "control-mode"),
+        (info["watching"].as_u64().unwrap_or_default(), "watching"),
+        (
+            info["control_clients"].as_u64().unwrap_or_default(),
+            "control-mode",
+        ),
     ] {
         if count > 0 {
             parts.push(format!("{count} {name}"));
@@ -1023,6 +1199,31 @@ impl Tree {
             }
             return rows.into();
         }
+        if node
+            .pane
+            .as_ref()
+            .is_some_and(crate::adapters::pane_observations::conflicted)
+        {
+            let identity = node
+                .pane
+                .as_ref()
+                .and_then(|pane| crate::adapters::terminals::identity(pane).ok())
+                .and_then(|identity| serde_json::to_string(&identity).ok())
+                .unwrap_or_else(|| "unverified".into());
+            return json!([
+                ["Terminal identity", identity, "muted"],
+                [
+                    "Discovery",
+                    crate::adapters::pane_observations::WARNING,
+                    "warn"
+                ],
+                [
+                    "Authority",
+                    "Conflicting observations; refresh before actions",
+                    "warn"
+                ]
+            ]);
+        }
         let checkpoint = node.attr("checkpoint");
         if truth(&checkpoint) {
             let harness = s(&checkpoint, "harness");
@@ -1050,6 +1251,45 @@ impl Tree {
                         &created
                     },
                     if created.is_empty() { "faint" } else { "muted" }
+                ],
+                [
+                    "Saved profile",
+                    if s(&checkpoint, "profile").is_empty() {
+                        "not recorded".into()
+                    } else {
+                        s(&checkpoint, "profile")
+                    },
+                    if s(&checkpoint, "profile").is_empty() {
+                        "faint"
+                    } else {
+                        "muted"
+                    }
+                ],
+                [
+                    "Project",
+                    if s(&checkpoint, "cwd").is_empty() {
+                        "not recorded".into()
+                    } else {
+                        s(&checkpoint, "cwd")
+                    },
+                    "muted"
+                ],
+                [
+                    "Saved source",
+                    checkpoint
+                        .get("source")
+                        .and_then(crate::core::layouts::TerminalRef::decode_identity)
+                        .map(|reference| reference.key())
+                        .unwrap_or_else(|| "not recorded or unverified".into()),
+                    "muted"
+                ],
+                [
+                    "Link",
+                    node.attr("checkpoint_match")
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Current profile and source affiliation are unverified."),
+                    "warn"
                 ],
                 ["Enter", "View, fork, resume or hand off", "muted"]
             ]);
@@ -1242,7 +1482,7 @@ impl Tree {
         if !fix.is_empty() && sid.is_empty() {
             rows.push(json!(["To fix", fix, "warn"]));
         }
-        let info = node.attr("views");
+        let info = node.attr_ref("views").unwrap_or(&Value::Null);
         if !herdr {
             let pid = first(pane, &["pid"]);
             rows.push(json!([
@@ -1254,8 +1494,8 @@ impl Tree {
                 "muted"
             ]));
         }
-        let places = array(&info, "places");
-        let count = places.len().max(1);
+        let places = array(info, "places");
+        let count = info["count"].as_u64().unwrap_or(1).max(1);
         let places = places.iter().map(text).collect::<Vec<_>>().join("; ");
         let desc = format!(
             "{count}{}{}",
@@ -1266,21 +1506,80 @@ impl Tree {
                 format!(" · {places}")
             }
         );
-        rows.push(json!(["Views", desc, ""]));
-        let [input, tone] = input_brief(&info, &backend);
+        let limited = info["details_limited"] == true;
+        let desc = if limited {
+            format!("{desc} · details incomplete")
+        } else {
+            desc
+        };
+        rows.push(json!(["Views", desc, if limited { "warn" } else { "" }]));
+        let [input, tone] = input_brief(info, &backend);
         rows.push(json!(["Input", input, tone]));
         rows.into()
     }
     /// Complete protocol rows; the existing frontend owns collapse and search.
+    #[cfg(test)]
     pub fn rows(&self, context: &ProjectionContext) -> Vec<Value> {
         self.filtered_rows(context, &BTreeSet::new(), "")
     }
+    pub fn rows_bounded(&self, context: &ProjectionContext, limit: usize) -> (Vec<Value>, bool) {
+        self.filtered_rows_bounded(context, &BTreeSet::new(), "", limit)
+    }
+    #[cfg(test)]
     pub fn filtered_rows(
         &self,
         context: &ProjectionContext,
         collapsed: &BTreeSet<String>,
         query: &str,
     ) -> Vec<Value> {
+        self.filtered_rows_bounded(context, collapsed, query, usize::MAX)
+            .0
+    }
+    pub fn outline(&self, limit: usize) -> (String, bool) {
+        fn walk(
+            tree: &Tree,
+            keys: &[usize],
+            prefix: &str,
+            remaining: &mut usize,
+            text: &mut String,
+        ) -> bool {
+            for (position, index) in keys.iter().copied().enumerate() {
+                let last = position + 1 == keys.len();
+                let line = format!(
+                    "{prefix}{}{}\n",
+                    if last { "└─ " } else { "├─ " },
+                    tree.nodes[index].label
+                );
+                let Ok(bytes) = super::discovery_budget::json_size(&line, *remaining) else {
+                    return false;
+                };
+                *remaining -= bytes;
+                text.push_str(&line);
+                if !walk(
+                    tree,
+                    &tree.nodes[index].children,
+                    &format!("{prefix}{}", if last { "   " } else { "│  " }),
+                    remaining,
+                    text,
+                ) {
+                    return false;
+                }
+            }
+            true
+        }
+        let mut text = String::new();
+        let mut remaining = limit;
+        let complete = walk(self, &self.roots, "", &mut remaining, &mut text);
+        text.pop();
+        (text, !complete)
+    }
+    fn filtered_rows_bounded(
+        &self,
+        context: &ProjectionContext,
+        collapsed: &BTreeSet<String>,
+        query: &str,
+        limit: usize,
+    ) -> (Vec<Value>, bool) {
         let query = lower(query.trim());
         let mut visible = BTreeSet::new();
         if !query.is_empty() {
@@ -1310,6 +1609,11 @@ impl Tree {
             query: &'a str,
             visible: &'a BTreeSet<usize>,
             collapsed: &'a BTreeSet<String>,
+            pins: &'a std::collections::HashSet<(crate::core::identity::TerminalId, String)>,
+        }
+        struct RowBudget {
+            remaining: usize,
+            limited: bool,
         }
         fn walk(
             tree: &Tree,
@@ -1318,6 +1622,7 @@ impl Tree {
             filter: &Filter<'_>,
             context: &ProjectionContext,
             rows: &mut Vec<Value>,
+            budget: &mut RowBudget,
         ) {
             let included: Vec<_> = keys
                 .iter()
@@ -1332,14 +1637,24 @@ impl Tree {
                     node.attributes.get(key).cloned().unwrap_or(default)
                 };
                 let tile=node.pane.as_ref().filter(|_|node.kind=="pane").map(|pane|{
-                    let pin=context.pins.iter().any(|r|r.get("backend")==pane.get("backend")&&s(r,"server")==first(pane,&["server","session"])&&r.get("pane_id")==pane.get("pane_id")&&s(r,"terminal_id")==first(pane,&["terminal_id"]));
+                    let pin=crate::adapters::terminals::reference(pane).ok().and_then(|reference|reference.identity().ok().map(|id|(id,reference.generation))).is_some_and(|key|filter.pins.contains(&key));
                     let place=[first(pane,&["session"]),first(pane,&["workspace_id","window"]),first(pane,&["pane_id"])].into_iter().filter(|s|!s.is_empty()).collect::<Vec<_>>().join(" / ");
-                    json!({"title":title(pane,&context.hostname),"place":place,"project":first(pane,&["session"]),"harness":first(pane,&["agent"]),"state":attr("state","".into()),"views":node.attr("views").get("count").cloned().unwrap_or(1.into()),"pinned":pin,"viewer":truth(&node.attr("viewer")),"split":attr("split",0.into())})
+                    json!({"title":title(pane,&context.hostname),"place":place,"project":first(pane,&["session"]),"harness":first(pane,&["agent"]),"state":attr("state","".into()),"views":node.attr_ref("views").and_then(|views|views.get("count")).cloned().unwrap_or(1.into()),"pinned":pin,"viewer":truth(&node.attr("viewer")),"split":attr("split",0.into())})
                 });
-                rows.push(json!({"id":id,"parent":node.parent.map(|p|tree.nodes[p].id()).unwrap_or_default(),"label":node.label,"parts":attr("parts",json!([])),"branch":format!("{prefix}{}",if last{"└─ "}else{"├─ "}),"kind":node.kind,"backend":node.key.first().map(text).unwrap_or_default(),"children":!node.children.is_empty(),"count":attr("pane_count",0.into()),"state":attr("state","".into()),"active_at":attr("activity_at",json!(0.0)),"activity":attr("activity","".into()),"linked":attr("linked",0.into()),"viewed":attr("viewed",false.into()),"server_focused":attr("server_focused",false.into()),"actionable":node.pane.is_some()||truth(&node.attr("checkpoint")),"fields":tree.fields(index,context),"tile":tile,"layout":node.attr("layout")}));
-                if let (Some(usage), Some(row)) = (node.attributes.get("usage"), rows.last_mut()) {
+                let mut row = json!({"id":id,"parent":node.parent.map(|p|tree.nodes[p].id()).unwrap_or_default(),"label":node.label,"parts":attr("parts",json!([])),"branch":format!("{prefix}{}",if last{"└─ "}else{"├─ "}),"kind":node.kind,"backend":node.key.first().map(text).unwrap_or_default(),"children":!node.children.is_empty(),"count":attr("pane_count",0.into()),"state":attr("state","".into()),"active_at":attr("activity_at",json!(0.0)),"activity":attr("activity","".into()),"linked":attr("linked",0.into()),"viewed":attr("viewed",false.into()),"server_focused":attr("server_focused",false.into()),"actionable":node.pane.as_ref().is_some_and(|pane|!crate::adapters::pane_observations::conflicted(pane))||truth(&node.attr("checkpoint")),"fields":tree.fields(index,context),"tile":tile,"layout":node.attr("layout")});
+                if let Some(usage) = node.attributes.get("usage") {
                     row["usage"] = usage.clone();
                 }
+                let separator = usize::from(!rows.is_empty());
+                let Ok(bytes) = super::discovery_budget::json_size(
+                    &row,
+                    budget.remaining.saturating_sub(separator),
+                ) else {
+                    budget.limited = true;
+                    return;
+                };
+                budget.remaining -= bytes + separator;
+                rows.push(row);
                 if !filter.query.is_empty() || !filter.collapsed.contains(&id) {
                     walk(
                         tree,
@@ -1348,11 +1663,31 @@ impl Tree {
                         filter,
                         context,
                         rows,
+                        budget,
                     );
+                    if budget.limited {
+                        return;
+                    }
                 }
             }
         }
+        let pins = context
+            .pins
+            .iter()
+            .filter_map(crate::core::layouts::TerminalRef::decode_identity)
+            .filter(|reference| reference.validate().is_ok())
+            .filter_map(|reference| {
+                reference
+                    .identity()
+                    .ok()
+                    .map(|identity| (identity, reference.generation))
+            })
+            .collect();
         let mut rows = Vec::new();
+        let mut budget = RowBudget {
+            remaining: limit,
+            limited: false,
+        };
         walk(
             self,
             &self.roots,
@@ -1361,121 +1696,15 @@ impl Tree {
                 query: &query,
                 visible: &visible,
                 collapsed,
+                pins: &pins,
             },
             context,
             &mut rows,
+            &mut budget,
         );
-        rows
+        (rows, budget.limited)
     }
 }
-#[derive(Default)]
-struct GroupLayout {
-    size: Option<[u64; 2]>,
-    zoomed: bool,
-    panes: Vec<(usize, [u64; 4], bool)>,
-}
-fn cells<const N: usize>(value: &Value, keys: [&str; N]) -> Option<[u64; N]> {
-    let mut result = [0; N];
-    for (i, key) in keys.iter().enumerate() {
-        let number = value.get(*key)?;
-        let n = number
-            .as_u64()
-            .or_else(|| number.as_str().and_then(|s| s.parse().ok()))?;
-        if n > 1_000_000 {
-            return None;
-        }
-        result[i] = n;
-    }
-    Some(result)
-}
-impl Tree {
-    fn lay_out(
-        &mut self,
-        snapshot: &Value,
-        placed: &BTreeMap<(String, String, String), (usize, usize)>,
-    ) {
-        let mut groups: BTreeMap<usize, GroupLayout> = BTreeMap::new();
-        for layout in array(snapshot, "layouts") {
-            let server = first(layout, &["session"]);
-            let Some(size) = cells(&layout["area"], ["width", "height"]) else {
-                continue;
-            };
-            for item in array(layout, "panes") {
-                let Some(rect) = cells(&item["rect"], ["x", "y", "width", "height"]) else {
-                    continue;
-                };
-                let Some((group, pane)) =
-                    placed.get(&("herdr".into(), server.clone(), s(item, "pane_id")))
-                else {
-                    continue;
-                };
-                groups
-                    .entry(*group)
-                    .or_insert_with(|| GroupLayout {
-                        size: Some(size),
-                        zoomed: truth(&layout["zoomed"]),
-                        panes: Vec::new(),
-                    })
-                    .panes
-                    .push((*pane, rect, truth(&item["focused"])));
-            }
-        }
-        for pane in array(snapshot, "panes") {
-            if s(pane, "backend") != "tmux" {
-                continue;
-            }
-            let Some(rect) = cells(pane, ["left", "top", "width", "height"]) else {
-                continue;
-            };
-            let Some((group, node)) =
-                placed.get(&("tmux".into(), s(pane, "socket"), s(pane, "pane_id")))
-            else {
-                continue;
-            };
-            let group = groups.entry(*group).or_default();
-            if !group.panes.iter().any(|(p, _, _)| p == node) {
-                group.panes.push((*node, rect, pane["active"] == "1"));
-            }
-        }
-        for (index, mut group) in groups {
-            let width = group
-                .panes
-                .iter()
-                .map(|(_, r, _)| r[0] + r[2])
-                .max()
-                .unwrap_or_default()
-                .max(group.size.map(|s| s[0]).unwrap_or_default());
-            let height = group
-                .panes
-                .iter()
-                .map(|(_, r, _)| r[1] + r[3])
-                .max()
-                .unwrap_or_default()
-                .max(group.size.map(|s| s[1]).unwrap_or_default());
-            group.panes.sort_by_key(|(_, rect, _)| (rect[1], rect[0]));
-            let rects:Vec<_>=group.panes.iter().map(|(index,r,focused)|json!({"id":self.nodes[*index].id(),"x":r[0],"y":r[1],"w":r[2],"h":r[3],"focused":focused})).collect();
-            self.nodes[index].attributes.insert(
-                "layout".into(),
-                json!({"width":width,"height":height,"zoomed":group.zoomed,"panes":rects}),
-            );
-            let order: Vec<_> = group.panes.iter().map(|(index, _, _)| *index).collect();
-            let children = &self.nodes[index].children;
-            let mut sorted: Vec<_> = order
-                .iter()
-                .copied()
-                .filter(|i| children.contains(i))
-                .collect();
-            sorted.extend(children.iter().copied().filter(|i| !order.contains(i)));
-            self.nodes[index].children = sorted;
-            for index in &order {
-                self.nodes[*index]
-                    .attributes
-                    .insert("split".into(), order.len().into());
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1490,6 +1719,288 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn linked_view_geometry_stays_with_each_exact_session_and_window() {
+        let panes: Vec<_> = (0..2).flat_map(|view| (0..2).map(move |pane| {
+            let width = if view == 0 {49} else {79};
+            json!({"backend":"tmux","socket":crate::test_support::path("/tmp/views-layout.sock"),"server":"fixture","session":format!("view-{view}"),"session_id":format!("${view}"),"window_id":"@1","pane_id":format!("%{pane}"),"terminal_id":format!("generation-{pane}"),"left":if pane==0 {0}else{width+1},"top":0,"width":if pane==0 {width}else{99-width},"height":40})
+        })).collect();
+        let tree = Tree::build(
+            &json!({"panes":panes}),
+            &json!({}),
+            &ProjectionContext::default(),
+        );
+        for node in tree.nodes.iter().filter(|node| node.kind == "pane") {
+            let layout = &tree.nodes[node.parent.unwrap()].attributes["layout"];
+            let rect = layout["panes"]
+                .as_array()
+                .expect("each exact view keeps its geometry")
+                .iter()
+                .find(|r| r["id"] == node.id())
+                .unwrap();
+            assert_eq!(rect["w"], node.pane.as_ref().unwrap()["width"]);
+        }
+    }
+    #[test]
+    fn ambiguous_herdr_geometry_never_picks_one_generation() {
+        let (mut fixture, context) = fixture();
+        let panes = fixture["snapshot"]["panes"].as_array_mut().unwrap();
+        let mut old = panes
+            .iter()
+            .find(|p| p["backend"] == "herdr" && p["pane_id"] == "w1:p1")
+            .unwrap()
+            .clone();
+        old["terminal_id"] = json!("older-generation");
+        panes.push(old);
+        let tree = Tree::build(&fixture["snapshot"], &fixture["health"], &context);
+        let pane = tree
+            .nodes
+            .iter()
+            .find(|n| {
+                n.pane
+                    .as_ref()
+                    .is_some_and(|p| p["backend"] == "herdr" && p["pane_id"] == "w1:p1")
+            })
+            .unwrap();
+        assert!(
+            !tree.nodes[pane.parent.unwrap()]
+                .attributes
+                .contains_key("layout")
+        );
+    }
+    #[test]
+    fn duplicate_layout_rows_keep_tree_children_unique() {
+        let (mut fixture, context) = fixture();
+        let repeated = fixture["snapshot"]["layouts"][0]["panes"][0].clone();
+        fixture["snapshot"]["layouts"][0]["panes"]
+            .as_array_mut()
+            .unwrap()
+            .push(repeated);
+        let tree = Tree::build(&fixture["snapshot"], &fixture["health"], &context);
+        for node in &tree.nodes {
+            assert_eq!(
+                node.children.len(),
+                node.children.iter().collect::<BTreeSet<_>>().len()
+            );
+        }
+    }
+    #[test]
+    fn geometry_outside_the_frontend_coordinate_contract_is_omitted() {
+        let (mut fixture, context) = fixture();
+        fixture["snapshot"]["layouts"][0]["area"]["width"] = json!(70000);
+        let tree = Tree::build(&fixture["snapshot"], &fixture["health"], &context);
+        assert!(tree.nodes.iter().all(|node| {
+            node.attributes
+                .get("layout")
+                .is_none_or(|layout| layout["width"].as_u64().unwrap() <= u16::MAX as u64)
+        }));
+    }
+    #[test]
+    fn optional_relationship_limits_preserve_every_base_terminal_and_exact_view_count() {
+        let panes: Vec<_> = (0..40).map(|n|json!({"backend":"tmux","socket":crate::test_support::path("/tmp/outer.sock"),"server":"outer","session":format!("linked-{n}"),"session_id":format!("${n}"),"window_id":"@1","pane_id":"%1","terminal_id":"generation"})).collect();
+        let clients: Vec<_> = (0..40).map(|n|json!({"backend":"tmux","socket":crate::test_support::path("/tmp/inner.sock"),"client":format!("inner-{n}"),"session_id":"$inner","pane_id":"%2","flags":"control-mode","outer_panes":[{"socket":crate::test_support::path("/tmp/outer.sock"),"pane_id":"%1"}]})).collect();
+        let snapshot = json!({"panes":panes,"clients":clients});
+        let health = json!({});
+        let mut context = ProjectionContext::default();
+        context.runtime.discovery_projection_timeout_ms = 60000;
+        context.runtime.discovery_relationship_limit = 12;
+        let partial = Tree::build(&snapshot, &health, &context);
+        assert!(partial.relationships_limited);
+        let ids = |tree: &Tree| {
+            tree.nodes
+                .iter()
+                .filter(|node| node.kind == "pane")
+                .map(Node::id)
+                .collect::<BTreeSet<_>>()
+        };
+        let base = ids(&partial);
+        assert_eq!(base.len(), 40);
+        assert!(
+            partial
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "pane")
+                .all(|node| node.attr_ref("views").unwrap()["count"] == 40)
+        );
+        assert!(
+            partial
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "nested view")
+                .count()
+                <= 12
+        );
+        context.runtime.discovery_relationship_limit = 10000;
+        let complete = Tree::build(&snapshot, &health, &context);
+        assert!(!complete.relationships_limited);
+        assert_eq!(ids(&complete), base);
+        assert_eq!(
+            complete
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "nested view")
+                .count(),
+            1600
+        );
+        context.runtime.discovery_relationship_limit_bytes = 1024;
+        let small = Tree::build(&snapshot, &health, &context);
+        assert!(small.relationships_limited);
+        assert_eq!(ids(&small), base);
+        let context = ProjectionContext::default();
+        let unknown = input_brief(
+            &json!({"clients_complete":false,"typing":0,"watching":0,"control_clients":0}),
+            "tmux",
+        );
+        assert!(unknown[0].contains("unavailable") && !unknown[0].contains("nobody"));
+        assert_eq!(context.runtime.discovery_relationship_limit, 16384);
+    }
+    #[test]
+    fn client_summary_storage_grows_with_observations_without_losing_input_counts() {
+        let panes: Vec<_> = (0..128).map(|n| json!({"backend":"tmux","socket":crate::test_support::path("/tmp/clients.sock"),"server":"fixture","session":"main","session_id":"$1","window_id":"@1","pane_id":format!("%{n}"),"terminal_id":"generation"})).collect();
+        let clients: Vec<_> = (0..128).map(|n| json!({"backend":"tmux","socket":crate::test_support::path("/tmp/clients.sock"),"session_id":"$1","pane_id":"%0","tty":format!("{}-{n}","fixture-client".repeat(8)),"flags":match n%3 {0=>"",1=>"read-only",_=>"control-mode"}})).collect();
+        let snapshot = json!({"panes":panes,"clients":clients});
+        let context = ProjectionContext::default();
+        let tree = Tree::build(&snapshot, &json!({}), &context);
+        let retained: usize = tree
+            .nodes
+            .iter()
+            .filter_map(|node| node.attr_ref("views"))
+            .map(|info| super::super::discovery_budget::json_size(info, usize::MAX).unwrap())
+            .sum();
+        let input_bytes = super::super::discovery_budget::json_size(&snapshot, usize::MAX).unwrap();
+        eprintln!(
+            "Fixture client summaries: {input_bytes} input bytes, {retained} retained view bytes"
+        );
+        assert!(
+            retained <= input_bytes * 3,
+            "client labels expanded from {input_bytes} input bytes to {retained} retained view bytes"
+        );
+        for (index, node) in tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == "pane")
+        {
+            let fields = tree.fields(index, &context);
+            let input = fields
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row[0] == "Input")
+                .unwrap()[1]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                input,
+                if node.pane.as_ref().unwrap()["pane_id"] == "%0" {
+                    "Shared · 43 typing, 43 watching, 42 control-mode"
+                } else {
+                    "Shared · 86 watching, 42 control-mode"
+                }
+            );
+        }
+    }
+    #[test]
+    fn linked_badges_and_group_collapse_preserve_the_complete_terminal_identity() {
+        let one = json!({"backend":"tmux","socket":crate::test_support::path("/tmp/identity.sock"),"server":"fixture","session":"main","session_id":"$1","window_id":"@1","pane_id":"%1","terminal_id":"same-generation"});
+        let mut other = one.clone();
+        other["pane_id"] = json!("%2");
+        let context = ProjectionContext::default();
+        let tree = Tree::build(&json!({"panes":[one.clone(),other]}), &json!({}), &context);
+        for node in tree.nodes.iter().filter(|node| node.kind == "pane") {
+            assert_eq!(node.attr("linked"), 1);
+        }
+        let mut old = one.clone();
+        old["session_group"] = json!("main");
+        let mut replacement = old.clone();
+        replacement["terminal_id"] = json!("replacement-generation");
+        let tree = Tree::build(&json!({"panes":[old,replacement]}), &json!({}), &context);
+        assert_eq!(
+            tree.nodes.iter().filter(|node| node.kind == "pane").count(),
+            2
+        );
+        let mut replacement = one.clone();
+        replacement["terminal_id"] = json!("replacement-generation");
+        let snapshot = json!({"panes":[one,replacement],"daedalus_views":[{"viewer":{"backend":"tmux","endpoint":crate::test_support::path("/tmp/identity.sock"),"pane":"%1","generation":"same-generation"},"source":"herdr/fixture/source/generation","source_label":"source"}]});
+        let tree = Tree::build(&snapshot, &json!({}), &context);
+        assert_eq!(
+            tree.nodes
+                .iter()
+                .filter(|node| node.kind == "pane" && truth(&node.attr("viewer")))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn legacy_display_bindings_cannot_project_routes_onto_unproven_terminals() {
+        let (mut fixture, context) = fixture();
+        fixture["health"]["native_routes"] = json!([]);
+        let mut duplicate = fixture["snapshot"]["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pane| pane["terminal_id"] == "uuid1")
+            .unwrap()
+            .clone();
+        duplicate["pane_id"] = json!("different-pane");
+        fixture["snapshot"]["panes"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        let tree = Tree::build(&fixture["snapshot"], &fixture["health"], &context);
+        assert!(!tree.nodes.iter().any(|node| node.kind == "saved route"));
+    }
+    #[test]
+    fn equal_generations_on_different_panes_are_not_shared_terminal_views() {
+        let one = json!({"backend":"herdr","server":"fixture","session":"fixture","pane_id":"one","terminal_id":"generation"});
+        let mut other = one.clone();
+        other["pane_id"] = json!("two");
+        let snapshot = json!({"panes":[one,other]});
+        assert_eq!(
+            views(
+                &snapshot["panes"][0],
+                &view_index(&array(&snapshot, "panes").iter().collect::<Vec<_>>()),
+                &RelationshipIndex::new(
+                    &snapshot,
+                    &json!({}),
+                    &mut RelationshipBudget::new(&crate::app::runtime_settings::Settings::default()),
+                    true,
+                ),
+                &mut RelationshipBudget::new(&crate::app::runtime_settings::Settings::default())
+            )["count"],
+            1
+        );
+    }
+    #[test]
+    fn actual_linked_views_share_metadata_and_outline_does_not_build_detail_rows() {
+        let one = json!({"backend":"tmux","socket":crate::test_support::path("/tmp/views.sock"),"server":"server","session":"one","session_id":"$1","window_id":"@1","pane_id":"%1","terminal_id":"generation"});
+        let mut two = one.clone();
+        two["session"] = json!("two");
+        two["session_id"] = json!("$2");
+        let snapshot = json!({"panes":[one,two]});
+        let context = ProjectionContext::default();
+        let tree = Tree::build(&snapshot, &json!({}), &context);
+        let panes = tree
+            .nodes
+            .iter()
+            .filter(|node| node.pane.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(panes.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            panes[0].shared_views.as_ref().unwrap(),
+            panes[1].shared_views.as_ref().unwrap()
+        ));
+        assert_eq!(panes[0].attr_ref("views").unwrap()["count"], 2);
+        let expected = tree
+            .rows(&context)
+            .iter()
+            .map(|row| format!("{}{}", s(row, "branch"), s(row, "label")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(tree.outline(65536), (expected, false));
+        let (small, limited) = tree.outline(8);
+        assert!(limited && small.len() <= 8);
+    }
     fn fixture() -> (Value, ProjectionContext) {
         let value: Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/tree-projection.json"
@@ -1501,20 +2012,209 @@ mod tests {
             home: s(c, "home"),
             now: c["now"].as_f64().unwrap(),
             pins: array(c, "pins").to_vec(),
+            ..ProjectionContext::default()
         };
         (value, context)
+    }
+    #[test]
+    fn pin_badges_require_the_supplemental_generation() {
+        let pane = json!({"backend":"herdr","server":"fixture","session":"fixture","pane_id":"p1","terminal_id":"terminal","generation":"new-process"});
+        let mut context = ProjectionContext {
+            pins: vec![
+                json!({"backend":"herdr","server":"fixture","pane_id":"p1","terminal_id":"terminal","generation":"old-process"}),
+            ],
+            ..ProjectionContext::default()
+        };
+        let tree = Tree::build(&json!({"panes":[pane]}), &json!({}), &context);
+        let pinned = |context: &ProjectionContext| {
+            tree.rows(context)
+                .into_iter()
+                .find(|row| row["kind"] == "pane")
+                .unwrap()["tile"]["pinned"]
+                .clone()
+        };
+        assert_eq!(pinned(&context), false);
+        context.pins[0]["generation"] = json!("new-process");
+        assert_eq!(pinned(&context), true);
+    }
+    #[test]
+    fn repeated_identical_pane_observations_count_once_but_distinct_views_survive() {
+        let pane = json!({"backend":"herdr","session":"fixture","server":"fixture","workspace_id":"work","tab_id":"one","pane_id":"pane","terminal_id":"generation"});
+        let context = ProjectionContext::default();
+        let tree = Tree::build(
+            &json!({"panes":[pane.clone(),pane.clone()]}),
+            &json!({}),
+            &context,
+        );
+        let nodes: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "pane")
+            .collect();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].attr("views")["count"], 1);
+        assert_eq!(nodes[0].attr("linked"), 1);
+        let mut other = pane.clone();
+        other["tab_id"] = json!("two");
+        let tree = Tree::build(&json!({"panes":[pane,other]}), &json!({}), &context);
+        let nodes: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "pane")
+            .collect();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|node| node.attr("views")["count"] == 2));
+    }
+    #[test]
+    fn conflicting_same_view_geometry_is_never_chosen_from_input_order() {
+        let first = json!({"backend":"tmux","socket":crate::test_support::path("/tmp/conflicting-layout.sock"),"session":"fixture","session_id":"$1","window_id":"@1","pane_id":"%1","terminal_id":"one","left":0,"top":0,"width":49,"height":24});
+        let mut conflict = first.clone();
+        conflict["width"] = json!(48);
+        let mut second = first.clone();
+        second["pane_id"] = json!("%2");
+        second["terminal_id"] = json!("two");
+        second["left"] = json!(50);
+        second["width"] = json!(50);
+        for panes in [
+            vec![first.clone(), conflict.clone(), second.clone()],
+            vec![conflict, first, second],
+        ] {
+            let tree = Tree::build(
+                &json!({"panes":panes}),
+                &json!({}),
+                &ProjectionContext::default(),
+            );
+            assert_eq!(
+                tree.nodes.iter().filter(|node| node.kind == "pane").count(),
+                2
+            );
+            assert!(
+                tree.nodes
+                    .iter()
+                    .filter(|node| node.kind == "window")
+                    .all(|node| node.attr("layout").is_null())
+            );
+            assert!(!tree.layout_warnings.is_empty());
+        }
+    }
+    #[test]
+    fn conflicting_captured_conversations_never_offer_an_arbitrary_actionable_session() {
+        let first = json!({"backend":"herdr","session":"fixture","server":"fixture","workspace_id":"work","tab_id":"tab","pane_id":"pane","terminal_id":"generation","agent":"codex","agent_session":{"agent":"codex","kind":"id","value":"session-one"}});
+        let mut conflict = first.clone();
+        conflict["agent_session"]["value"] = json!("session-two");
+        let context = ProjectionContext::default();
+        let tree = Tree::build(&json!({"panes":[first,conflict]}), &json!({}), &context);
+        let panes: Vec<_> = tree
+            .rows(&context)
+            .into_iter()
+            .filter(|row| row["kind"] == "pane")
+            .collect();
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0]["actionable"], false);
+        assert!(!tree.nodes.iter().any(|node| node.kind == "agent session"));
+    }
+    #[test]
+    fn checkpoint_native_id_links_expose_saved_profile_and_affiliation_uncertainty() {
+        let pane = json!({"backend":"herdr","session":"fixture","server":"fixture","pane_id":"pane","terminal_id":"generation","agent":"codex","agent_session":{"agent":"codex","kind":"id","value":"same-native-id"}});
+        let profiles = [
+            crate::test_support::path("/tmp/profile-one"),
+            crate::test_support::path("/tmp/profile-two"),
+        ];
+        let checkpoints:Vec<_>=profiles.iter().enumerate().map(|(index,profile)|json!({"key":format!("checkpoint-{index}"),"name":format!("Saved {index}"),"harness":"codex","sid":"same-native-id","profile":profile,"cwd":crate::test_support::path("/tmp/project")})).collect();
+        let context = ProjectionContext::default();
+        let tree = Tree::build(
+            &json!({"panes":[pane]}),
+            &json!({"checkpoints":checkpoints}),
+            &context,
+        );
+        let nodes: Vec<_> = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.kind == "checkpoint")
+            .collect();
+        assert_eq!(nodes.len(), 2);
+        for ((index, _), profile) in nodes.into_iter().zip(profiles) {
+            let fields = tree.fields(index, &context);
+            let text = fields
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row[1].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(text.contains(profile));
+            assert!(text.to_lowercase().contains("unverified"));
+        }
+    }
+    #[test]
+    fn checkpoint_tree_policy_filters_by_exact_saved_origin_without_changing_saved_rows() {
+        use super::super::interface_settings::CheckpointMatches;
+        let pane = json!({"backend":"herdr","session":"fixture","server":"fixture","pane_id":"pane","terminal_id":"generation","generation":"extra","agent":"codex","agent_session":{"agent":"codex","kind":"id","value":"session"}});
+        let source =
+            serde_json::to_value(crate::adapters::terminals::reference(&pane).unwrap()).unwrap();
+        let mut other = source.clone();
+        other["generation"] = json!("other-extra");
+        let health = json!({"checkpoints":[{"key":"exact","name":"Exact","harness":"codex","sid":"session","source":source},{"key":"candidate","name":"Candidate","harness":"codex","sid":"session","source":other}]});
+        let before = health.clone();
+        for (mode, count) in [
+            (CheckpointMatches::All, 2),
+            (CheckpointMatches::Source, 1),
+            (CheckpointMatches::Off, 0),
+        ] {
+            let context = ProjectionContext {
+                checkpoint_matches: mode,
+                ..ProjectionContext::default()
+            };
+            let tree = Tree::build(&json!({"panes":[pane]}), &health, &context);
+            let nodes: Vec<_> = tree
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "checkpoint")
+                .collect();
+            assert_eq!(nodes.len(), count);
+            if mode == CheckpointMatches::Source {
+                assert_eq!(nodes[0].attr("checkpoint")["key"], "exact");
+                assert_eq!(nodes[0].attr("checkpoint_match")["kind"], "source_origin");
+            }
+        }
+        assert_eq!(health, before);
+    }
+    #[test]
+    fn ambiguous_legacy_view_source_never_counts_as_a_relationship() {
+        let panes: Vec<_> = [("a/b","c"),("a","b/c")].into_iter().map(|(pane,generation)| json!({"backend":"herdr","server":"fixture","session":"fixture","pane_id":pane,"terminal_id":generation})).collect();
+        let context = ProjectionContext::default();
+        let tree = Tree::build(
+            &json!({"panes":panes,"daedalus_views":[{"backend":"herdr","server":"fixture","pane_id":"viewer","terminal_id":"viewer-generation","source":"herdr/fixture/a/b/c"}]}),
+            &json!({}),
+            &context,
+        );
+        for node in tree.nodes.iter().filter(|node| node.kind == "pane") {
+            assert_eq!(node.attr("views")["count"], 1);
+        }
     }
     #[test]
     fn complete_wire_rows_match_python_projection() {
         // Golden generated from control.tree.build/fields and protocol.send_state
         // row projection with the fixture's fixed hostname, home and timestamp.
+        // The linked window's missing layout/split count is explicitly corrected
+        // from its own reported geometry. The checkpoint's three display fields
+        // independently disclose native-ID-only/profile/source uncertainty;
+        // all other historical values remain.
         let (fixture, context) = fixture();
         let actual = Tree::build(&fixture["snapshot"], &fixture["health"], &context).rows(&context);
         let expected: Vec<Value> = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/tree-projection-expected.json"
         ))
         .unwrap();
-        assert_eq!(actual, expected);
+        let changes:Vec<_>=actual.iter().zip(&expected).enumerate().filter_map(|(index,(actual,expected))| {
+            if actual==expected {None} else {Some(json!({"index":index,"id":actual["id"],"changes":actual.as_object().unwrap().iter().filter(|(key,value)|expected.get(*key)!=Some(*value)).map(|(key,value)|(key.clone(),json!({"actual":value,"expected":expected[key]}))).collect::<Map<_,_>>() }))}
+        }).collect();
+        assert!(
+            actual.len() == expected.len() && changes.is_empty(),
+            "Projection differs: {}",
+            json!(changes)
+        );
     }
     #[test]
     fn grouped_sessions_views_and_empty_topology_remain_visible() {
@@ -1566,6 +2266,7 @@ mod tests {
     #[test]
     fn shared_display_label_cannot_attach_one_route_to_two_terminals() {
         let (mut fixture, context) = fixture();
+        fixture["health"]["native_routes"] = json!([]);
         fixture["health"]["bindings"].as_array_mut().unwrap().push(
             json!({"backend":"herdr","server":"work","terminal_id":"uuid2","display":"agent1"}),
         );
@@ -1629,8 +2330,32 @@ mod tests {
             .iter()
             .find(|n| n.kind == "agent session")
             .unwrap();
-        assert!(agent.label.ends_with("session ID not reported"));
+        assert_eq!(agent.label, "codex");
         assert_eq!(agent.attr("sid"), "");
+    }
+    #[test]
+    fn windows_and_linux_harness_labels_keep_the_same_reported_conversation() {
+        for (agent, reported) in [
+            ("codex", "codex"),
+            ("CODEX.EXE", "codex"),
+            ("C:\\Tools\\codex.exe", "CODEX.EXE"),
+            ("cursor-agent.exe", "cursor"),
+        ] {
+            let pane = json!({"backend":"herdr","server":"fixture","session":"fixture","workspace_id":"w","tab_id":"t","pane_id":"p","terminal_id":"terminal","agent":agent,"agent_session":{"kind":"id","agent":reported,"value":"conversation-id"}});
+            assert!(is_agent(&pane));
+            assert_eq!(native_sid(&pane), "conversation-id");
+            let tree = Tree::build(
+                &json!({"panes":[pane]}),
+                &json!({}),
+                &ProjectionContext::default(),
+            );
+            assert!(
+                tree.nodes
+                    .iter()
+                    .any(|node| node.kind == "agent session"
+                        && node.attr("sid") == "conversation-id")
+            );
+        }
     }
     #[test]
     fn builtin_terminals_group_by_workspace_and_show_native_details() {

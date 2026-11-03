@@ -146,6 +146,27 @@ impl Stream {
         assert_eq!(value["type"], "terminal.frame", "{value}");
         value
     }
+    fn frame_with(&self, text: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("Native stream ended or did not provide the requested screen");
+            assert_eq!(frame["type"], "terminal.frame", "{frame}");
+            let mut parser = vt100::Parser::new(
+                frame["height"].as_u64().unwrap() as u16,
+                frame["width"].as_u64().unwrap() as u16,
+                0,
+            );
+            parser.process(&STANDARD.decode(frame["bytes"].as_str().unwrap()).unwrap());
+            let contents = parser.screen().contents();
+            if contents.contains(text) {
+                return contents;
+            }
+            assert!(Instant::now() < deadline, "No {text:?}: {contents}");
+        }
+    }
     fn stop(&mut self) {
         self.send(json!({"type":"terminal.release"}));
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -160,6 +181,352 @@ impl Drop for Stream {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn native_scroll_requests_keep_control_and_observer_streams_alive_and_independent() {
+    let mut fixture = Fixture::new();
+    let info = fixture.start();
+    let mut control = Stream::new(&fixture, &info, "control");
+    control.frame();
+    let mut observer = Stream::new(&fixture, &info, "observe");
+    observer.frame();
+    control.send(json!({"type":"terminal.input","bytes":STANDARD.encode(
+        b"for n in $(seq 1 60); do printf 'history-row-%02d\\n' \"$n\"; done; printf 'SCROLL_%s\\n' LIVE\r"
+    )}));
+    control.frame_with("SCROLL_LIVE");
+    observer.frame_with("SCROLL_LIVE");
+    control.send(json!({"type":"terminal.scroll","direction":"up","lines":1000}));
+    let history = control.frame_with("history-row-01");
+    assert!(!history.contains("SCROLL_LIVE"));
+    assert!(fixture.wait_text(&info, "SCROLL_LIVE").session.controlled);
+    observer.send(json!({"type":"terminal.scroll","direction":"up","lines":7}));
+    let frame = observer.frame();
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    parser.process(&STANDARD.decode(frame["bytes"].as_str().unwrap()).unwrap());
+    let other = parser.screen().contents();
+    assert!(other.contains("history-row-"));
+    assert!(!other.contains("history-row-01") && !other.contains("SCROLL_LIVE"));
+    control.send(json!({"type":"terminal.scroll","direction":"down","lines":1000}));
+    control.frame_with("SCROLL_LIVE");
+    observer.send(json!({"type":"terminal.scroll","direction":"down","lines":7}));
+    observer.frame_with("SCROLL_LIVE");
+    control.send(json!({"type":"terminal.scroll","direction":"up","lines":1000}));
+    control.frame_with("history-row-01");
+    control.send(
+        json!({"type":"terminal.input","bytes":STANDARD.encode(b"printf 'TYPE_%s\\n' LIVE\r")}),
+    );
+    control.frame_with("TYPE_LIVE");
+    observer.stop();
+    control.stop();
+}
+
+#[test]
+fn native_history_capacity_uses_saved_policy_and_explicit_zero_override() {
+    let mut fixture = Fixture::new();
+    let state = fixture.root.join("config");
+    let directory = state.to_str().unwrap();
+    fixture.ok(&[
+        "config",
+        "init",
+        "--config-dir",
+        directory,
+        "--workspace",
+        fixture.root.to_str().unwrap(),
+        "--apply",
+    ]);
+    let path = state.join("control.json");
+    let before = fs::read(&path).unwrap();
+    let args = [
+        "config",
+        "set",
+        "--config-dir",
+        directory,
+        "--key",
+        "runtime.native_scrollback_rows",
+        "--value",
+        "8",
+    ];
+    fixture.ok(&args);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let receipt = fixture.ok(&[args.as_slice(), &["--apply"]].concat());
+    assert_eq!(
+        fs::read(receipt["result"]["backup"].as_str().unwrap()).unwrap(),
+        before
+    );
+    let saved = fs::read(&path).unwrap();
+    let bad = fixture.run(&[
+        "terminal-native",
+        "start",
+        "--scrollback-rows",
+        "65537",
+        "--",
+        "/bin/sh",
+    ]);
+    assert!(!bad.status.success());
+    assert!(
+        fixture
+            .ok(&["terminal-native", "list"])
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for (override_rows, expected) in [(false, 8), (true, 0)] {
+        let mut args = vec!["terminal-native", "start", "--config-dir", directory];
+        if override_rows {
+            args.extend(["--scrollback-rows", "0"]);
+        }
+        args.extend(["--", "/bin/sh"]);
+        let info: SessionInfo = serde_json::from_value(fixture.ok(&args)).unwrap();
+        fixture.sessions.push(info.clone());
+        fixture.ok(&["terminal-native", "input", &info.id, &info.generation, "--text",
+            "for n in $(seq 1 60); do printf 'bounded-row-%02d\\n' \"$n\"; done; printf 'BOUND_%s\\n' LIVE\r"]);
+        fixture.wait_text(&info, "BOUND_LIVE");
+        let history: Capture = serde_json::from_value(fixture.ok(&[
+            "terminal-native",
+            "capture",
+            &info.id,
+            &info.generation,
+            "--scrollback-rows",
+            "65536",
+        ]))
+        .unwrap();
+        assert_eq!(history.scrollback_rows, Some(expected));
+        assert!(!history.text.contains("bounded-row-01"));
+        let live = fixture.wait_text(&info, "BOUND_LIVE");
+        assert_eq!(live.scrollback_rows, Some(0));
+    }
+    assert_eq!(fs::read(&path).unwrap(), saved);
+}
+
+#[test]
+fn native_resize_only_frame_is_emitted_without_new_terminal_output() {
+    let mut fixture = Fixture::new();
+    let info: SessionInfo = serde_json::from_value(fixture.ok(&[
+        "terminal-native",
+        "start",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf FRAME_STATIC; read _",
+    ]))
+    .unwrap();
+    fixture.sessions.push(info.clone());
+    fixture.wait_text(&info, "FRAME_STATIC");
+    let mut stream = Stream::new(&fixture, &info, "control");
+    let initial = stream.frame();
+    assert_eq!(initial["width"], 80);
+    stream.send(json!({"type":"terminal.resize","cols":81,"rows":24}));
+    let resized = stream.frame();
+    assert_eq!(resized["width"], 81);
+    assert_eq!(resized["height"], 24);
+    assert_eq!(resized["bytes"], initial["bytes"]);
+    stream.stop();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn guided_native_launch_publishes_child_identity_and_registers_before_provider_exec() {
+    use daedalus_tui::app::{config::ControlConfig, hook_runtime, setup::SetupPlan};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let mut fixture = Fixture::new();
+    let parent = fixture.start();
+    let bin = fixture.root.join("bin");
+    fs::DirBuilder::new().mode(0o700).create(&bin).unwrap();
+    let source = fixture.root.join("provider.rs");
+    fs::write(&source, include_str!("fixtures/launch_provider.rs")).unwrap();
+    let provider = bin.join("claude");
+    let compile = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--edition=2024", "--crate-name", "launch_provider_fixture"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&provider)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
+    // First-launch pins an owned non-writable executable. Cargo's shared build
+    // directory can use group-writable modes, so stage a private packaged copy.
+    let binary = bin.join("daedalus");
+    fs::copy(env!("CARGO_BIN_EXE_daedalus-tui"), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let directory = fixture.root.join("instance");
+    SetupPlan::fresh(&directory, ControlConfig::fresh(&fixture.root).unwrap())
+        .unwrap()
+        .apply()
+        .unwrap();
+    let mut backend = Command::new(binary)
+        .env_clear()
+        .env("HOME", &fixture.root)
+        .env("TERM", "xterm-256color")
+        .env("SHELL", "/bin/sh")
+        .env("DAEDALUS_TMUX_BIN", "/bin/true")
+        .env("DAEDALUS_HERDR_BIN", "/bin/true")
+        .current_dir(&fixture.root)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .args([
+            "backend",
+            "--stdio",
+            "--config-dir",
+            directory.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = backend.stdin.take().unwrap();
+    for request in [
+        json!({"version":2,"op":"refresh"}),
+        json!({"version":2,"op":"action","page":4,"action":"tools.open"}),
+        json!({"version":2,"op":"reply","id":1,"value":"claude"}),
+        json!({"version":2,"op":"reply","id":2,"value":"0"}),
+        json!({"version":2,"op":"reply","id":3,"value":"launch"}),
+        json!({"version":2,"op":"quit"}),
+    ] {
+        writeln!(input, "{request}").unwrap();
+    }
+    drop(input);
+    let output = backend.wait_with_output().unwrap();
+    let listed: Vec<SessionInfo> =
+        serde_json::from_value(fixture.ok(&["terminal-native", "list"])).unwrap();
+    let children: Vec<_> = listed.into_iter().filter(|s| s.id != parent.id).collect();
+    fixture.sessions.extend(children.iter().cloned());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let frames: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let errors: Vec<_> = frames.iter().filter(|f| f["kind"] == "error").collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(children.len(), 1);
+    let child = &children[0];
+    let ticket = fs::read_dir(&directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("launch-ticket-")
+        })
+        .unwrap();
+    assert!(
+        ticket.join("ready.json").is_file(),
+        "Native pane was created without publishing its identity"
+    );
+    fixture.wait_text(child, "FIXTURE_PROVIDER_REGISTERED");
+    let bound_path: PathBuf =
+        serde_json::from_slice(&fs::read(ticket.join("ready.json")).unwrap()).unwrap();
+    let bound: daedalus_tui::app::hook_launch::Plan =
+        serde_json::from_slice(&fs::read(bound_path).unwrap()).unwrap();
+    let registered = hook_runtime::inspect(&bound.spec.registration.path()).unwrap();
+    assert_eq!(registered.scope.terminal.endpoint, child.id);
+    assert_eq!(registered.scope.terminal.generation, child.generation);
+    assert_ne!(registered.scope.terminal.endpoint, parent.id);
+    let provider_pid: u32 = fs::read_to_string(directory.join("provider-started"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(registered.harness_process.unwrap().pid, provider_pid);
+    assert_eq!(child.pid, provider_pid);
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.to_string().contains("hook bootstrap submitted"))
+    );
+}
+#[test]
+fn saved_launch_dimensions_reach_real_native_terminals_and_explicit_flags_win() {
+    use daedalus_tui::app::{config::ControlConfig, setup::SetupPlan};
+    let mut fixture = Fixture::new();
+    let directory = fixture.root.join("instance");
+    let mut config = ControlConfig::fresh(&fixture.root).unwrap();
+    config.runtime.native_launch_cols = 93;
+    config.runtime.native_launch_rows = 31;
+    config.runtime.shell_cols = 87;
+    config.runtime.shell_rows = 29;
+    SetupPlan::fresh(&directory, config)
+        .unwrap()
+        .apply()
+        .unwrap();
+    let mut start = vec![
+        "terminal-native",
+        "start",
+        "--config-dir",
+        directory.to_str().unwrap(),
+        "--",
+        "/bin/sh",
+    ];
+    let value = fixture.ok(&start);
+    let parent: SessionInfo = serde_json::from_value(value).unwrap();
+    fixture.sessions.push(parent.clone());
+    assert_eq!((parent.cols, parent.rows), (87, 29));
+    // Verify the kernel PTY dimensions as seen by its child, too.
+    fixture.ok(&[
+        "terminal-native",
+        "input",
+        &parent.id,
+        &parent.generation,
+        "--text",
+        "printf 'SIZE='; stty size\n",
+    ]);
+    fixture.wait_text(&parent, "SIZE=29 87");
+    let target = directory.join("target.json");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&target)
+            .unwrap()
+            .write_all(&serde_json::to_vec(&daedalus_tui::adapters::native::pane(&parent)).unwrap())
+            .unwrap();
+    }
+    let receipt = fixture.ok(&[
+        "terminal",
+        "launch",
+        "--config-dir",
+        directory.to_str().unwrap(),
+        "--target",
+        target.to_str().unwrap(),
+        "--harness",
+        "shell",
+        "--apply",
+    ]);
+    let id = receipt["terminal"]["session"].as_str().unwrap();
+    let generation = receipt["terminal"]["terminal_id"].as_str().unwrap();
+    let capture: Capture =
+        serde_json::from_value(fixture.ok(&["terminal-native", "capture", id, generation]))
+            .unwrap();
+    fixture.sessions.push(capture.session.clone());
+    assert_eq!((capture.session.cols, capture.session.rows), (93, 31));
+    start.splice(4..4, ["--cols", "99", "--rows", "28"]);
+    let explicit: SessionInfo = serde_json::from_value(fixture.ok(&start)).unwrap();
+    fixture.sessions.push(explicit.clone());
+    assert_eq!((explicit.cols, explicit.rows), (99, 28));
+    let missing = fixture.root.join("missing");
+    let refused = fixture.run(&[
+        "terminal-native",
+        "start",
+        "--config-dir",
+        missing.to_str().unwrap(),
+        "--",
+        "/bin/sh",
+    ]);
+    assert!(!refused.status.success());
+    let listed = fixture.ok(&["terminal-native", "list"]);
+    assert_eq!(listed.as_array().unwrap().len(), 3);
 }
 #[test]
 fn detached_shell_is_global_and_stream_control_has_exact_identity() {

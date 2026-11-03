@@ -12,7 +12,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -48,6 +51,7 @@ pub struct ImportPlan {
     stage: Stage,
     destination: PathBuf,
     manifest: Manifest,
+    pub(crate) budget: Arc<Mutex<super::import_budget::Budget>>,
 }
 struct Stage(PathBuf, bool);
 impl Stage {
@@ -81,13 +85,13 @@ impl Drop for Stage {
 
 impl ImportPlan {
     pub fn prepare(source: &Path, destination: &Path, credentials: bool) -> Result<Self> {
-        Self::prepare_with_memory_credentials(source, destination, credentials, credentials)
+        Self::prepare_with_optional_credentials(source, destination, credentials, credentials)
     }
-    pub(crate) fn prepare_with_memory_credentials(
+    pub(crate) fn prepare_with_optional_credentials(
         source: &Path,
         destination: &Path,
         credentials: bool,
-        memory_credentials: bool,
+        optional_credentials: bool,
     ) -> Result<Self> {
         layouts::check_path(source)?;
         layouts::check_path(destination)?;
@@ -119,7 +123,8 @@ impl ImportPlan {
         // The settings-only limitation is superseded by this enclosing import.
         notices.retain(|n| !n.starts_with("Routes, checkpoints"));
         let mut config = settings.config().clone();
-        let mut files = BTreeMap::<String, Vec<u8>>::new();
+        let mut files = super::import_budget::Payloads::new(&config.runtime)?;
+        notices.push(format!("Source import limits: {} retained bytes, {} file/directory entries, {} structured JSON values/keys, {} logical byte work, {} ms through preparation/review/publication admission; queued frames {} bytes, attachment references {} and {} combined reference bytes.",config.runtime.instance_import_limit_bytes,config.runtime.instance_import_entry_limit,config.runtime.instance_import_json_value_limit,config.runtime.instance_import_work_limit_bytes,config.runtime.instance_import_timeout_ms,config.runtime.instance_import_frame_limit_bytes,config.runtime.instance_import_attachment_limit,config.runtime.instance_import_attachment_limit_bytes));
         if let Some(bytes) = layouts::read_private(&source.join("telegram.env"))? {
             let values = telegram_env(&bytes)?;
             let mut policy = BTreeMap::new();
@@ -141,7 +146,7 @@ impl ImportPlan {
                     "legacy-telegram-policy.json".into(),
                     serde_json::to_vec_pretty(&json!({"requires_review":true,"policy":policy}))
                         .map_err(|_| "Cannot preserve Telegram policy")?,
-                );
+                )?;
             }
             for (target, key) in [
                 (&mut config.telegram.owner_id, "OWNER_ID"),
@@ -166,7 +171,7 @@ impl ImportPlan {
                 files.insert(
                     "telegram.env".into(),
                     format!("TELEGRAM_BOT_TOKEN={token}\n").into_bytes(),
-                );
+                )?;
             }
         }
         let native_service_path = source.join("telegram-service.json");
@@ -200,7 +205,7 @@ impl ImportPlan {
                 files.insert(
                     "telegram-token.txt".into(),
                     format!("{token}\n").into_bytes(),
-                );
+                )?;
             }
             service.token_file = destination.join("telegram-token.txt");
             service.registrations.clear();
@@ -226,17 +231,33 @@ impl ImportPlan {
                     name,
                     serde_json::to_vec_pretty(&registration)
                         .map_err(|_| "Cannot encode relocated hook registration")?,
-                );
+                )?;
             }
             service.validate()?;
+            notices.push(format!("Telegram transport settings preserve API origin {} and require review before service startup.",service.runtime.api_origin));
             notices.push(format!("Native Telegram service preserved {} explicit grants and {} hook registrations. No grants were inferred. Token contents {}. Native routes and recipient revisions require review before cutover; harness hooks still need installation against the destination registration paths.", service.grants.len(), service.registrations.len(), if credentials {"copied by explicit credential selection"} else {"not copied; provision the new private token file"}));
-            files.insert(
-                "telegram-service.json".into(),
-                serde_json::to_vec_pretty(&service)
-                    .map_err(|_| "Cannot encode imported Telegram service")?,
-            );
+            files.insert("telegram-service.json".into(), service.encode()?)?;
         }
-        files.insert("control.json".into(), config.encode()?);
+        files.insert("control.json".into(), config.encode()?)?;
+        if let Some(bytes) =
+            super::telegram_config::read_private(&source.join("control-history.json"), 8192)?
+        {
+            super::history::Settings::decode(Some(&bytes))?;
+            files.insert("control-history.json".into(), bytes)?;
+        }
+        if let Some(bytes) = super::control_audit::read_bytes(&source.join("control-audit.json"))? {
+            super::control_audit::decode(&bytes)?;
+            use sha2::Digest;
+            files.insert(
+                format!(
+                    "control-audit.archive-{:x}.json",
+                    sha2::Sha256::digest(&bytes)
+                ),
+                bytes,
+            )?;
+            notices.push("Current source control receipts are retained as an exact private archive, with original outcome states. New destination actions use a separate active history.".into());
+        }
+        notices.push("Existing source control receipt archives remain with the source instance; this import does not copy or delete them.".into());
         if let Some(bytes) = layouts::read_private(&source.join("tg_offset"))? {
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| "Invalid legacy Telegram polling offset")?
@@ -247,7 +268,7 @@ impl ImportPlan {
             if offset < 0 {
                 return Err("Legacy Telegram polling offset must not be negative".into());
             }
-            files.insert("legacy-polling.json".into(),serde_json::to_vec_pretty(&json!({"next_offset":offset,"source":"tg_offset","namespace":config.agent_name,"bot_id":config.telegram.bot_id,"requires_cutover":true})).map_err(|_| "Cannot preserve legacy polling offset")?);
+            files.insert("legacy-polling.json".into(),serde_json::to_vec_pretty(&json!({"next_offset":offset,"source":"tg_offset","namespace":config.agent_name,"bot_id":config.telegram.bot_id,"requires_cutover":true})).map_err(|_| "Cannot preserve legacy polling offset")?)?;
         }
         for name in ["allowed_ids.json", "mention_only_chats.json"] {
             if let Some(bytes) = layouts::read_private(&source.join(name))? {
@@ -267,7 +288,7 @@ impl ImportPlan {
                             "version":1,"bot":bot,"quiet_chats":chats,"listen":false,
                             "scope_review":"Apply only to the explicitly selected native instance and this bot; existing native overrides take precedence",
                             "grants":"unchanged","source":"mention_only_chats.json"
-                        })).map_err(|_| "Cannot encode input-policy review")?);
+                        })).map_err(|_| "Cannot encode input-policy review")?)?;
                         notices.push(format!("{} legacy mention-only chat overrides will remain quiet for bot {}. No send grants or listen permission are added; existing native per-chat overrides take precedence.", chats.len(), bot));
                     }
                 }
@@ -275,11 +296,11 @@ impl ImportPlan {
                     format!("legacy-{name}"),
                     serde_json::to_vec_pretty(&json!({"requires_review":true,"policy":policy}))
                         .map_err(|_| "Cannot preserve legacy policy")?,
-                );
+                )?;
             }
         }
         if let Some(bytes) = layouts::read_private(&source.join("pending_feed.jsonl"))? {
-            files.insert("legacy-pending-feed.jsonl".into(), bytes);
+            files.insert("legacy-pending-feed.jsonl".into(), bytes)?;
             notices.push("Legacy pending input is retained as uncertain evidence, never as automatically retryable delivery.".into());
         }
         if source.join("layouts.json").exists() {
@@ -287,10 +308,27 @@ impl ImportPlan {
             files.insert(
                 "layouts.json".into(),
                 serde_json::to_vec_pretty(&layout).map_err(|_| "Cannot encode imported layouts")?,
-            );
+            )?;
         }
-        let mut registry = Registry::load(source).map_err(|_| "Invalid saved checkpoints")?;
+        let mut checkpoint_guard =
+            crate::core::checkpoint_budget::Guard::new(config.runtime.checkpoint_policy())?;
+        checkpoint_guard.constrain_deadline(files.budget.deadline);
+        let mut removed = crate::core::checkpoints::removals_observed(
+            source,
+            &mut checkpoint_guard,
+            |path, bytes| {
+                files.budget.work(bytes.len() as u64)?;
+                files.budget.json(path, bytes)
+            },
+        )?;
+        let mut registry =
+            Registry::load_observed(source, &mut checkpoint_guard, |path, bytes| {
+                files.budget.work(bytes.len() as u64)?;
+                files.budget.json(path, bytes)
+            })?;
         for checkpoint in &mut registry.checkpoints {
+            checkpoint_guard.time_left()?;
+            let old_key = crate::core::checkpoints::key(checkpoint)?;
             if checkpoint.context_file.is_empty() {
                 continue;
             }
@@ -306,17 +344,26 @@ impl ImportPlan {
                 .to_str()
                 .ok_or("Import path must be UTF-8")?
                 .into();
-            files.insert(name, bytes);
-            if files.values().map(Vec::len).sum::<usize>() > 64 * 1024 * 1024 {
-                return Err("Checkpoint import exceeds 64 MiB state limit".into());
+            if removed.contains(&old_key) {
+                let relocated = crate::core::checkpoints::key(checkpoint)?;
+                if removed.insert(relocated) {
+                    checkpoint_guard.entries(1)?;
+                }
             }
+            files.insert(name, bytes)?;
         }
         if !registry.checkpoints.is_empty() {
             files.insert(
                 "dashboard-checkpoints.json".into(),
-                serde_json::to_vec_pretty(&registry)
-                    .map_err(|_| "Cannot encode imported checkpoints")?,
-            );
+                checkpoint_guard.encode(&registry)?,
+            )?;
+        }
+        if !removed.is_empty() {
+            files.insert(
+                "checkpoint-removals.json".into(),
+                checkpoint_guard.encode(&removed)?,
+            )?;
+            notices.push("Checkpoint removal entries are retained; context relocation also adds the relocated removal keys. Removed references remain hidden and native session history is unchanged.".into());
         }
         if let Some(bytes) = layouts::read_private(&source.join("jobs.json"))? {
             let value: Value =
@@ -344,17 +391,51 @@ impl ImportPlan {
                     &json!({"active":active,"meta":{"chat_bindings":bindings,"chat_pins":pins}}),
                 )
                 .map_err(|_| "Cannot encode saved routes")?,
-            );
+            )?;
         }
         import_memory(
             source,
             destination,
-            memory_credentials,
+            optional_credentials,
             &mut files,
             &mut notices,
         )?;
+        import_gateway(
+            source,
+            destination,
+            optional_credentials,
+            &mut files,
+            &mut notices,
+        )?;
+        let mut viewer_guard = super::view_history::Guard::new(&config.runtime)?;
+        if let Some(snapshot) = super::view_history::snapshot(source, &mut viewer_guard)? {
+            files.insert("views.json".into(), snapshot.bytes)?;
+            notices.push("Viewer history is retained byte-for-byte without pruning or changing identities. Saved relationships require fresh terminal identity verification; this import launches no viewers and grants no route authority.".into());
+        }
+        let (files, mut budget) = files.into_parts();
         for (name, bytes) in &files {
-            layouts::write_private(&stage.0.join(name), bytes)?;
+            if name == "views.json" {
+                viewer_guard.time_left()?;
+                budget.write(
+                    &stage.0,
+                    &stage.0.join(name),
+                    bytes,
+                    config.runtime.terminal_view_history_limit_bytes,
+                )?;
+            } else if matches!(
+                name.as_str(),
+                "dashboard-checkpoints.json" | "checkpoint-removals.json"
+            ) {
+                checkpoint_guard.time_left()?;
+                budget.write(
+                    &stage.0,
+                    &stage.0.join(name),
+                    bytes,
+                    config.runtime.checkpoint_file_limit_bytes,
+                )?;
+            } else {
+                budget.write(&stage.0, &stage.0.join(name), bytes, 8 * 1024 * 1024)?;
+            }
         }
         for name in [
             "delivery.sqlite3",
@@ -376,8 +457,12 @@ impl ImportPlan {
                 };
                 // Snapshot goal/readiness stores without opening their runtime
                 // owners: startup recovery would mutate status during preview.
-                sqlite::snapshot(&path, &stage.0.join(saved_name), Duration::from_secs(10))
-                    .map_err(str::to_owned)?;
+                budget.snapshot(
+                    &stage.0,
+                    &path,
+                    &stage.0.join(saved_name),
+                    &config.runtime.snapshot_options(),
+                )?;
                 if name == "telegram-stream.sqlite3" {
                     let count = disable_imported_streams(&stage.0.join(saved_name))?;
                     notices.push(format!("{count} Telegram stream subscriptions retained disabled with advanced epochs and cleared active turns. Original scopes and audit records are retained; explicitly rearm after cutover."));
@@ -426,12 +511,14 @@ impl ImportPlan {
                 &[],
             )
             .map_err(|_| "Cannot prepare exact route review")?;
-            layouts::write_private(
+            budget.write(
+                &stage.0,
                 &stage.0.join("route-review.json"),
                 &serde_json::to_vec_pretty(&preview).map_err(|_| "Cannot encode route review")?,
+                8 * 1024 * 1024,
             )?;
             let route_path = stage.0.join("routes.sqlite3");
-            layouts::write_private(&route_path, b"")?;
+            budget.write(&stage.0, &route_path, b"", 8 * 1024 * 1024)?;
             let connection = super::telegram_config::private_connection(&route_path)
                 .map_err(|_| "Cannot create private imported route registry")?;
             let mut registry = routes::Registry::from_connection(connection)
@@ -452,22 +539,24 @@ impl ImportPlan {
         if let Some(bot) = config.telegram.bot_id.as_deref() {
             apply_mention_policy_scope(&stage.0, &imported_instance, bot)?;
         }
-        let hashes = hashes(&stage.0)?;
+        let hashes = hashes(&stage.0, &mut budget)?;
         let manifest = Manifest {
             version: 1,
             source: source.into(),
             activation: "requires_cutover".into(),
             hashes,
         };
-        layouts::write_private(
+        budget.write(
+            &stage.0,
             &stage.0.join(RECEIPT),
             &serde_json::to_vec_pretty(&manifest).map_err(|_| "Cannot encode migration receipt")?,
+            8 * 1024 * 1024,
         )?;
         notices.extend([
             "Original instance is unchanged and remains the rollback copy. Do not run two feeders for the same bot.".into(),
-            "Imported routes require exact live identity reconciliation. Hook scripts and account credentials are not copied.".into(),
+            "Imported routes require exact live identity reconciliation. Native harness sign-in files and hook scripts are not copied.".into(),
             "Stop the source feeder and take a final snapshot before cutover. This import does not activate any service.".into(),
-            "Custom automation and unrecognized gateway secrets are not imported; configure these explicitly.".into(),
+            "Custom automation and unrecognized secrets are not imported; configure these explicitly.".into(),
         ]);
         let preview = Preview {
             source: source.into(),
@@ -475,7 +564,8 @@ impl ImportPlan {
             files: manifest.hashes.keys().cloned().collect(),
             includes_credentials: files.contains_key("telegram.env")
                 || files.contains_key("telegram-token.txt")
-                || files.contains_key("hindsight-token.txt"),
+                || files.contains_key("hindsight-token.txt")
+                || files.contains_key("gateway-token.txt"),
             notices,
         };
         Ok(Self {
@@ -483,19 +573,72 @@ impl ImportPlan {
             stage,
             destination: destination.into(),
             manifest,
+            budget: Arc::new(Mutex::new(budget)),
         })
     }
 
+    pub(crate) fn with_budget<T>(
+        &self,
+        action: impl FnOnce(&mut super::import_budget::Budget) -> Result<T>,
+    ) -> Result<T> {
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| "Instance import budget is unavailable")?;
+        action(&mut budget)
+    }
+    pub(crate) fn write_staged(&self, path: &Path, bytes: &[u8], per_file: u64) -> Result<()> {
+        self.with_budget(|budget| budget.write(&self.stage.0, path, bytes, per_file))
+    }
+    pub(crate) fn snapshot_database(
+        &self,
+        source: &Path,
+        destination: &Path,
+        options: &sqlite::SnapshotOptions,
+    ) -> Result<()> {
+        self.with_budget(|budget| budget.snapshot(&self.stage.0, source, destination, options))
+    }
     pub(crate) fn staging_path(&self) -> &Path {
         &self.stage.0
     }
     pub(crate) fn seal_cutover(&mut self) -> Result<()> {
-        self.manifest.hashes = hashes(&self.stage.0)?;
-        layouts::write_private(
+        self.manifest.hashes = self.with_budget(|budget| hashes(&self.stage.0, budget))?;
+        self.write_staged(
             &self.stage.0.join(RECEIPT),
             &serde_json::to_vec_pretty(&self.manifest)
                 .map_err(|_| "Cannot encode cutover manifest")?,
+            8 * 1024 * 1024,
         )
+    }
+    /// Recheck the exact sealed files immediately before admitting publication.
+    /// Cutover adds one proof after sealing to avoid a recursive manifest hash;
+    /// its caller must supply the exact reviewed bytes for that separate file.
+    pub(crate) fn verify_stage(&self, additional: Option<(&str, &[u8])>) -> Result<()> {
+        let expected = serde_json::to_vec_pretty(&self.manifest)
+            .map_err(|_| "Cannot encode reviewed migration receipt")?;
+        self.with_budget(|budget| budget.work(expected.len() as u64))?;
+        if layouts::read_private(&self.stage.0.join(RECEIPT))?.as_deref()
+            != Some(expected.as_slice())
+        {
+            return Err("Migration receipt changed after review; prepare a new import".into());
+        }
+        let mut observed = self.with_budget(|budget| hashes(&self.stage.0, budget))?;
+        if let Some((name, bytes)) = additional {
+            self.with_budget(|budget| budget.work(bytes.len() as u64))?;
+            let digest = format!("{:x}", Sha256::digest(bytes));
+            if self.manifest.hashes.contains_key(name)
+                || observed.remove(name).as_deref() != Some(digest.as_str())
+            {
+                return Err("Cutover proof changed after review; prepare a new cutover".into());
+            }
+        }
+        if observed != self.manifest.hashes {
+            return Err(
+                "Staged migration files changed after review; prepare a new import or cutover"
+                    .into(),
+            );
+        }
+        self.with_budget(|budget| budget.check_time())
     }
     pub fn apply(mut self) -> Result<Applied> {
         layouts::check_path(&self.destination)?;
@@ -503,12 +646,16 @@ impl ImportPlan {
             self.destination.parent().ok_or("Missing import parent")?,
             false,
         )?;
+        self.verify_stage(None)?;
         if self.destination.exists() {
             let previous = layouts::read_private(&self.destination.join(RECEIPT))?
                 .ok_or("Destination already exists; select a new private instance directory")?;
             let previous: Manifest = serde_json::from_slice(&previous)
                 .map_err(|_| "Invalid existing migration receipt")?;
-            if previous == self.manifest && hashes(&self.destination)? == self.manifest.hashes {
+            if previous == self.manifest
+                && self.with_budget(|budget| hashes(&self.destination, budget))?
+                    == self.manifest.hashes
+            {
                 return Ok(Applied {
                     destination: self.destination.clone(),
                     changed: false,
@@ -736,62 +883,43 @@ fn apply_mention_policy_scope(stage: &Path, instance: &str, bot: &str) -> Result
     Ok(())
 }
 
-fn hashes(root: &Path) -> Result<BTreeMap<String, String>> {
-    let mut result = BTreeMap::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(directory).map_err(|_| "Cannot inspect migration files")? {
-            let entry = entry.map_err(|_| "Cannot inspect migration file")?;
-            let path = entry.path();
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|_| "Cannot inspect migration file")?;
-            if metadata.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| "Invalid migration path")?
-                .to_str()
-                .ok_or("Migration path must be UTF-8")?
-                .to_owned();
-            if relative == RECEIPT {
-                continue;
-            }
-            if !metadata.is_file() || metadata.len() > sqlite::MAX_DATABASE_BYTES {
-                return Err("Invalid migration file".into());
-            }
-            // All generated files are private and bounded; stream database hashes.
-            use std::io::Read;
-            #[cfg(unix)]
-            use std::os::unix::fs::OpenOptionsExt;
-            #[cfg(unix)]
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(&path)
-                .map_err(|_| "Cannot hash migration file")?;
-            #[cfg(windows)]
-            let file = crate::platform::open_private(&path, false, false)
-                .map_err(|_| "Cannot hash private migration file")?;
-            let mut hasher = Sha256::new();
-            let mut reader = file.take(sqlite::MAX_DATABASE_BYTES + 1);
-            let count = std::io::copy(&mut reader, &mut hasher)
-                .map_err(|_| "Cannot hash migration file")?;
-            if count > sqlite::MAX_DATABASE_BYTES {
-                return Err("Migration file exceeds size limit".into());
-            }
-            result.insert(relative, format!("{:x}", hasher.finalize()));
-        }
-    }
-    Ok(result)
+fn hashes(
+    root: &Path,
+    budget: &mut super::import_budget::Budget,
+) -> Result<BTreeMap<String, String>> {
+    let mut files = budget.hashes(root)?;
+    files.remove(RECEIPT);
+    Ok(files)
 }
 
+fn import_gateway(
+    source: &Path,
+    destination: &Path,
+    credentials: bool,
+    files: &mut super::import_budget::Payloads,
+    notices: &mut Vec<String>,
+) -> Result<()> {
+    let Some(mut config) = super::gateway::load(source)? else {
+        return Ok(());
+    };
+    if credentials {
+        let key = super::gateway::private_bytes(&config.credential_file, 8192)?
+            .ok_or("Gateway credential file missing")?;
+        files.insert("gateway-token.txt".into(), key)?;
+        notices.push("Gateway credential copied by explicit credential selection into a private destination file.".into());
+    } else {
+        notices.push("Gateway credential was not copied. Provision the private destination credential file before launching an enabled gateway; no native-account fallback is inferred.".into());
+    }
+    config.credential_file = destination.join("gateway-token.txt");
+    files.insert("gateway.json".into(), config.encode()?)?;
+    notices.push("Native gateway enable state, provider format, harness, endpoint and model preserved without contacting its provider.".into());
+    Ok(())
+}
 fn import_memory(
     source: &Path,
     destination: &Path,
     credentials: bool,
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut super::import_budget::Payloads,
     notices: &mut Vec<String>,
 ) -> Result<()> {
     use super::{memory, telegram_config};
@@ -845,7 +973,7 @@ fn import_memory(
             .filter(|key| !key.is_empty())
             .map(|_| destination.join("hindsight-token.txt"));
         let bank = values.get("HINDSIGHT_BANK").filter(|bank| !bank.is_empty());
-        files.insert("memory-review.json".into(),serde_json::to_vec_pretty(&json!({"version":1,"requires_review":true,"source":"hindsight.env","enabled":enabled,"explicit_bank":bank,"reason":"Legacy bank has no verified registration scope. Select exact hook registrations; no default bank mapping is inferred."})).map_err(|_| "Cannot encode memory review")?);
+        files.insert("memory-review.json".into(),serde_json::to_vec_pretty(&json!({"version":1,"requires_review":true,"source":"hindsight.env","enabled":enabled,"explicit_bank":bank,"reason":"Legacy bank has no verified registration scope. Select exact hook registrations; no default bank mapping is inferred."})).map_err(|_| "Cannot encode memory review")?)?;
         notices.push("Legacy memory enabled selection and explicit bank retained for review. No registration mapping or default bank was inferred; memory has no authorized bindings until explicitly configured.".into());
         memory::Config {
             version: 1,
@@ -865,17 +993,14 @@ fn import_memory(
         if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err("Memory credential must be one raw token".into());
         }
-        files.insert("hindsight-token.txt".into(), key.as_bytes().to_vec());
+        files.insert("hindsight-token.txt".into(), key.as_bytes().to_vec())?;
         notices.push("Memory credential copied by explicit credential selection into a private destination token file.".into());
     } else if config.credential_file.is_some() {
         notices.push("Memory credential was not copied. Provision the private destination token file before enabling memory effects.".into());
     }
     // Normalize only the endpoint's trailing slash; bindings retain exact scope.
     config.endpoint = config.endpoint.trim_end_matches('/').into();
-    files.insert(
-        "hindsight.json".into(),
-        serde_json::to_vec_pretty(&config).map_err(|_| "Cannot encode memory configuration")?,
-    );
+    files.insert("hindsight.json".into(), config.encode()?)?;
     Ok(())
 }
 fn memory_literals(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
@@ -1375,6 +1500,54 @@ mod tests {
         );
     }
     #[test]
+    fn native_gateway_override_and_credential_consent_survive_import() {
+        use super::super::gateway;
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("without-key");
+        let key = source.join("provider-key");
+        layouts::write_private(&key, b"fixture-gateway-credential").unwrap();
+        let config = gateway::Config {
+            version: 1,
+            enabled: true,
+            format: gateway::Format::AnthropicMessages,
+            endpoint: "https://gateway.example.invalid".into(),
+            model: "fixture-model".into(),
+            credential_file: key,
+            harness: "claude".into(),
+        };
+        layouts::write_private(&source.join("gateway.json"), &config.encode().unwrap()).unwrap();
+        let before = fs::read(source.join("gateway.json")).unwrap();
+        let plan = ImportPlan::prepare(&source, &destination, false).unwrap();
+        assert!(!plan.preview.includes_credentials);
+        plan.apply().unwrap();
+        let imported = gateway::load(&destination).unwrap().unwrap();
+        assert!(imported.enabled);
+        assert_eq!(imported.endpoint, config.endpoint);
+        assert_eq!(imported.model, config.model);
+        assert_eq!(imported.format, config.format);
+        assert_eq!(imported.harness, config.harness);
+        assert_eq!(
+            imported.credential_file,
+            destination.join("gateway-token.txt")
+        );
+        assert!(!imported.credential_file.exists());
+        let destination = t.0.join("with-key");
+        let plan = ImportPlan::prepare(&source, &destination, true).unwrap();
+        assert!(plan.preview.includes_credentials);
+        assert!(
+            !serde_json::to_string(&plan.preview)
+                .unwrap()
+                .contains("fixture-gateway-credential")
+        );
+        plan.apply().unwrap();
+        assert_eq!(
+            fs::read(destination.join("gateway-token.txt")).unwrap(),
+            b"fixture-gateway-credential"
+        );
+        assert_eq!(fs::read(source.join("gateway.json")).unwrap(), before);
+    }
+    #[test]
     fn legacy_memory_preserves_bank_without_inventing_scope_and_rejects_shell() {
         let t = Temp::new();
         let source = t.source();
@@ -1448,6 +1621,132 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("operator.txt")).unwrap(),
             "new work"
+        );
+    }
+    #[test]
+    fn expired_instance_import_budget_refuses_publication_and_cleans_owned_stage() {
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("new");
+        let plan = ImportPlan::prepare(&source, &destination, false).unwrap();
+        let stage = plan.staging_path().to_path_buf();
+        plan.budget.lock().unwrap().deadline = std::time::Instant::now();
+        assert!(plan.apply().err().unwrap().contains("deadline"));
+        assert!(!destination.exists());
+        assert!(!stage.exists());
+        assert!(source.join("control.json").exists());
+    }
+    #[test]
+    fn instance_import_budget_refuses_aggregate_work_and_recovers_with_source_settings() {
+        for kind in ["bytes", "entries", "values", "work"] {
+            let t = Temp::new();
+            let source = t.source();
+            let destination = t.0.join("new");
+            layouts::write_private(&source.join("pending_feed.jsonl"), &vec![b'x'; 7000]).unwrap();
+            let mut config =
+                ControlConfig::parse(&fs::read(source.join("control.json")).unwrap()).unwrap();
+            match kind {
+                "bytes" => config.runtime.instance_import_limit_bytes = 8192,
+                "entries" => config.runtime.instance_import_entry_limit = 1,
+                "values" => config.runtime.instance_import_json_value_limit = 128,
+                "work" => config.runtime.instance_import_work_limit_bytes = 4096,
+                _ => unreachable!(),
+            }
+            layouts::write_private(&source.join("control.json"), &config.encode().unwrap())
+                .unwrap();
+            let source_before = fs::read(source.join("control.json")).unwrap();
+            assert!(
+                ImportPlan::prepare(&source, &destination, false).is_err(),
+                "Expected source {kind} budget refusal"
+            );
+            assert!(!destination.exists());
+            assert_eq!(
+                fs::read(source.join("control.json")).unwrap(),
+                source_before
+            );
+            config.runtime = Default::default();
+            layouts::write_private(&source.join("control.json"), &config.encode().unwrap())
+                .unwrap();
+            ImportPlan::prepare(&source, &destination, false)
+                .unwrap()
+                .apply()
+                .unwrap();
+            assert_eq!(
+                fs::read(destination.join("legacy-pending-feed.jsonl")).unwrap(),
+                vec![b'x'; 7000]
+            );
+        }
+    }
+    #[test]
+    fn reviewed_stage_drift_is_refused_before_instance_publish() {
+        for change in ["content", "removed", "added", "receipt"] {
+            let t = Temp::new();
+            let source = t.source();
+            let destination = t.0.join("new");
+            let source_control = fs::read(source.join("control.json")).unwrap();
+            let plan = ImportPlan::prepare(&source, &destination, false).unwrap();
+            let stage = plan.staging_path().to_path_buf();
+            match change {
+                "content" => {
+                    let path = stage.join("control.json");
+                    let mut config = ControlConfig::parse(&fs::read(&path).unwrap()).unwrap();
+                    config.runtime.shell_cols += 1;
+                    layouts::write_private(&path, &config.encode().unwrap()).unwrap();
+                }
+                "removed" => fs::remove_file(stage.join("control.json")).unwrap(),
+                "added" => {
+                    layouts::write_private(&stage.join("extra/note.txt"), b"later note").unwrap()
+                }
+                "receipt" => {
+                    let path = stage.join(RECEIPT);
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.push(b'\n');
+                    layouts::write_private(&path, &bytes).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(plan.apply().is_err(), "Published changed stage: {change}");
+            assert!(!destination.exists());
+            assert!(!stage.exists());
+            assert_eq!(
+                fs::read(source.join("control.json")).unwrap(),
+                source_control
+            );
+            assert!(!source.join("cutover-retired.json").exists());
+        }
+    }
+    #[test]
+    fn viewer_history_import_preserves_exact_bytes_and_unresolved_records_without_pruning() {
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("new");
+        let mut config =
+            ControlConfig::parse(&fs::read(source.join("control.json")).unwrap()).unwrap();
+        config.runtime.terminal_view_history_limit = 1;
+        layouts::write_private(&source.join("control.json"), &config.encode().unwrap()).unwrap();
+        let history = b"{\n  \"version\":2, \"views\":[{\"version\":2,\"source\":{\"backend\":\"herdr\",\"endpoint\":\"fixture\",\"pane\":\"source\",\"generation\":\"source-generation\"},\"viewer\":{\"backend\":\"herdr\",\"endpoint\":\"fixture\",\"pane\":\"viewer\",\"generation\":\"viewer-generation\"},\"annotation\":\"retained metadata\"},{\"version\":99,\"unresolved\":true}]\n}\n";
+        layouts::write_private(&source.join("views.json"), history).unwrap();
+        let plan = ImportPlan::prepare(&source, &destination, false).unwrap();
+        assert!(plan.preview.files.iter().any(|name| name == "views.json"));
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read(plan.staging_path().join("views.json")).unwrap(),
+            history
+        );
+        assert_eq!(fs::read(source.join("views.json")).unwrap(), history);
+        plan.apply().unwrap();
+        assert_eq!(fs::read(destination.join("views.json")).unwrap(), history);
+        assert_eq!(fs::read(source.join("views.json")).unwrap(), history);
+        assert_eq!(
+            fs::metadata(destination.join("views.json")).unwrap().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !ImportPlan::prepare(&source, &destination, false)
+                .unwrap()
+                .apply()
+                .unwrap()
+                .changed
         );
     }
     #[test]
@@ -1734,6 +2033,87 @@ mod tests {
         assert!(!destination.exists());
     }
     #[test]
+    fn native_service_import_rejects_expansion_beyond_its_loader_budget() {
+        use super::super::telegram_config::ServiceConfig;
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("native-new");
+        let registration = source.join("hooks/fixture.json");
+        let scope = json!({"instance":"example","terminal":{"backend":"herdr","endpoint":"example","pane":"x".repeat(1500),"generation":"generation"},"conversation":"session","harness":"claude"});
+        layouts::write_private(&registration,&serde_json::to_vec(&json!({
+            "version":1,"id":"fixture","directory":source,"scope":scope,"goal_id":null,
+            "harness_process":null,"transcript":null,"events":["Stop"],
+            "options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},
+            "activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":10000
+        })).unwrap()).unwrap();
+        let grants: Vec<_> = (1..=512)
+            .map(|chat| json!({"chat":chat,"actor":7,"permissions":["read","send"]}))
+            .collect();
+        let bindings: Vec<_> = (1..=512).map(|chat|json!({"registration_id":"fixture","goal_scope":scope,"route_scope":{"instance":"example","bot":"123","chat":chat.to_string()},"actor":"7","route_revision":1,"reply_to":null,"hindsight_bank":null})).collect();
+        let service: ServiceConfig = serde_json::from_value(json!({"version":1,"instance":"example","bot_id":123,"token_file":source.join("token"),"grants":grants,"registrations":[registration],"hook_bindings":bindings})).unwrap();
+        service.validate().unwrap();
+        let compact = serde_json::to_vec(&service).unwrap();
+        assert!(compact.len() < 1024 * 1024);
+        assert!(serde_json::to_vec_pretty(&service).unwrap().len() > 1024 * 1024);
+        let path = source.join("telegram-service.json");
+        layouts::write_private(&path, &compact).unwrap();
+        ServiceConfig::load(&path)
+            .unwrap()
+            .check_registrations()
+            .unwrap();
+        let error = ImportPlan::prepare(&source, &destination, false)
+            .err()
+            .expect("expanded service must be rejected");
+        assert!(error.contains("1 MiB"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&path).unwrap(), compact);
+        assert!(!fs::read_dir(&t.0).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daedalus-import-")
+        }));
+    }
+    #[test]
+    fn native_memory_import_rejects_expansion_before_destination_changes() {
+        use super::super::memory;
+        let t = Temp::new();
+        let source = t.source();
+        let destination = t.0.join("native-new");
+        let scope = json!({"instance":"fixture","terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"g".repeat(1000)},"conversation":"conversation","harness":"claude"});
+        let bindings: Vec<_> = (0..800)
+            .map(|index| {
+                json!({
+                    "registration_id":format!("hook-{index}"), "scope":scope, "bank":"fixture",
+                })
+            })
+            .collect();
+        let config: memory::Config = serde_json::from_value(json!({
+            "version":1,"enabled":false,"endpoint":"http://127.0.0.1:8888",
+            "credential_file":null,"bindings":bindings,"recall_query":"fixture query","timeout_ms":1000,
+        })).unwrap();
+        config.validate().unwrap();
+        let compact = serde_json::to_vec(&config).unwrap();
+        assert!(compact.len() < 1024 * 1024);
+        assert!(serde_json::to_vec_pretty(&config).unwrap().len() > 1024 * 1024);
+        let path = source.join("hindsight.json");
+        layouts::write_private(&path, &compact).unwrap();
+        memory::load(&source).unwrap().unwrap();
+        let error = ImportPlan::prepare(&source, &destination, false)
+            .err()
+            .expect("expanded memory configuration must be rejected");
+        assert!(error.contains("1 MiB"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(fs::read(path).unwrap(), compact);
+        assert!(!fs::read_dir(&t.0).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daedalus-import-")
+        }));
+    }
+    #[test]
     fn native_service_import_relocates_private_configuration_without_activation() {
         use super::super::telegram_config::ServiceConfig;
         let t = Temp::new();
@@ -1751,6 +2131,7 @@ mod tests {
         layouts::write_private(&token, b"TELEGRAM_BOT_TOKEN=123:synthetic_import_fixture\n")
             .unwrap();
         let service = json!({"version":1,"instance":"example","bot_id":123,"token_file":token,
+            "runtime":{"api_origin":"https://example.invalid","loop_interval_ms":250},
             "grants":[{"chat":42,"actor":7,"permissions":["read","send"]}],"listen_chats":[],
             "registrations":[registration],"hook_bindings":[{"registration_id":"fixture","goal_scope":scope,"route_scope":{"instance":"example","bot":"123","chat":"42"},"actor":"7","route_revision":4,"reply_to":null,"hindsight_bank":null}]});
         let bytes = serde_json::to_vec(&service).unwrap();
@@ -1763,6 +2144,8 @@ mod tests {
         assert_eq!(staged.token_file, destination.join("telegram-token.txt"));
         assert_eq!(staged.grants.len(), 1);
         assert_eq!(staged.grants[0].actor, 7);
+        assert_eq!(staged.runtime.api_origin, "https://example.invalid");
+        assert_eq!(staged.runtime.loop_interval_ms, 250);
         drop(preview);
         let plan = ImportPlan::prepare(&source, &destination, true).unwrap();
         assert!(plan.preview.includes_credentials);
@@ -1773,6 +2156,8 @@ mod tests {
         );
         plan.apply().unwrap();
         let imported = ServiceConfig::load(&destination.join("telegram-service.json")).unwrap();
+        assert_eq!(imported.runtime.api_origin, "https://example.invalid");
+        assert_eq!(imported.runtime.loop_interval_ms, 250);
         assert_eq!(
             imported.read_token().unwrap(),
             "123:synthetic_import_fixture"

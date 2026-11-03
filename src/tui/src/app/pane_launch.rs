@@ -103,6 +103,9 @@ pub fn prepare(
     now: u64,
 ) -> Result<Plan> {
     config.validate()?;
+    let mut terminals = terminals.clone();
+    terminals.apply_settings(&config.runtime)?;
+    let terminals = &terminals;
     let parent = terminals.verify(&request.parent)?;
     let identity = terminals::identity(&parent)?;
     if !matches!(request.harness.as_str(), "claude" | "pi" | "grok") {
@@ -263,6 +266,9 @@ pub fn apply(
     approved: &str,
     now: u64,
 ) -> Result<Receipt> {
+    let mut terminals = terminals.clone();
+    terminals.apply_settings(&config.runtime)?;
+    let terminals = &terminals;
     if plan.fingerprint()? != approved || config != &plan.configuration {
         return Err("Launch review or configuration changed".into());
     }
@@ -312,10 +318,15 @@ pub fn apply(
         operation: Operation::Handoff,
     };
     let mut receipt = terminals.spawn(&plan.request.parent, &launch, Placement::Split)?;
-    if receipt.state != ReceiptState::Submitted {
+    if !matches!(
+        receipt.state,
+        ReceiptState::Submitted | ReceiptState::Accepted
+    ) {
         return Ok(receipt);
     }
     let Some(created) = receipt.terminal.as_ref() else {
+        receipt.state = ReceiptState::Unconfirmed;
+        receipt.message = "Pane creation was acknowledged without an exact terminal identity; hook binding was not published. Inspect before retrying".into();
         return Ok(receipt);
     };
     let publication = (|| -> Result<()> {

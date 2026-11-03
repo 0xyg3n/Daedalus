@@ -136,7 +136,8 @@ impl Registration {
             }
         }
         if self.scope.harness == Harness::Opencode
-            || (self.scope.harness == Harness::Hermes && self.server_emitter.is_some())
+            || (matches!(self.scope.harness, Harness::Hermes | Harness::Codex)
+                && self.server_emitter.is_some())
         {
             let server = self.server_emitter.as_ref().ok_or(Error::Invalid(
                 "OpenCode requires an explicit local server emitter",
@@ -146,13 +147,13 @@ impl Registration {
                 || server.process.start_ticks == 0
             {
                 return Err(Error::Invalid(
-                    "OpenCode requires independent terminal and server process bindings",
+                    "Server-emitting hooks require independent terminal and server process bindings",
                 ));
             }
             layouts::check_path(&server.executable).map_err(|_| Error::PrivateState)?;
         } else if self.server_emitter.is_some() {
             return Err(Error::Invalid(
-                "Server emitter is only supported for OpenCode and Hermes",
+                "Server emitter is only supported for OpenCode, Hermes and Codex",
             ));
         }
         if !matches!(
@@ -229,7 +230,7 @@ pub(crate) fn same_local_path(left: &Path, right: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        return windows_path_key(left).is_some_and(|key| windows_path_key(right) == Some(key));
+        windows_path_key(left).is_some_and(|key| windows_path_key(right) == Some(key))
     }
     #[cfg(not(windows))]
     {
@@ -318,8 +319,8 @@ struct HeldCutover {
     count: u32,
 }
 #[cfg(windows)]
-fn cutover_holds() -> std::sync::MutexGuard<'static, std::collections::HashMap<(u64, u64), HeldCutover>>
-{
+fn cutover_holds()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<(u64, u64), HeldCutover>> {
     static HOLDS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<(u64, u64), HeldCutover>>,
     > = std::sync::OnceLock::new();
@@ -356,10 +357,7 @@ pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
     let identity = crate::platform::file_identity(&file).map_err(|_| Error::PrivateState)?;
     let mut holds = cutover_holds();
     if let Some(slot) = holds.get_mut(&identity) {
-        slot.count = slot
-            .count
-            .checked_add(1)
-            .ok_or(Error::Persistence)?;
+        slot.count = slot.count.checked_add(1).ok_or(Error::Persistence)?;
         drop(holds);
         if let Err(error) = active_directory(directory) {
             release_cutover(identity);
@@ -373,13 +371,7 @@ pub(crate) fn active_guard(directory: &Path) -> Result<ActiveGuard> {
         let _ = crate::platform::unlock(&file);
         return Err(error);
     }
-    holds.insert(
-        identity,
-        HeldCutover {
-            file,
-            count: 1,
-        },
-    );
+    holds.insert(identity, HeldCutover { file, count: 1 });
     drop(holds);
     Ok(ActiveGuard { identity })
 }
@@ -544,6 +536,69 @@ pub fn inspect(path: &Path) -> Result<Registration> {
     active_directory(&registration.directory)?;
     Ok(registration)
 }
+/// A proved Codex binding may refresh process incarnations and the generation
+/// of its already registered pane. It never retargets routes or copies grants.
+#[cfg(target_os = "linux")]
+pub(super) fn persist_codex_binding(
+    expected: &Registration,
+    next: &Registration,
+    proc_root: &Path,
+) -> Result<()> {
+    next.validate()?;
+    let _active = active_guard(&expected.directory)?;
+    let _lock = super::hook_install::lock(&expected.directory).map_err(|_| Error::Persistence)?;
+    let value = |r: &Registration| serde_json::to_value(r).map_err(|_| Error::Input);
+    let mut allowed = expected.clone();
+    allowed.harness_process = next.harness_process.clone();
+    allowed.server_emitter = next.server_emitter.clone();
+    allowed.scope.terminal.generation = next.scope.terminal.generation.clone();
+    if expected.scope.harness != Harness::Codex || value(&allowed)? != value(next)? {
+        return Err(Error::Invalid(
+            "Hook binding changed; refresh and review it again",
+        ));
+    }
+    let current = inspect(&expected.path())?;
+    if value(&current)? == value(next)? {
+        return Ok(());
+    }
+    if value(&current)? != value(expected)? {
+        return Err(Error::Invalid(
+            "Hook binding changed; refresh and review it again",
+        ));
+    }
+    verify_process(
+        next.harness_process.as_ref().ok_or(Error::Identity)?,
+        proc_root,
+    )?;
+    if let Some(server) = &next.server_emitter {
+        verify_server_emitter(server, proc_root)?;
+    }
+    let mut con = readiness_connection(&next.directory)?;
+    let tx = con.transaction().map_err(|_| Error::Persistence)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Input)?
+        .as_millis();
+    // Both scopes lose readiness before the new binding is visible. A crash
+    // cannot reuse a previous Idle observation or authorize a queued retry.
+    static NEXT_FENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let fence = format!(
+        "codex-rebind:{}:{}",
+        invocation_id()?,
+        NEXT_FENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    for (index, r) in [expected, next].into_iter().enumerate() {
+        let scope = serde_json::to_string(&r.scope).map_err(|_| Error::Input)?;
+        tx.execute("INSERT INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) VALUES(?,?,?,'\"unknown\"',?,1)",
+            params![scope,format!("{fence}:{index}"),"process binding changed",i64::try_from(now).map_err(|_|Error::Input)?]).map_err(|_|Error::Persistence)?;
+    }
+    tx.commit().map_err(|_| Error::Persistence)?;
+    layouts::write_private(
+        &next.path(),
+        &serde_json::to_vec_pretty(next).map_err(|_| Error::Input)?,
+    )
+    .map_err(|_| Error::Persistence)
+}
 #[cfg(unix)]
 fn private_connection(directory: &Path, filename: &str) -> Result<Connection> {
     private_directory(directory)?;
@@ -622,6 +677,11 @@ fn open_store(directory: &Path) -> Result<Store> {
 /// Injected verifier is part of the trusted application, never selected by stdin.
 pub trait Verifier {
     fn verify(&mut self, registration: &Registration) -> Result<()>;
+    /// Resolve a profile-wide Codex hook before admitting any event. Returning
+    /// None acknowledges an unrelated terminal without changing local state.
+    fn prepare_codex(&mut self, registration: &Registration) -> Result<Option<Registration>> {
+        Ok(Some(registration.clone()))
+    }
     /// Security hooks must have an actual policy; recording a plan is not approval.
     fn authorize_tool(&mut self, _event: &Event, _payload: &Value) -> Result<()> {
         Err(Error::UnsupportedPolicy)
@@ -633,6 +693,15 @@ pub struct NativeVerifier {
 }
 #[cfg(unix)]
 impl Verifier for NativeVerifier {
+    #[cfg(target_os = "linux")]
+    fn prepare_codex(&mut self, registration: &Registration) -> Result<Option<Registration>> {
+        super::codex_hook_binding::prepare(
+            registration,
+            &self.terminals,
+            std::process::id(),
+            hook_caller_pane().as_ref(),
+        )
+    }
     fn verify(&mut self, registration: &Registration) -> Result<()> {
         let actual = verify_live_session(registration, &self.terminals)?;
         let mut terminal_pid = actual
@@ -1041,7 +1110,8 @@ fn event_key(
     event: &Event,
     payload: &Value,
     explicit: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, Option<String>)> {
+    let mut turn_prompt = false;
     let native = if let Some(id) = explicit {
         if !identifier(id) {
             return Err(Error::EventIdentity);
@@ -1075,6 +1145,11 @@ fn event_key(
     ) && matches!(event.kind, EventKind::Stop | EventKind::UserPromptSubmit)
         && let Some(turn) = native_turn(registration.scope.harness, payload)
     {
+        // Codex steering can submit several different prompts in one running
+        // turn. That boundary alone is not a unique prompt event identity.
+        turn_prompt = registration.scope.harness == Harness::Codex
+            && event.kind == EventKind::UserPromptSubmit
+            && native_prompt(Harness::Codex, payload).is_some();
         turn.to_owned()
     } else if registration.scope.harness == Harness::Grok
         && event.kind == EventKind::UserPromptSubmit
@@ -1122,7 +1197,15 @@ fn event_key(
         native,
     ))
     .map_err(|_| Error::Input)?;
-    Ok(format!("hook:{:x}", Sha256::digest(encoded)))
+    let key = format!("hook:{:x}", Sha256::digest(encoded));
+    let steered = turn_prompt
+        .then(|| {
+            serde_json::to_vec(&(&key, payload))
+                .map(|encoded| format!("hook:{:x}", Sha256::digest(encoded)))
+                .map_err(|_| Error::Input)
+        })
+        .transpose()?;
+    Ok((key, steered))
 }
 /// Events without provider IDs are distinct hook invocations. This deduplicates
 /// retries inside the same process, not a provider restarting the hook process.
@@ -1225,7 +1308,7 @@ pub fn execute(
     if event.kind == EventKind::Stop && registration.scope.harness == Harness::Claude {
         await_final_row(registration, &payload, clock);
     }
-    let key = event_key(registration, &event, &payload, event_id)?;
+    let (mut key, steered) = event_key(registration, &event, &payload, event_id)?;
     let effects = hooks::dispatch(&event, registration.options.features())
         .into_iter()
         .map(|e| effect_name(e).to_owned())
@@ -1252,15 +1335,32 @@ pub fn execute(
     let now = clock.now_ms();
     let mut journal = Journal::open(&registration.directory.join("delivery.sqlite3"))
         .map_err(|_| Error::Persistence)?;
-    let admitted = journal
-        .admit(
-            "hooks",
-            &registration.scope.instance,
-            &key,
-            &plan,
-            now as f64 / 1000.0,
-        )
-        .map_err(|_| Error::Persistence)?;
+    let admitted = match journal.admit(
+        "hooks",
+        &registration.scope.instance,
+        &key,
+        &plan,
+        now as f64 / 1000.0,
+    ) {
+        Ok(admitted) => admitted,
+        Err(crate::core::journal::Error::Conflict(_)) => {
+            // Preserve the first prompt's existing key across upgrades. Only
+            // an implicit Codex turn key can disambiguate a subsequent prompt;
+            // actual provider/explicit event IDs keep their conflict checks.
+            // The failed admission transaction has made no external effect.
+            key = steered.ok_or(Error::Persistence)?;
+            journal
+                .admit(
+                    "hooks",
+                    &registration.scope.instance,
+                    &key,
+                    &plan,
+                    now as f64 / 1000.0,
+                )
+                .map_err(|_| Error::Persistence)?
+        }
+        Err(_) => return Err(Error::Persistence),
+    };
     observe_readiness(registration, &key, &payload, event.kind, now, None)?;
     let Some(goal_id) = &registration.goal_id else {
         observe_readiness(
@@ -1386,27 +1486,27 @@ pub fn record_run_result(
 /// that cannot deliver Telegram until someone binds it.
 fn align_herdr_window(registration: &Registration, payload: &Value) -> Result<AlignedWindow> {
     let Some((pane, endpoint)) = hook_caller_pane() else {
-        return Ok(AlignedWindow::Same(registration.clone()));
+        return Ok(AlignedWindow::same(registration.clone()));
     };
     if registration.scope.terminal.backend != crate::core::identity::Backend::Herdr {
-        return Ok(AlignedWindow::Same(registration.clone()));
+        return Ok(AlignedWindow::same(registration.clone()));
     }
     let Some(conversation) = payload_conversation(registration.scope.harness, payload) else {
-        return Ok(AlignedWindow::Same(registration.clone()));
+        return Ok(AlignedWindow::same(registration.clone()));
     };
     let terminal = &registration.scope.terminal;
     if terminal.pane == pane
         && terminal.endpoint == endpoint
         && registration.scope.conversation == conversation
     {
-        return Ok(AlignedWindow::Same(refresh_stopped_harness(registration)?));
+        return Ok(AlignedWindow::same(refresh_stopped_harness(registration)?));
     }
     let mut want = registration.scope.clone();
     want.conversation = conversation;
     want.terminal.pane = pane.clone();
     want.terminal.endpoint = endpoint.clone();
     if let Some(existing) = find_window_registration(&registration.directory, &want)? {
-        return Ok(AlignedWindow::Same(refresh_stopped_harness(&existing)?));
+        return Ok(AlignedWindow::same(refresh_stopped_harness(&existing)?));
     }
     let terminals = crate::adapters::terminals::Terminals::default();
     let generation = match live_herdr_generation(&terminals, &endpoint, &pane) {
@@ -1420,17 +1520,23 @@ fn align_herdr_window(registration: &Registration, payload: &Value) -> Result<Al
     if verify_process(&process, &terminals.proc_root).is_err() {
         return Ok(AlignedWindow::Ignore);
     }
-    let Ok(opened) = window_registration(registration, &want, process, transcript_hint(payload)) else {
+    let Ok(opened) = window_registration(registration, &want, process, transcript_hint(payload))
+    else {
         return Ok(AlignedWindow::Ignore);
     };
     if install(&opened).is_err() {
         return Ok(AlignedWindow::Ignore);
     }
-    Ok(AlignedWindow::Same(opened))
+    Ok(AlignedWindow::same(opened))
 }
 enum AlignedWindow {
-    Same(Registration),
+    Same(Box<Registration>),
     Ignore,
+}
+impl AlignedWindow {
+    fn same(registration: Registration) -> Self {
+        Self::Same(Box::new(registration))
+    }
 }
 std::thread_local! {
     static HOOK_CALLER_PANE: std::cell::RefCell<Option<(String, String)>> =
@@ -1454,7 +1560,9 @@ fn caller_herdr_pane() -> Option<(String, String)> {
 fn terminal_field(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4096
-        && !value.chars().any(|c| c.is_control() || c == '/' || c == '\\')
+        && !value
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
 }
 fn payload_conversation(harness: Harness, payload: &Value) -> Option<String> {
     let key = match harness {
@@ -1477,7 +1585,10 @@ fn same_window(registration: &Registration, want: &crate::core::goal_store::Scop
         && terminal.endpoint == want.terminal.endpoint
         && terminal.pane == want.terminal.pane
 }
-fn find_window_registration(directory: &Path, want: &crate::core::goal_store::Scope) -> Result<Option<Registration>> {
+fn find_window_registration(
+    directory: &Path,
+    want: &crate::core::goal_store::Scope,
+) -> Result<Option<Registration>> {
     let entries = match fs::read_dir(directory.join("hooks")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1492,7 +1603,10 @@ fn find_window_registration(directory: &Path, want: &crate::core::goal_store::Sc
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if name.contains(".before") || name.contains(".backup") {
             continue;
         }
@@ -1574,6 +1688,11 @@ fn window_registration_id(template: &str, pane: &str, conversation: &str) -> Res
     Ok(raw)
 }
 fn refresh_stopped_harness(registration: &Registration) -> Result<Registration> {
+    // A server emitter and its terminal client are independent identities.
+    // The hook's daemon ancestry must never replace the pinned TUI process.
+    if registration.server_emitter.is_some() {
+        return Ok(registration.clone());
+    }
     let Some(current) = &registration.harness_process else {
         return Ok(registration.clone());
     };
@@ -1653,7 +1772,8 @@ fn ancestor_harness(harness: Harness) -> Option<ProcessIdentity> {
         if name != needle {
             continue;
         }
-        let ticks = crate::adapters::terminals::process_start(Path::new("/proc"), &pid.to_string())?;
+        let ticks =
+            crate::adapters::terminals::process_start(Path::new("/proc"), &pid.to_string())?;
         let start_ticks = ticks.parse().ok()?;
         return Some(ProcessIdentity { pid, start_ticks });
     }
@@ -1716,7 +1836,39 @@ fn run_verified(
             "Hook event does not match its installed command",
         ));
     }
-    let registration = match align_herdr_window(registration, &payload)? {
+    // Codex loads profile hooks for every conversation using that profile.
+    // An event for another session has no authority over this registration;
+    // acknowledge it without touching persistent state or reporting failure.
+    if registration.scope.harness == Harness::Codex {
+        match hooks::parse(
+            Harness::Codex,
+            &bytes,
+            &registration.scope.binding().map_err(|_| Error::Identity)?,
+        ) {
+            Err(hooks::Error::IdentityMismatch) => {
+                writer
+                    .write_all(b"{}\n")
+                    .and_then(|_| writer.flush())
+                    .map_err(|_| Error::Output)?;
+                return Ok(Outcome {
+                    reply: Reply::Empty,
+                    event_id: "unbound-codex-session".into(),
+                    planned_effects: Vec::new(),
+                    admitted: false,
+                });
+            }
+            Err(_) => return Err(Error::Input),
+            Ok(_) => {}
+        }
+    }
+    let registration = match if registration.scope.harness == Harness::Codex {
+        match verifier.prepare_codex(registration)? {
+            Some(registration) => AlignedWindow::same(registration),
+            None => AlignedWindow::Ignore,
+        }
+    } else {
+        align_herdr_window(registration, &payload)?
+    } {
         AlignedWindow::Ignore => {
             writer
                 .write_all(b"{}\n")
@@ -1729,33 +1881,9 @@ fn run_verified(
                 admitted: false,
             });
         }
-        AlignedWindow::Same(registration) => registration,
+        AlignedWindow::Same(registration) => *registration,
     };
     let registration = &registration;
-    // Codex loads profile hooks for every conversation using that profile.
-    // An event for another session has no authority over this registration;
-    // acknowledge it without touching persistent state or reporting failure.
-    if registration.scope.harness == Harness::Codex
-        && matches!(
-            hooks::parse(
-                Harness::Codex,
-                &bytes,
-                &registration.scope.binding().map_err(|_| Error::Identity)?,
-            ),
-            Err(hooks::Error::IdentityMismatch)
-        )
-    {
-        writer
-            .write_all(b"{}\n")
-            .and_then(|_| writer.flush())
-            .map_err(|_| Error::Output)?;
-        return Ok(Outcome {
-            reply: Reply::Empty,
-            event_id: "unbound-codex-session".into(),
-            planned_effects: Vec::new(),
-            admitted: false,
-        });
-    }
     let _active = active_guard(&registration.directory)?;
     let mut outcome = match execute(bytes.as_slice(), registration, event_id, verifier, clock) {
         Ok(outcome) => outcome,
@@ -1973,6 +2101,49 @@ mod tests {
             0
         );
         assert!(snapshot["panes"][0]["agent_session"].is_null());
+    }
+    #[test]
+    fn invalid_registration_does_not_hide_another_live_herdr_conversation() {
+        let mut f = Fixture::new();
+        f.0.harness_process = Some(ProcessIdentity {
+            pid: 42,
+            start_ticks: 500,
+        });
+        f.0.goal_id = None;
+        install(&f.0).unwrap();
+        layouts::write_private(&f.0.directory.join("hooks/broken.json"), b"{").unwrap();
+        let proc = f.0.directory.join("proc");
+        fs::create_dir_all(proc.join("42")).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[2] = "42";
+        fields[4] = "99";
+        fields[5] = "42";
+        fields[19] = "500";
+        fs::write(
+            proc.join("42/stat"),
+            format!("42 (fixture) {}", fields.join(" ")),
+        )
+        .unwrap();
+        let pane = json!({"backend":"herdr","server":"example","session":"example","pane_id":"pane","terminal_id":"terminal","pid":"42","agent":"claude"});
+        let executable = f.0.directory.join("herdr");
+        fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", json!({"pane":pane})),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let adapter = Terminals {
+            herdr: executable,
+            proc_root: proc,
+            ..Terminals::default()
+        };
+        let mut snapshot = json!({"panes":[pane]});
+        assert!(enrich_native_sessions(&f.0.directory, &mut snapshot, &adapter).is_err());
+        assert_eq!(
+            crate::adapters::terminals::reported_session(&snapshot["panes"][0]),
+            Some("session")
+        );
     }
 
     struct Fixture(Registration);
@@ -2909,6 +3080,172 @@ mod tests {
         .unwrap();
         assert!(!duplicate.admitted);
         assert_eq!(first.event_id, duplicate.event_id);
+    }
+    #[test]
+    fn codex_steering_prompts_in_one_turn_are_admitted_and_replays_deduplicate() {
+        let mut f = Fixture::new();
+        f.0.scope.harness = Harness::Codex;
+        f.0.goal_id = None;
+        f.0.events = vec![EventKind::UserPromptSubmit];
+        let invoke = |prompt: &str, explicit: Option<&str>| {
+            let data = serde_json::to_vec(&json!({
+                "session_id":"session", "hook_event_name":"UserPromptSubmit",
+                "turn_id":"one-running-turn", "prompt":prompt,
+            }))
+            .unwrap();
+            let mut output = Vec::new();
+            let result = run_verified(
+                data.as_slice(),
+                &mut output,
+                &f.0,
+                explicit,
+                Some(EventKind::UserPromptSubmit),
+                &mut Verified,
+                &mut FakeClock(100),
+            );
+            (result, output)
+        };
+        let (first, output) = invoke("Initial request", None);
+        let first = first.unwrap();
+        assert!(first.admitted);
+        assert_eq!(output, b"{}\n");
+        let (steered, output) = invoke("Additional direction in the same running turn", None);
+        let steered = steered.unwrap();
+        assert!(steered.admitted);
+        assert_eq!(output, b"{}\n");
+        assert_ne!(steered.event_id, first.event_id);
+        for (prompt, event) in [
+            ("Initial request", first.event_id),
+            (
+                "Additional direction in the same running turn",
+                steered.event_id,
+            ),
+        ] {
+            let replay = invoke(prompt, None).0.unwrap();
+            assert!(!replay.admitted);
+            assert_eq!(replay.event_id, event);
+        }
+        // Real provider/explicit event identities retain their conflict check.
+        assert!(
+            invoke("Explicit provider event", Some("provider-id"))
+                .0
+                .unwrap()
+                .admitted
+        );
+        assert!(
+            invoke("Changed explicit event", Some("provider-id"))
+                .0
+                .is_err()
+        );
+        for field in ["tool_use_id", "event_id", "uuid"] {
+            let mut payload = json!({
+                "session_id":"session", "hook_event_name":"UserPromptSubmit",
+                "turn_id":"one-running-turn", "prompt":"Provider identity fixture",
+            });
+            payload[field] = json!(format!("provider-{field}"));
+            let call = |payload: &Value| {
+                let bytes = serde_json::to_vec(payload).unwrap();
+                execute(
+                    bytes.as_slice(),
+                    &f.0,
+                    None,
+                    &mut Verified,
+                    &mut FakeClock(100),
+                )
+            };
+            assert!(call(&payload).unwrap().admitted);
+            payload["prompt"] = json!("Conflicting content under the same provider identity");
+            assert!(call(&payload).is_err());
+        }
+        let journal = Journal::open(&f.0.directory.join("delivery.sqlite3")).unwrap();
+        assert_eq!(
+            journal
+                .events("hooks", "example", &["admitted"])
+                .unwrap()
+                .len(),
+            6
+        );
+        assert!(journal.rows().unwrap().is_empty());
+    }
+    #[test]
+    fn codex_daemon_registration_keeps_independent_terminal_client() {
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Codex;
+        fixture.0.events = vec![EventKind::PostToolUse];
+        fixture.0.harness_process = Some(ProcessIdentity {
+            pid: 991,
+            start_ticks: 10,
+        });
+        fixture.0.server_emitter = Some(ServerEmitter {
+            process: ProcessIdentity {
+                pid: 992,
+                start_ticks: 20,
+            },
+            executable: fixture.0.directory.join("codex"),
+            device: 1,
+            inode: 2,
+        });
+        fixture.0.validate().unwrap();
+        let refreshed = refresh_stopped_harness(&fixture.0).unwrap();
+        assert_eq!(refreshed.harness_process, fixture.0.harness_process);
+        assert_eq!(refreshed.server_emitter, fixture.0.server_emitter);
+        fixture.0.harness_process = None;
+        assert!(fixture.0.validate().is_err());
+    }
+    #[test]
+    fn codex_invalid_or_unrelated_payload_cannot_prepare_or_retarget_a_binding() {
+        struct NoPreparation;
+        impl Verifier for NoPreparation {
+            fn verify(&mut self, _: &Registration) -> Result<()> {
+                panic!("Unrelated hook reached verification");
+            }
+            fn prepare_codex(&mut self, _: &Registration) -> Result<Option<Registration>> {
+                panic!("Unrelated hook reached binding preparation");
+            }
+        }
+        let mut fixture = Fixture::new();
+        fixture.0.scope.harness = Harness::Codex;
+        fixture.0.goal_id = None;
+        fixture.0.events = vec![EventKind::PostToolUse];
+        let path = install(&fixture.0).unwrap();
+        let before = fs::read(&path).unwrap();
+        // Even a different pane hint cannot cause registration discovery before
+        // the Codex conversation is compared to this exact profile command.
+        let _guard = HookCallerGuard(hook_caller_pane());
+        HOOK_CALLER_PANE
+            .with(|slot| *slot.borrow_mut() = Some(("other-pane".into(), "other-server".into())));
+        for session in [Some("other"), None, Some("")] {
+            let mut payload = json!({"hook_event_name":"PostToolUse","tool_use_id":"tool"});
+            if let Some(session) = session {
+                payload["session_id"] = json!(session);
+            }
+            let mut output = Vec::new();
+            let result = run_verified(
+                serde_json::to_vec(&payload).unwrap().as_slice(),
+                &mut output,
+                &fixture.0,
+                None,
+                Some(EventKind::PostToolUse),
+                &mut NoPreparation,
+                &mut FakeClock(0),
+            );
+            if session == Some("other") {
+                assert!(!result.unwrap().admitted);
+                assert_eq!(output, b"{}\n");
+            } else {
+                assert!(result.is_err());
+                assert!(output.is_empty());
+            }
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert!(
+                !fixture
+                    .0
+                    .directory
+                    .join("hook-observations.sqlite3")
+                    .exists()
+            );
+            assert!(!fixture.0.directory.join("delivery.sqlite3").exists());
+        }
     }
     #[test]
     fn codex_profile_hook_ignores_other_sessions_and_accepts_resumed_transcript() {
@@ -4132,7 +4469,7 @@ pub struct ProcessIdentity {
     pub pid: u32,
     pub start_ticks: u64,
 }
-/// Explicit local OpenCode server identity. This authorizes a configured emitter
+/// Explicit local harness server identity. This authorizes a configured emitter
 /// under the same Unix account; it does not authenticate arbitrary remote servers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4208,7 +4545,7 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
         .map_err(|_| Error::Identity)?;
     if &magic != b"\x7fELF" {
         return Err(Error::Invalid(
-            "OpenCode server requires a pinned native executable",
+            "Hook server requires a pinned native executable",
         ));
     }
     let live = fs::metadata(process_dir.join("exe")).map_err(|_| Error::Identity)?;
@@ -4260,10 +4597,12 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
         return Err(Error::Identity);
     }
     let mut magic = [0; 2];
-    running.read_exact(&mut magic).map_err(|_| Error::Identity)?;
+    running
+        .read_exact(&mut magic)
+        .map_err(|_| Error::Identity)?;
     if magic != *b"MZ" {
         return Err(Error::Invalid(
-            "OpenCode server requires a pinned native executable",
+            "Hook server requires a pinned native executable",
         ));
     }
     verify_process(&server.process, proc_root)
@@ -4372,6 +4711,7 @@ pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
     )?;
     let con = readiness_connection(&r.directory)?;
     let scope = serde_json::to_string(&r.scope).map_err(|_| Error::Input)?;
+    recover_superseded_grok_reservation(&con, &r, proc_root, &scope)?;
     let row: Option<(i64, String)> = con
         .query_row(
             "SELECT seq,state FROM hook_observations WHERE scope=? ORDER BY seq DESC LIMIT 1",
@@ -4437,6 +4777,62 @@ pub fn ready_snapshot(path: &Path, proc_root: &Path) -> Result<ReadySnapshot> {
         state,
         scope: r.scope,
     })
+}
+
+/// A consumed prompt can be superseded by a later local turn after a crash.
+/// Archive the old reservation, never retry its external effect or call it completed.
+fn recover_superseded_grok_reservation(
+    con: &Connection,
+    r: &Registration,
+    proc_root: &Path,
+    scope: &str,
+) -> Result<()> {
+    if r.scope.harness != Harness::Grok {
+        return Ok(());
+    }
+    let tx = con
+        .unchecked_transaction()
+        .map_err(|_| Error::Persistence)?;
+    let candidate: Option<(String, String, String)> = tx.query_row(
+        "SELECT r.correlation,p.turn_id,a.turn_id FROM hook_reservations r JOIN hook_prompt_receipts c ON c.scope=r.scope AND c.correlation=r.correlation JOIN hook_prompt_turns p ON p.scope=r.scope JOIN hook_active_turns a ON a.scope=r.scope JOIN hook_turn_release t ON t.scope=a.scope AND t.turn_id=a.turn_id WHERE r.scope=? AND p.turn_id<>a.turn_id",
+        [scope], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|_| Error::Persistence)?;
+    let Some((correlation, old_turn, current_turn)) = candidate else {
+        return Ok(());
+    };
+    let Ok(Some(proof)) = super::grok_state::idle_proof(r, proc_root) else {
+        return Ok(());
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Input)?
+        .as_millis() as i64;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS hook_retired_reservations(scope TEXT NOT NULL,correlation TEXT NOT NULL,old_turn TEXT NOT NULL,current_turn TEXT NOT NULL,proof TEXT NOT NULL,retired_at INTEGER NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(scope,correlation));").map_err(|_| Error::Persistence)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO hook_retired_reservations VALUES(?,?,?,?,?,?,?)",
+        params![
+            scope,
+            correlation,
+            old_turn,
+            current_turn,
+            proof,
+            now,
+            "superseded_consumed_prompt_not_replayed"
+        ],
+    )
+    .map_err(|_| Error::Persistence)?;
+    for table in [
+        "hook_reservations",
+        "hook_prompt_receipts",
+        "hook_prompt_turns",
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE scope=?"), [scope])
+            .map_err(|_| Error::Persistence)?;
+    }
+    let event = format!("native-grok:{}:recovered:{proof}", r.id);
+    tx.execute("INSERT INTO hook_observations(scope,event_id,payload,state,observed_at,finalized) VALUES(?,?,?,'\"idle\"',?,1)",params![scope,event,proof,now]).map_err(|_| Error::Persistence)?;
+    tx.commit().map_err(|_| Error::Persistence)?;
+    Ok(())
 }
 /// Atomically consume an idle observation. Never release to Idle after uncertain
 /// writes; a subsequent verified lifecycle event must establish state again.
@@ -4521,9 +4917,9 @@ pub fn enrich_native_sessions(
 ) -> Result<usize> {
     // A reused snapshot must not retain a conversation after its evidence expires.
     apply_native_sessions(snapshot, &[]);
-    if !snapshot["panes"]
+    if snapshot["panes"]
         .as_array()
-        .is_some_and(|panes| panes.iter().any(|pane| pane["backend"] == "native"))
+        .is_none_or(|panes| panes.is_empty())
     {
         return Ok(0);
     }
@@ -4533,6 +4929,7 @@ pub fn enrich_native_sessions(
         Err(_) => return Err(Error::PrivateState),
     };
     let mut verified = Vec::new();
+    let mut invalid = None;
     for (index, entry) in entries.enumerate() {
         if index >= 4096 {
             return Err(Error::Invalid("Hook registration limit exceeded"));
@@ -4541,18 +4938,33 @@ pub fn enrich_native_sessions(
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let registration = inspect(&path)?;
+        let registration = match inspect(&path) {
+            Ok(registration) => registration,
+            Err(error) => {
+                invalid = Some(error);
+                continue;
+            }
+        };
         if !same_local_path(&registration.directory, directory) {
-            return Err(Error::Identity);
+            invalid = Some(Error::Identity);
+            continue;
         }
-        if registration.scope.terminal.backend == crate::core::identity::Backend::Native
-            && registration.harness_process.is_some()
+        if !snapshot["panes"].as_array().is_some_and(|panes| {
+            panes.iter().any(|pane| {
+                crate::adapters::terminals::identity(pane).ok().as_ref()
+                    == Some(&registration.scope.terminal)
+            })
+        }) {
+            continue;
+        }
+        if registration.harness_process.is_some()
             && verify_live_session(&registration, terminals).is_ok()
         {
             verified.push(registration.scope);
         }
     }
-    Ok(apply_native_sessions(snapshot, &verified))
+    let enriched = apply_native_sessions(snapshot, &verified);
+    invalid.map_or(Ok(enriched), Err)
 }
 fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
     let Some(panes) = snapshot["panes"].as_array_mut() else {
@@ -4560,10 +4972,19 @@ fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
     };
     let mut enriched = 0;
     for pane in panes {
-        if pane["backend"] != "native" {
+        // Transport-reported IDs describe the current selection. A saved hook
+        // must never overwrite them (including an in-process session switch).
+        if pane["backend"] != "native"
+            && pane["agent_session"]["source"] != "hook"
+            && crate::adapters::terminals::reported_session(pane).is_some()
+        {
             continue;
         }
-        pane["agent_session"] = Value::Null;
+        if (pane["backend"] == "native" && pane["agent_session"]["source"] != "launch")
+            || pane["agent_session"]["source"] == "hook"
+        {
+            pane["agent_session"] = Value::Null;
+        }
         let Ok(identity) = crate::adapters::terminals::identity(pane) else {
             continue;
         };
@@ -4576,9 +4997,17 @@ fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
         if matches.next().is_some() {
             continue;
         }
+        let observed = pane["agent"]
+            .as_str()
+            .and_then(crate::adapters::harnesses::canonical_id);
+        let harness = serde_json::to_value(scope.harness).expect("harness name");
+        let harness = harness.as_str().expect("harness name");
+        if observed.is_some_and(|observed| observed != harness) {
+            continue;
+        }
         pane["agent"] = json!(scope.harness);
         pane["agent_session"] =
-            json!({"kind":"id","agent":scope.harness,"value":scope.conversation});
+            json!({"kind":"id","agent":scope.harness,"value":scope.conversation,"source":"hook"});
         enriched += 1;
     }
     enriched
@@ -4624,10 +5053,12 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
                     let foreground = info["process_info"]["foreground_processes"]
                         .as_array()
                         .ok_or(Error::Identity)?;
-                    if !foreground
-                        .iter()
-                        .any(|p| p["pid"].as_u64() == Some(u64::from(process.pid)))
-                    {
+                    if !foreground.iter().any(|p| {
+                        p["pid"]
+                            .as_u64()
+                            .or_else(|| p["pid"].as_str()?.parse().ok())
+                            == Some(u64::from(process.pid))
+                    }) {
                         return Err(Error::Identity);
                     }
                 }
@@ -4945,11 +5376,71 @@ mod windows_tests {
     }
     #[test]
     fn windows_path_spelling_names_the_same_local_file() {
-        let base = std::env::temp_dir().join("DaedalusHookCase").join("Transcript.JSONL");
+        let base = std::env::temp_dir()
+            .join("DaedalusHookCase")
+            .join("Transcript.JSONL");
         let folded = PathBuf::from(base.to_string_lossy().to_ascii_lowercase());
         let slashed = PathBuf::from(base.to_string_lossy().replace('\\', "/"));
         assert!(same_local_path(&base, &folded));
         assert!(same_local_path(&base, &slashed));
         assert!(!same_local_path(&base, &base.join("other")));
+    }
+}
+
+#[cfg(test)]
+mod session_observation_tests {
+    use super::*;
+    #[test]
+    fn verified_hook_ids_fill_every_backend_and_preserve_current_native_selection() {
+        use crate::core::identity::{Backend, TerminalId};
+        for backend in [Backend::Herdr, Backend::Tmux, Backend::Native] {
+            let scope = Scope {
+                instance: "fixture".into(),
+                harness: Harness::Codex,
+                conversation: "current-id".into(),
+                terminal: TerminalId {
+                    backend: backend.clone(),
+                    endpoint: if backend == Backend::Tmux {
+                        crate::test_support::path("/socket").into()
+                    } else {
+                        "pane".into()
+                    },
+                    pane: if backend == Backend::Tmux {
+                        "%1".into()
+                    } else {
+                        "pane".into()
+                    },
+                    generation: "generation".into(),
+                },
+            };
+            let pane = json!({"backend":backend,"server":scope.terminal.endpoint,"socket":scope.terminal.endpoint,"session":scope.terminal.endpoint,"pane_id":scope.terminal.pane,"terminal_id":"generation","agent":"CODEX.EXE"});
+            let mut snapshot = json!({"panes":[pane]});
+            assert_eq!(
+                apply_native_sessions(&mut snapshot, std::slice::from_ref(&scope)),
+                1
+            );
+            assert_eq!(
+                crate::adapters::terminals::reported_session(&snapshot["panes"][0]),
+                Some("current-id")
+            );
+            assert_eq!(apply_native_sessions(&mut snapshot, &[]), 0);
+            assert!(crate::adapters::terminals::reported_session(&snapshot["panes"][0]).is_none());
+            assert_eq!(
+                apply_native_sessions(&mut snapshot, &[scope.clone(), scope.clone()]),
+                0
+            );
+            let mut replaced = scope.clone();
+            replaced.terminal.generation = "replaced".into();
+            assert_eq!(apply_native_sessions(&mut snapshot, &[replaced]), 0);
+            if backend != Backend::Native {
+                snapshot["panes"][0]["agent_session"] =
+                    json!({"kind":"id","agent":"codex","value":"new-selection"});
+                assert_eq!(apply_native_sessions(&mut snapshot, &[scope]), 0);
+                assert_eq!(
+                    crate::adapters::terminals::reported_session(&snapshot["panes"][0]),
+                    Some("new-selection")
+                );
+            }
+        }
     }
 }

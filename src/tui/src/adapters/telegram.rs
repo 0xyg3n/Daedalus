@@ -77,42 +77,51 @@ pub struct BotApi {
     client: Client,
     origin: String,
     token: String,
+    settings: crate::app::telegram_runtime::Settings,
+    request_timeout: Duration,
+    long_polling: bool,
 }
 impl std::fmt::Debug for BotApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("BotApi { credentials: [redacted] }")
     }
 }
+#[derive(Clone, Copy)]
+pub enum Purpose {
+    Service,
+    Feedback,
+    Pairing,
+}
 impl BotApi {
     pub fn new(token: &str, origin: &str) -> Result<Self> {
         Self::build(token, origin, false)
     }
     pub fn feedback(token: &str) -> Result<Self> {
-        let mut api = Self::new(token, "https://api.telegram.org")?;
-        api.client = Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(3))
-            .redirect(redirect::Policy::none())
-            .retry(retry::never())
-            .no_proxy()
-            .build()
-            .map_err(|_| Error::Invalid("Cannot initialize feedback transport"))?;
-        Ok(api)
+        Self::configured(token, &Default::default(), Purpose::Feedback)
     }
-    /// Short, read-only onboarding probe; never holds the TUI for a long poll.
     pub fn pairing(token: &str) -> Result<Self> {
-        let mut api = Self::new(token, "https://api.telegram.org")?;
-        api.client = Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(8))
-            .redirect(redirect::Policy::none())
-            .retry(retry::never())
-            .no_proxy()
-            .build()
-            .map_err(|_| Error::Invalid("Cannot initialize pairing transport"))?;
-        Ok(api)
+        Self::configured(token, &Default::default(), Purpose::Pairing)
+    }
+    pub fn configured(
+        token: &str,
+        settings: &crate::app::telegram_runtime::Settings,
+        purpose: Purpose,
+    ) -> Result<Self> {
+        Self::build_with(token, settings, purpose, false)
     }
     fn build(token: &str, origin: &str, local_test: bool) -> Result<Self> {
+        let settings = crate::app::telegram_runtime::Settings {
+            api_origin: origin.into(),
+            ..Default::default()
+        };
+        Self::build_with(token, &settings, Purpose::Service, local_test)
+    }
+    fn build_with(
+        token: &str,
+        settings: &crate::app::telegram_runtime::Settings,
+        purpose: Purpose,
+        local_test: bool,
+    ) -> Result<Self> {
         let (id, secret) = token
             .split_once(':')
             .ok_or(Error::Invalid("Invalid Telegram token"))?;
@@ -126,24 +135,26 @@ impl BotApi {
         {
             return Err(Error::Invalid("Invalid Telegram token"));
         }
-        let url = Url::parse(origin).map_err(|_| Error::Invalid("Invalid Telegram API origin"))?;
-        let loopback_test =
-            local_test && url.scheme() == "http" && url.host_str() == Some("127.0.0.1");
-        if (url.scheme() != "https" && !loopback_test)
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.path() != "/"
-        {
-            return Err(Error::Invalid(
-                "Telegram API requires an HTTPS origin without credentials or a path",
-            ));
-        }
+        settings
+            .validate_transport(local_test)
+            .map_err(|_| Error::Invalid("Invalid Telegram runtime configuration"))?;
+        let url = Url::parse(&settings.api_origin)
+            .map_err(|_| Error::Invalid("Invalid Telegram API origin"))?;
+        let (connect, request) = match purpose {
+            Purpose::Service => (settings.connect_timeout_ms, settings.request_timeout_ms),
+            Purpose::Feedback => (
+                settings.feedback_connect_timeout_ms,
+                settings.feedback_timeout_ms,
+            ),
+            Purpose::Pairing => (
+                settings.pairing_connect_timeout_ms,
+                settings.pairing_timeout_ms,
+            ),
+        };
+        let request_timeout = Duration::from_millis(request);
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_millis(connect))
+            .timeout(request_timeout)
             .redirect(redirect::Policy::none())
             .retry(retry::never())
             .referer(false)
@@ -152,15 +163,18 @@ impl BotApi {
             .map_err(|_| Error::Invalid("Cannot initialize Telegram transport"))?;
         Ok(Self {
             client,
-            origin: origin.trim_end_matches('/').into(),
+            origin: url.as_str().trim_end_matches('/').into(),
             token: token.into(),
+            settings: settings.clone(),
+            request_timeout,
+            long_polling: matches!(purpose, Purpose::Service),
         })
     }
     fn url(&self, method: &str) -> String {
         format!("{}/bot{}/{}", self.origin, self.token, method)
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value> {
-        self.call_timeout(method, params, Duration::from_secs(60))
+        self.call_timeout(method, params, self.request_timeout)
     }
     fn call_timeout(&self, method: &str, params: &Value, timeout: Duration) -> Result<Value> {
         let response = self
@@ -170,7 +184,7 @@ impl BotApi {
             .json(params)
             .send()
             .map_err(network)?;
-        envelope(response)
+        envelope(response, self.settings.json_limit_bytes as usize)
     }
 }
 fn network(error: reqwest::Error) -> Error {
@@ -197,10 +211,10 @@ fn bounded(response: Response, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn envelope(response: Response) -> Result<Value> {
+fn envelope(response: Response, limit: usize) -> Result<Value> {
     let status = response.status();
     let body: Value =
-        serde_json::from_slice(&bounded(response, JSON_LIMIT)?).map_err(|_| Error::Uncertain)?;
+        serde_json::from_slice(&bounded(response, limit)?).map_err(|_| Error::Uncertain)?;
     if status.is_success() && body["ok"] == true {
         return body.get("result").cloned().ok_or(Error::Uncertain);
     }
@@ -336,21 +350,24 @@ impl Api for BotApi {
         Ok(me)
     }
     fn updates(&mut self, offset: i64, timeout: u64) -> Result<Vec<Value>> {
-        if offset < 0 || timeout > 50 {
+        if offset < 0 || timeout > 50 || (!self.long_polling && timeout != 0) {
             return Err(Error::Invalid("Invalid Telegram polling parameters"));
         }
-        // The client-wide deadline is 60s. A 50s long poll plus slow connect
-        // on Windows aborts the socket while Telegram still holds it, and the
-        // next getUpdates then conflicts with that in-flight poll.
-        let budget = Duration::from_secs(timeout.saturating_add(20).clamp(30, 80));
+        // Long polls include connection slack. Short discovery keeps its own
+        // deadline instead of inheriting a service polling budget.
+        let budget = if self.long_polling {
+            self.settings.poll_deadline(timeout)
+        } else {
+            self.request_timeout
+        };
         let result = self.call_timeout(
             "getUpdates",
-            &json!({"offset":offset,"timeout":timeout,"limit":100,"allowed_updates":["message","callback_query"]}),
+            &json!({"offset":offset,"timeout":timeout,"limit":self.settings.updates_batch_limit,"allowed_updates":["message","callback_query"]}),
             budget,
         )?;
         let updates = result
             .as_array()
-            .filter(|rows| rows.len() <= 100)
+            .filter(|rows| rows.len() as u64 <= self.settings.updates_batch_limit)
             .ok_or(Error::Uncertain)?;
         if updates.iter().any(|u| {
             !u["update_id"]
@@ -446,7 +463,7 @@ impl Api for BotApi {
         if file["file_id"].as_str() != Some(file_id)
             || file["file_size"]
                 .as_u64()
-                .is_some_and(|size| size > FILE_LIMIT as u64)
+                .is_some_and(|size| size > self.settings.file_limit_bytes)
         {
             return Err(Error::Invalid("Telegram file identity or size is invalid"));
         }
@@ -471,7 +488,7 @@ impl Api for BotApi {
         if !response.status().is_success() {
             return Err(Error::Uncertain);
         }
-        bounded(response, FILE_LIMIT)
+        bounded(response, self.settings.file_limit_bytes as usize)
     }
     fn send_document(
         &mut self,
@@ -481,14 +498,14 @@ impl Api for BotApi {
         caption: &str,
     ) -> Result<Value> {
         valid_chat(chat)?;
-        if bytes.len() > FILE_LIMIT
+        if bytes.len() as u64 > self.settings.file_limit_bytes
             || name.is_empty()
             || name.len() > 255
             || name.chars().any(|c| c.is_control() || "/\\\"".contains(c))
             || caption.chars().count() > 1024
         {
             return Err(Error::Invalid(
-                "Invalid Telegram document or size exceeds 20 MiB",
+                "Invalid Telegram document or configured size limit exceeded",
             ));
         }
         let form = multipart::Form::new()
@@ -504,7 +521,10 @@ impl Api for BotApi {
             .multipart(form)
             .send()
             .map_err(network)?;
-        message_receipt(envelope(response)?, chat)
+        message_receipt(
+            envelope(response, self.settings.json_limit_bytes as usize)?,
+            chat,
+        )
     }
 }
 
@@ -517,6 +537,114 @@ mod tests {
         thread,
     };
     fn server(status: &str, body: Value) -> (BotApi, thread::JoinHandle<String>) {
+        server_settings(status, body, Default::default(), Purpose::Service)
+    }
+    #[test]
+    fn configured_poll_parameters_and_response_limits_reach_the_transport() {
+        let settings = crate::app::telegram_runtime::Settings {
+            updates_batch_limit: 7,
+            ..Default::default()
+        };
+        let (mut api, server) = server_settings(
+            "200 OK",
+            json!({"ok":true,"result":[]}),
+            settings,
+            Purpose::Service,
+        );
+        assert!(api.updates(0, 3).unwrap().is_empty());
+        let request = server.join().unwrap();
+        assert!(request.contains("POST /bot123:fixture/getUpdates"));
+        assert!(request.contains("\"timeout\":3") && request.contains("\"limit\":7"));
+        let settings = crate::app::telegram_runtime::Settings {
+            json_limit_bytes: 1024,
+            ..Default::default()
+        };
+        let (mut api, server) = server_settings(
+            "200 OK",
+            json!({"ok":true,"result":{"id":123,"is_bot":true,"username":"fixture_bot","padding":"x".repeat(2048)}}),
+            settings,
+            Purpose::Service,
+        );
+        assert!(api.get_me().is_err());
+        server.join().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let settings = crate::app::telegram_runtime::Settings {
+            api_origin: format!("http://{}", listener.local_addr().unwrap()),
+            connect_timeout_ms: 100,
+            request_timeout_ms: 100,
+            file_limit_bytes: 4,
+            ..Default::default()
+        };
+        let mut api = BotApi::build_with("123:fixture", &settings, Purpose::Service, true).unwrap();
+        assert!(matches!(
+            api.send_document(42, "fixture.txt", vec![0; 5], ""),
+            Err(Error::Invalid(_))
+        ));
+    }
+    #[test]
+    fn short_transports_obey_their_configured_deadlines() {
+        for purpose in [Purpose::Pairing, Purpose::Feedback] {
+            let pairing = matches!(purpose, Purpose::Pairing);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let settings = crate::app::telegram_runtime::Settings {
+                api_origin: format!("http://{}", listener.local_addr().unwrap()),
+                pairing_connect_timeout_ms: 100,
+                pairing_timeout_ms: 100,
+                feedback_connect_timeout_ms: 100,
+                feedback_timeout_ms: 100,
+                ..Default::default()
+            };
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(250));
+                let body = if pairing {
+                    r#"{"ok":true,"result":[]}"#
+                } else {
+                    r#"{"ok":true,"result":{"id":123,"is_bot":true}}"#
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+            let mut api = BotApi::build_with("123:fixture", &settings, purpose, true).unwrap();
+            if pairing {
+                assert!(api.updates(0, 1).is_err());
+                assert!(
+                    api.updates(0, 0).is_err(),
+                    "Discovery must not use the 30-second service budget"
+                );
+            } else {
+                assert!(
+                    api.get_me().is_err(),
+                    "Feedback must keep its short request deadline"
+                );
+            }
+            server.join().unwrap();
+        }
+    }
+    fn server_settings(
+        status: &str,
+        body: Value,
+        mut settings: crate::app::telegram_runtime::Settings,
+        purpose: Purpose,
+    ) -> (BotApi, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let status = status.to_owned();
@@ -546,7 +674,11 @@ mod tests {
             write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             request
         });
-        (BotApi::build("123:fixture", &origin, true).unwrap(), join)
+        settings.api_origin = origin;
+        (
+            BotApi::build_with("123:fixture", &settings, purpose, true).unwrap(),
+            join,
+        )
     }
     #[test]
     fn command_catalog_is_bounded_unique_and_literal() {

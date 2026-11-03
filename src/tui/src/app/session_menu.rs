@@ -29,12 +29,8 @@ pub enum Request {
         epoch: i64,
     },
     GatewayLoad,
-    GatewaySave {
-        expected: Option<super::gateway::Config>,
-        updated: super::gateway::Config,
-    },
     Report(String),
-    Harness(super::harness_menu::Run),
+    Harness(Box<super::harness_menu::Run>),
     Workspace(Box<WorkspaceRequest>),
     Native(Value),
     Configure {
@@ -84,7 +80,7 @@ pub enum Request {
 pub enum Answer {
     Gateway(Option<super::gateway::Config>),
     Configured {
-        configuration: ControlConfig,
+        configuration: Box<ControlConfig>,
         message: String,
     },
     Saved(CheckpointRow),
@@ -129,6 +125,10 @@ pub struct SessionMenu {
     harness: super::harness_menu::Menu,
     hooks: super::hook_menu::Menu,
     telegram: super::telegram_menu::Menu,
+    memory: super::memory_menu::Menu,
+    dashboard: super::dashboard_menu::Menu,
+    history: super::history_menu::Menu,
+    control: super::control_menu::Menu,
     pending: Option<Pending>,
     view: Option<View>,
 }
@@ -171,6 +171,16 @@ enum Commit {
     DeleteLayout(String),
 }
 enum Stage {
+    RuntimeRoot(Box<ControlConfig>),
+    RuntimeValue {
+        key: String,
+        expected: Box<ControlConfig>,
+    },
+    InterfaceRoot(Box<ControlConfig>),
+    InterfaceValue {
+        key: String,
+        expected: Box<ControlConfig>,
+    },
     HookTool(String),
     HookSwitch(Box<super::hook_runtime::Registration>, String),
     GoalSelect(Vec<Value>),
@@ -196,7 +206,6 @@ enum Stage {
     },
     WorkspaceTool(Box<WorkspaceRequest>),
     Native(Value),
-    SocketInput,
     Output(bool),
     Pick {
         action: String,
@@ -260,6 +269,12 @@ pub fn available(id: &str) -> bool {
         || matches!(
             id,
             "checkpoint.save"
+                | "settings.interface"
+                | "settings.runtime"
+                | "settings.instance"
+                | "settings.dashboard"
+                | "settings.history"
+                | "settings.memory"
                 | "terminal.attach"
                 | "terminal.watch"
                 | "terminal.native"
@@ -310,30 +325,25 @@ fn description(pane: &Value) -> String {
     )
 }
 pub(crate) fn reference(pane: &Value) -> Result<TerminalRef> {
-    let id = crate::adapters::terminals::identity(pane)?;
     Ok(TerminalRef {
-        backend: id.backend,
-        server: pane
-            .get("server")
-            .and_then(Value::as_str)
-            .unwrap_or(&id.endpoint)
-            .into(),
-        pane_id: id.pane,
-        terminal_id: id.generation,
-        generation: field(pane, "generation"),
         label: tree::title(pane, ""),
         place: field(pane, "session"),
+        ..crate::adapters::terminals::reference(pane)?
     })
 }
 fn host_pane(snapshot: &Value) -> Option<Value> {
-    let herdr = std::env::var("HERDR_PANE_ID").ok().filter(|id| !id.is_empty());
+    let herdr = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|id| !id.is_empty());
     let tmux = std::env::var("TMUX_PANE").ok().filter(|id| !id.is_empty());
-    snapshot["panes"].as_array()?.iter().find(|pane| {
-        herdr
-            .as_ref()
-            .is_some_and(|id| pane["pane_id"] == *id)
-            || tmux.as_ref().is_some_and(|id| pane["pane_id"] == *id)
-    }).cloned()
+    snapshot["panes"]
+        .as_array()?
+        .iter()
+        .find(|pane| {
+            herdr.as_ref().is_some_and(|id| pane["pane_id"] == *id)
+                || tmux.as_ref().is_some_and(|id| pane["pane_id"] == *id)
+        })
+        .cloned()
 }
 impl SessionMenu {
     pub fn pending(&self) -> bool {
@@ -343,9 +353,17 @@ impl SessionMenu {
             || self.harness.pending()
             || self.hooks.pending()
             || self.telegram.pending()
+            || self.memory.pending()
+            || self.dashboard.pending()
+            || self.history.pending()
+            || self.control.pending()
     }
     pub fn cancel(&mut self) {
         self.telegram.cancel();
+        self.memory.cancel();
+        self.dashboard.cancel();
+        self.history.cancel();
+        self.control.cancel();
         self.hooks.cancel();
         self.harness.cancel();
         self.wizard.cancel();
@@ -412,6 +430,82 @@ impl SessionMenu {
     fn input(&mut self, seq: &mut u64, stage: Stage, title: &str) -> Result<Outcome> {
         self.dialog(seq, stage, "input", title, json!({"secret":false}))
     }
+    fn runtime_value(
+        &mut self,
+        seq: &mut u64,
+        key: String,
+        expected: Box<ControlConfig>,
+        error: Option<&str>,
+    ) -> Result<Outcome> {
+        let setting = super::runtime_settings::SETTINGS
+            .iter()
+            .find(|s| s.key == key)
+            .ok_or("Unknown local runtime setting")?;
+        let super::interface_settings::Kind::Number { min, max } = setting.kind else {
+            unreachable!()
+        };
+        let description = format!(
+            "{}\nSaved value: {}. Enter a whole number from {min} to {max}.\nApplies to subsequent operations; existing terminals keep their current dimensions.{}",
+            setting.description,
+            expected.runtime.display(&key)?,
+            error.map(|e| format!("\n{e}")).unwrap_or_default()
+        );
+        self.dialog(
+            seq,
+            Stage::RuntimeValue { key, expected },
+            "input",
+            setting.label,
+            json!({"secret":false,"description":description}),
+        )
+    }
+    fn interface_value(
+        &mut self,
+        seq: &mut u64,
+        key: String,
+        expected: Box<ControlConfig>,
+        error: Option<&str>,
+    ) -> Result<Outcome> {
+        use super::interface_settings::{Kind, SETTINGS};
+        let setting = SETTINGS
+            .iter()
+            .find(|s| s.key == key)
+            .ok_or("Unknown interface setting")?;
+        let mut description = format!(
+            "{}\nSaved value: {}. Matching environment variables take precedence.\nChanges to startup splash or graphics detection apply on the next launch.",
+            setting.description,
+            expected.ui.display(&key)?
+        );
+        if let Some(error) = error {
+            description.push_str(&format!("\n{error}"));
+        }
+        let options: Option<Vec<Value>> = match setting.kind {
+            Kind::Toggle => Some(vec![
+                json!(["on", "On", "Enable this setting"]),
+                json!(["off", "Off", "Disable this setting"]),
+            ]),
+            Kind::Choice(choices) => Some(
+                choices
+                    .iter()
+                    .map(|v| json!([v, v, setting.description]))
+                    .collect(),
+            ),
+            Kind::Number { min, max } => {
+                description.push_str(&format!("\nEnter a whole number from {min} to {max}."));
+                None
+            }
+        };
+        let stage = Stage::InterfaceValue { key, expected };
+        match options {
+            Some(options) => self.choose(seq, stage, setting.label, options, &description),
+            None => self.dialog(
+                seq,
+                stage,
+                "input",
+                setting.label,
+                json!({"secret":false,"description":description}),
+            ),
+        }
+    }
     fn confirm(&mut self, seq: &mut u64, commit: Commit, label: &str) -> Result<Outcome> {
         self.choose(
             seq,
@@ -473,6 +567,27 @@ impl SessionMenu {
             }
             return self.telegram.start(action, source, config, seq);
         }
+        if action == "settings.instance" || action == "workspace.socket" {
+            return self.control.start(
+                source,
+                config,
+                seq,
+                if action == "workspace.socket" {
+                    Some("tmux_sockets")
+                } else {
+                    None
+                },
+            );
+        }
+        if action == "settings.history" {
+            return self.history.start(source, seq);
+        }
+        if action == "settings.dashboard" {
+            return self.dashboard.start(source, seq);
+        }
+        if action == "settings.memory" {
+            return self.memory.start(source, seq);
+        }
         if action == "hooks.adapter" {
             return self.hooks.start(view, source, config, seq);
         }
@@ -493,6 +608,46 @@ impl SessionMenu {
             return self.wizard.start(action, config, seq);
         }
         self.view = Some(view);
+        if action == "settings.runtime" {
+            return self.choose(
+                seq,
+                Stage::RuntimeRoot(Box::new(config.clone())),
+                "Terminals and discovery",
+                super::runtime_settings::SETTINGS
+                    .iter()
+                    .map(|setting| {
+                        Ok(json!([
+                            setting.key,
+                            format!(
+                                "{} · {}",
+                                setting.label,
+                                config.runtime.display(setting.key)?
+                            ),
+                            format!("{} · {}", setting.group, setting.description)
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                "Saved in this configuration. Review and confirm each change before it is applied.",
+            );
+        }
+        if action == "settings.interface" {
+            return self.choose(
+                seq,
+                Stage::InterfaceRoot(Box::new(config.clone())),
+                "Interface settings",
+                super::interface_settings::SETTINGS
+                    .iter()
+                    .map(|setting| {
+                        Ok(json!([
+                            setting.key,
+                            format!("{} · {}", setting.label, config.ui.display(setting.key)?),
+                            format!("{} · {}", setting.group, setting.description)
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                "Saved in this configuration. Review and confirm each change before it is applied.",
+            );
+        }
         if let Some(harness) = action.strip_prefix("hooks:") {
             if harness == "status" {
                 return self.output(
@@ -630,7 +785,13 @@ impl SessionMenu {
                 "help.reference" => include_str!("../../../../docs/COMMANDS.md").into(),
                 "activity.discovery" => {
                     let view=self.view.as_ref().unwrap();
-                    let entries=[&view.snapshot["errors"], &view.health["errors"]].into_iter().flat_map(|v|v.as_array().into_iter().flatten()).collect::<Vec<_>>();
+                    let mut entries=[&view.snapshot["errors"], &view.health["errors"]].into_iter().flat_map(|v|v.as_array().into_iter().flatten()).collect::<Vec<_>>();
+                    if view.health["display_warning"].as_str().is_some_and(|text|!text.is_empty()) { entries.push(&view.health["display_warning"]); }
+                    if view.health["projection_warning"].as_str().is_some_and(|text|!text.is_empty()) { entries.push(&view.health["projection_warning"]); }
+                    entries.extend(view.health["layout_warnings"].as_array().into_iter().flatten());
+                    for warning in view.health["observation_warnings"].as_array().into_iter().flatten() {
+                        if !entries.iter().any(|entry|*entry==warning || entry.get("error")==Some(warning)) {entries.push(warning);}
+                    }
                     if entries.is_empty() { "No discovery warnings in the latest snapshot.".into() } else { super::dialog_text::format(&entries).map_err(|_|"Cannot format discovery warnings")? }
                 }
                 _ => {
@@ -661,26 +822,35 @@ impl SessionMenu {
                 "",
             );
         }
-        if action == "workspace.socket" {
-            return self.input(
-                seq,
-                Stage::SocketInput,
-                "Additional tmux socket paths, comma-separated",
-            );
-        }
         if action == "workspace.views" {
             let view = self.view.as_ref().unwrap();
             let topology = tree::Tree::build(
                 &view.snapshot,
                 &view.health,
-                &tree::ProjectionContext::default(),
+                &tree::ProjectionContext {
+                    runtime: config.runtime.clone(),
+                    checkpoint_matches: config.ui.checkpoint_matches,
+                    ..tree::ProjectionContext::default()
+                },
             );
-            let text = topology
-                .rows(&tree::ProjectionContext::default())
-                .iter()
-                .map(|row| format!("{}{}", field(row, "branch"), field(row, "label")))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let (mut text, limited) = topology.outline(
+                (config.runtime.discovery_frame_limit_bytes as usize).saturating_sub(4096),
+            );
+            if limited {
+                text.push_str("\n\nHierarchy display is incomplete; review Terminal display size limit or narrow discovery scope.");
+            }
+            if topology.relationships_limited {
+                text.push_str("\n\n");
+                text.push_str(super::tree_relations::WARNING);
+            }
+            for warning in topology
+                .layout_warnings
+                .into_iter()
+                .chain(topology.observation_warnings)
+            {
+                text.push_str("\n\n");
+                text.push_str(warning);
+            }
             return self.output(seq, "Workspace hierarchy", &text, false);
         }
         if let Some(key) = action.strip_prefix("checkpoint:") {
@@ -712,14 +882,7 @@ impl SessionMenu {
         if let Some(key) = action.strip_prefix("unpin:") {
             let mut layouts = self.view.as_ref().unwrap().layouts.clone();
             let before = layouts.current.pins.len();
-            layouts.current.pins.retain(|r| {
-                tree::key_id(&[
-                    serde_json::to_value(&r.backend).unwrap(),
-                    json!(r.server),
-                    json!(r.pane_id),
-                    json!(r.terminal_id),
-                ]) != key
-            });
+            layouts.current.pins.retain(|r| r.key() != key);
             if before == layouts.current.pins.len() {
                 return Err("That pin was already removed".into());
             }
@@ -763,11 +926,12 @@ impl SessionMenu {
         if !available(action) {
             return Err("This action is unsupported by this operation".into());
         }
-        if action == "terminal.new" && view.selected.is_none() {
-            if let Some(pane) = host_pane(&view.snapshot).or_else(|| self.panes().into_iter().next())
-            {
-                return self.for_pane(action, pane, source, config, seq);
-            }
+        if action == "terminal.new"
+            && view.selected.is_none()
+            && let Some(pane) =
+                host_pane(&view.snapshot).or_else(|| self.panes().into_iter().next())
+        {
+            return self.for_pane(action, pane, source, config, seq);
         }
         if let Some(pane) = view.selected.clone() {
             self.for_pane(action, pane, source, config, seq)
@@ -1128,6 +1292,18 @@ impl SessionMenu {
         if self.telegram.pending() {
             return self.telegram.answer(source, config, request, seq);
         }
+        if self.control.pending() {
+            return self.control.reply(request, source, seq);
+        }
+        if self.history.pending() {
+            return self.history.reply(request, source, seq);
+        }
+        if self.dashboard.pending() {
+            return self.dashboard.reply(request, source, seq);
+        }
+        if self.memory.pending() {
+            return self.memory.reply(request, source, seq);
+        }
         if self.hooks.pending() {
             return self.hooks.reply(request, source, config, seq);
         }
@@ -1173,6 +1349,34 @@ impl SessionMenu {
         }
         let text = value.as_str().unwrap().trim();
         match pending.stage {
+            Stage::RuntimeRoot(expected) => self.runtime_value(seq, text.into(), expected, None),
+            Stage::RuntimeValue { key, expected } => {
+                let value = match expected.runtime.set(&key, text) {
+                    Ok(value) => value,
+                    Err(error) => return self.runtime_value(seq, key, expected, Some(&error)),
+                };
+                let before = expected.runtime.display(&key)?;
+                let after = value.display(&key)?;
+                let mut updated = (*expected).clone();
+                updated.runtime = value;
+                self.confirm(seq, Commit::Configure { expected, updated: Box::new(updated) },
+                    &format!("Save {key}: {before} → {after}. Applies to subsequent operations; existing terminals keep their current dimensions."))
+            }
+            Stage::InterfaceRoot(expected) => {
+                self.interface_value(seq, text.into(), expected, None)
+            }
+            Stage::InterfaceValue { key, expected } => {
+                let value = match expected.ui.set(&key, text) {
+                    Ok(value) => value,
+                    Err(error) => return self.interface_value(seq, key, expected, Some(&error)),
+                };
+                let before = expected.ui.display(&key)?;
+                let after = value.display(&key)?;
+                let mut updated = (*expected).clone();
+                updated.ui = value;
+                self.confirm(seq, Commit::Configure { expected, updated: Box::new(updated) },
+                    &format!("Save {key}: {before} → {after}. Interface behavior updates after saving; startup splash and graphics detection apply on the next launch."))
+            }
             Stage::HookTool(harness) => {
                 if text == "herdr" {
                     return self.hooks.herdr(config, &harness, source, seq);
@@ -1414,30 +1618,6 @@ impl SessionMenu {
                     message,
                     ..Outcome::default()
                 })
-            }
-
-            Stage::SocketInput => {
-                let mut updated = config.clone();
-                updated.tmux_sockets = text
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                for socket in &updated.tmux_sockets {
-                    crate::core::layouts::check_path(std::path::Path::new(socket))?;
-                }
-                updated.tmux_sockets.sort();
-                updated.tmux_sockets.dedup();
-                updated.validate()?;
-                self.confirm(
-                    seq,
-                    Commit::Configure {
-                        expected: Box::new(config.clone()),
-                        updated: Box::new(updated),
-                    },
-                    "Save the reviewed additional tmux socket paths and refresh discovery",
-                )
             }
 
             Stage::Output(refresh) => Ok(Outcome {
@@ -1867,7 +2047,7 @@ impl SessionMenu {
                 configuration,
                 message,
             } => Ok(Outcome {
-                configuration: Some(configuration),
+                configuration: Some(*configuration),
                 message,
                 refresh: true,
                 ..Outcome::default()
@@ -1910,6 +2090,7 @@ mod tests {
 
     #[derive(Default)]
     struct Mock {
+        configuration_directory: Option<std::path::PathBuf>,
         requests: Vec<Request>,
         layouts: Vec<Layouts>,
         fail_effect: bool,
@@ -1930,6 +2111,54 @@ mod tests {
         }
     }
     impl Source for Mock {
+        fn configuration_file(&mut self, expected: &ControlConfig) -> Result<std::path::PathBuf> {
+            let path = self
+                .configuration_directory
+                .as_ref()
+                .ok_or("No fixture configuration")?
+                .join("control.json");
+            let bytes = std::fs::read(&path).map_err(|_| "Cannot read fixture")?;
+            if &ControlConfig::parse(&bytes)? != expected {
+                return Err("Configuration changed".into());
+            }
+            Ok(path)
+        }
+        fn prepare_configuration(
+            &mut self,
+            expected: &ControlConfig,
+            updated: ControlConfig,
+        ) -> Result<super::super::setup::SetupPlan> {
+            super::super::setup::SetupPlan::edit_if_current(
+                self.configuration_directory
+                    .as_deref()
+                    .ok_or("No fixture configuration")?,
+                expected,
+                updated,
+            )
+        }
+        fn apply_configuration(
+            &mut self,
+            plan: super::super::setup::SetupPlan,
+        ) -> Result<ControlConfig> {
+            let directory = self
+                .configuration_directory
+                .as_ref()
+                .ok_or("No fixture configuration")?;
+            if plan.preview.destination != directory.join("control.json") {
+                return Err("Configuration directory changed".into());
+            }
+            let expected = ControlConfig::parse(
+                &std::fs::read(directory.join("control.json"))
+                    .map_err(|_| "Cannot read fixture")?,
+            )?;
+            let updated = plan.config().clone();
+            plan.apply()?;
+            self.requests.push(Request::Configure {
+                expected: Box::new(expected),
+                updated: Box::new(updated.clone()),
+            });
+            Ok(updated)
+        }
         fn refresh(&mut self, _: &ControlConfig) -> Result<Observations> {
             Ok(Observations::default())
         }
@@ -1943,7 +2172,7 @@ mod tests {
         fn session(&mut self, _: &ControlConfig, request: Request) -> Result<Answer> {
             let answer = match &request {
                 Request::Configure { updated, .. } => Answer::Configured {
-                    configuration: (**updated).clone(),
+                    configuration: updated.clone(),
                     message: "Configured".into(),
                 },
                 Request::Load(_) => Answer::Saved(row()),
@@ -2030,6 +2259,114 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn runtime_edit_validates_reviews_cancels_and_commits_once() {
+        for apply in [false, true] {
+            let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+            let fields = start(&mut menu, &mut source, &mut seq, "settings.runtime");
+            assert_eq!(
+                fields.frames[0]["options"].as_array().unwrap().len(),
+                super::super::runtime_settings::SETTINGS.len()
+            );
+            reply(
+                &mut menu,
+                &mut source,
+                &mut seq,
+                json!("native_launch_rows"),
+            )
+            .unwrap();
+            let invalid = reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+            assert_eq!(invalid.frames[0]["mode"], "input");
+            assert!(source.requests.is_empty());
+            let review = reply(&mut menu, &mut source, &mut seq, json!("45")).unwrap();
+            let id = seq;
+            assert_eq!(review.frames[0]["options"][0][0], "cancel");
+            assert!(
+                review.frames[0]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("32 → 45")
+            );
+            let result = reply(
+                &mut menu,
+                &mut source,
+                &mut seq,
+                json!(if apply { "yes" } else { "cancel" }),
+            )
+            .unwrap();
+            if apply {
+                let mut expected = config();
+                expected.runtime.native_launch_rows = 45;
+                assert_eq!(result.configuration.unwrap(), expected);
+                assert!(
+                    matches!(&source.requests[0], Request::Configure { expected: before, updated } if **before == config() && **updated == expected)
+                );
+            } else {
+                assert!(source.requests.is_empty());
+            }
+            assert!(
+                menu.reply(
+                    &json!({"op":"reply","id":id,"value":"yes"}),
+                    &mut source,
+                    &config(),
+                    &mut seq
+                )
+                .is_err()
+            );
+            assert_eq!(source.requests.len(), usize::from(apply));
+        }
+    }
+    #[test]
+    fn interface_edit_validates_reviews_and_submits_exact_configuration_once() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        let fields = start(&mut menu, &mut source, &mut seq, "settings.interface");
+        assert_eq!(
+            fields.frames[0]["options"].as_array().unwrap().len(),
+            super::super::interface_settings::SETTINGS.len()
+        );
+        reply(
+            &mut menu,
+            &mut source,
+            &mut seq,
+            json!("preview_interval_ms"),
+        )
+        .unwrap();
+        let invalid = reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+        assert_eq!(invalid.frames[0]["mode"], "input");
+        assert!(menu.pending() && source.requests.is_empty());
+        let review = reply(&mut menu, &mut source, &mut seq, json!("700")).unwrap();
+        let confirmation = seq;
+        assert_eq!(review.frames[0]["options"][0][0], "cancel");
+        let description = review.frames[0]["description"].as_str().unwrap();
+        assert!(description.contains("2000 → 700"));
+        assert!(source.requests.is_empty());
+        let outcome = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+        let mut expected = config();
+        expected.ui.preview_interval_ms = 700;
+        assert_eq!(outcome.configuration.unwrap(), expected);
+        assert!(
+            matches!(&source.requests[0], Request::Configure { expected:before, updated } if **before == config() && **updated == expected)
+        );
+        assert!(
+            menu.reply(
+                &json!({"op":"reply", "id":confirmation, "value":"yes"}),
+                &mut source,
+                &config(),
+                &mut seq
+            )
+            .is_err()
+        );
+        assert_eq!(source.requests.len(), 1);
+    }
+    #[test]
+    fn cancelling_interface_edit_submits_nothing() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        start(&mut menu, &mut source, &mut seq, "settings.interface");
+        reply(&mut menu, &mut source, &mut seq, json!("icons")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("ascii")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("cancel")).unwrap();
+        assert!(source.requests.is_empty());
+    }
     #[test]
     fn herdr_duplicate_view_menu_matches_platform_support() {
         let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
@@ -2337,12 +2674,56 @@ mod tests {
     }
 
     #[test]
-    fn tmux_pin_preserves_legacy_server_wire_identity_and_generation() {
+    fn tmux_pin_uses_the_canonical_socket_and_preserves_terminal_generation() {
         let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
         let outcome = start(&mut menu, &mut source, &mut seq, "terminal.pin");
         let layouts = outcome.layouts.unwrap();
-        assert_eq!(layouts.current.pins[0].server, "tmux@/tmp/mock.sock");
+        assert_eq!(
+            layouts.current.pins[0].server,
+            crate::test_support::path("/tmp/mock.sock")
+        );
         assert_eq!(layouts.current.pins[0].terminal_id, "generation-original");
+        assert_eq!(source.layouts.len(), 1);
+        assert!(source.requests.is_empty());
+    }
+    #[test]
+    fn unpin_selector_removes_only_one_supplemental_generation() {
+        let mut first = reference(&pane()).unwrap();
+        first.generation = "one".into();
+        let mut second = first.clone();
+        second.generation = "two".into();
+        let mut view = view();
+        view.layouts.current.pins = vec![first.clone(), second.clone()];
+        let legacy = tree::key_id(&[
+            serde_json::to_value(&first.backend).unwrap(),
+            json!(first.server),
+            json!(first.pane_id),
+            json!(first.terminal_id),
+        ]);
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        assert!(
+            menu.start(
+                &format!("unpin:{legacy}"),
+                view.clone(),
+                &mut source,
+                &config(),
+                &mut seq
+            )
+            .is_err()
+        );
+        assert!(source.layouts.is_empty());
+        let result = menu
+            .start(
+                &format!("unpin:{}", first.key()),
+                view,
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+        let pins = result.layouts.unwrap().current.pins;
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].same_identity(&second));
         assert_eq!(source.layouts.len(), 1);
         assert!(source.requests.is_empty());
     }
@@ -2417,33 +2798,48 @@ mod tests {
     }
     #[test]
     fn socket_configuration_is_reviewed_and_preserves_other_fields() {
-        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
-        start(&mut menu, &mut source, &mut seq, "workspace.socket");
-        reply(
-            &mut menu,
-            &mut source,
-            &mut seq,
-            json!(
-                [
-                    crate::test_support::path("/tmp/socket-b"),
-                    crate::test_support::path("/tmp/socket-a"),
-                    crate::test_support::path("/tmp/socket-a")
-                ]
-                .join(",")
-            ),
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-menu-sockets-{}-{nonce}",
+            std::process::id()
+        ));
+        let temp = Temp(directory);
+        crate::core::layouts::write_private(
+            &temp.0.join("control.json"),
+            &config().encode().unwrap(),
         )
         .unwrap();
+        let (mut menu, mut source, mut seq) = (
+            SessionMenu::default(),
+            Mock {
+                configuration_directory: Some(temp.0.clone()),
+                ..Default::default()
+            },
+            0,
+        );
+        start(&mut menu, &mut source, &mut seq, "workspace.socket");
+        let sockets = [temp.0.join("socket, b"), temp.0.join("socket a")]
+            .map(|path| path.to_str().unwrap().to_owned());
+        for socket in &sockets {
+            reply(&mut menu, &mut source, &mut seq, json!("add")).unwrap();
+            reply(&mut menu, &mut source, &mut seq, json!(socket)).unwrap();
+        }
+        reply(&mut menu, &mut source, &mut seq, json!("save")).unwrap();
         assert!(source.requests.is_empty());
         let outcome = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
         let updated = outcome.configuration.unwrap();
-        assert_eq!(
-            updated.tmux_sockets,
-            vec![
-                crate::test_support::path("/tmp/socket-a"),
-                crate::test_support::path("/tmp/socket-b")
-            ]
-        );
-        assert_eq!(updated.agent_home, config().agent_home);
+        let mut expected = config();
+        expected.tmux_sockets = sockets.to_vec();
+        assert_eq!(updated, expected);
         assert!(outcome.refresh);
         assert!(
             matches!(source.requests.last(),Some(Request::Configure{expected,..}) if expected.tmux_sockets.is_empty())
@@ -2564,7 +2960,6 @@ mod tests {
     #[test]
     fn every_registered_static_action_has_a_native_dispatch_path() {
         let registry = registry::builtin();
-        assert_eq!(registry.actions.len(), 45);
         for action in &registry.actions {
             assert!(
                 action.id == "instances.saved" || available(&action.id),

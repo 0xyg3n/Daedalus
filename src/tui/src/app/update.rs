@@ -312,12 +312,14 @@ fn directory(path: &Path) -> Result<(), String> {
         .map_err(|_| "Unsafe private update directory permissions")?;
     Ok(())
 }
+#[cfg(unix)]
 fn release_store(path: &Path, name: &str) -> bool {
     path.parent()
         .and_then(Path::parent)
         .and_then(|store| store.file_name())
         == Some(std::ffi::OsStr::new(name))
 }
+#[cfg(unix)]
 fn active_command(directory: &Path) -> Option<PathBuf> {
     ["daedalus", "daedalus-tui"].into_iter().find_map(|name| {
         let link = directory.join(name);
@@ -327,6 +329,7 @@ fn active_command(directory: &Path) -> Option<PathBuf> {
             .map(|_| link)
     })
 }
+#[cfg(unix)]
 fn command_targets_install(link: &Path, executable: &Path) -> bool {
     let Ok(destination) = fs::read_link(link) else {
         return false;
@@ -347,7 +350,10 @@ fn command_for(executable: &Path) -> Result<PathBuf, String> {
     }
     #[cfg(unix)]
     if release_store(executable, ".daedalus-updates")
-        && let Some(parent) = executable.parent().and_then(Path::parent).and_then(Path::parent)
+        && let Some(parent) = executable
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
         && let Some(link) = active_command(parent)
         && command_targets_install(&link, executable)
     {
@@ -551,7 +557,22 @@ fn store_file(root: &Path, bytes: &[u8], executable: bool) -> Result<PathBuf, St
     let _ = executable;
     Ok(path)
 }
-fn update_lock(root: &Path) -> Result<fs::File, String> {
+struct UpdateLock(fs::File);
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        // A concurrent child can retain this open file description until exec.
+        // Release ownership when the update guard ends, rather than waiting for
+        // every inherited descriptor to close.
+        #[cfg(unix)]
+        unsafe {
+            use std::os::fd::AsRawFd;
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        let _ = crate::platform::unlock(&self.0);
+    }
+}
+fn update_lock(root: &Path) -> Result<UpdateLock, String> {
     let path = root.join("update.lock");
     #[cfg(unix)]
     {
@@ -579,7 +600,7 @@ fn update_lock(root: &Path) -> Result<fs::File, String> {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err("Another update is in progress".into());
         }
-        Ok(file)
+        Ok(UpdateLock(file))
     }
     #[cfg(windows)]
     {
@@ -587,7 +608,7 @@ fn update_lock(root: &Path) -> Result<fs::File, String> {
             .map_err(|_| "Cannot open update lock")?;
         crate::platform::lock_exclusive(&file, true)
             .map_err(|_| "Another update is in progress")?;
-        Ok(file)
+        Ok(UpdateLock(file))
     }
 }
 fn activate(review: &UpdateReview, bytes: &[u8]) -> Result<InstallReceipt, String> {
@@ -932,7 +953,9 @@ mod tests {
     fn cli_install_text_returns_the_staged_installer_without_claiming_replacement() {
         let text = install_text(&InstallReceipt {
             version: "1.2.3".into(),
-            installed_path: "C:/Users/example/AppData/Local/Daedalus/.daedalus-updates/ab/Daedalus-setup.exe".into(),
+            installed_path:
+                "C:/Users/example/AppData/Local/Daedalus/.daedalus-updates/ab/Daedalus-setup.exe"
+                    .into(),
             previous_path: "old".into(),
             restart_required: true,
             activated: false,
@@ -977,6 +1000,20 @@ mod tests {
         assert!(fetch(&client().unwrap(), &endpoint, 3).is_err());
         server.join().unwrap();
         assert!(download(&client().unwrap(), &endpoint, 100).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn dropping_update_guard_releases_lock_while_an_inherited_descriptor_remains_open() {
+        let f = super::super::dashboard::fixtures::Fixture::new();
+        let held = update_lock(&f.0).unwrap();
+        let inherited = held.0.try_clone().unwrap();
+        assert!(update_lock(&f.0).is_err());
+        drop(held);
+        let next = update_lock(&f.0).unwrap();
+        drop(inherited);
+        assert!(update_lock(&f.0).is_err());
+        drop(next);
+        assert!(update_lock(&f.0).is_ok());
     }
     #[cfg(unix)]
     #[test]
@@ -1030,10 +1067,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn retained_release_updates_the_active_command() {
-        let root = std::env::temp_dir().join(format!(
-            "daedalus-update-command-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("daedalus-update-command-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let bin = root.join("bin");
         let retained = bin.join(".daedalus-updates/old/daedalus");

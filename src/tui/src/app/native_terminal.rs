@@ -24,6 +24,18 @@ type Result<T> = std::result::Result<T, String>;
 const MAX_REQUEST: u64 = 128 * 1024;
 const MAX_REPLY: u64 = 8 * 1024 * 1024;
 const LEASE: Duration = Duration::from_secs(3);
+pub const DEFAULT_SCROLLBACK_ROWS: u64 = 1000;
+pub const MAX_SCROLLBACK_ROWS: u64 = 65536;
+
+fn default_scrollback_rows() -> u64 {
+    DEFAULT_SCROLLBACK_ROWS
+}
+fn scrollback_limit(rows: u64) -> Result<usize> {
+    if rows > MAX_SCROLLBACK_ROWS {
+        return Err("Native scrollback must be between 0 and 65536 rows".into());
+    }
+    Ok(rows as usize)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StartOptions {
@@ -35,6 +47,8 @@ pub struct StartOptions {
     pub environment: Option<std::collections::BTreeMap<String, String>>,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default = "default_scrollback_rows")]
+    pub scrollback_rows: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -45,6 +59,10 @@ pub struct SessionInfo {
     pub cwd: PathBuf,
     /// Executable basename only. Arguments can contain secrets.
     pub command: String,
+    /// Explicit launch selector only; current hook/transport metadata wins.
+    /// No prompt, arguments, environment or account data leaves the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_session: Option<LaunchSession>,
     pub pid: u32,
     pub foreground_pid: Option<u32>,
     pub cols: u16,
@@ -54,10 +72,18 @@ pub struct SessionInfo {
     pub exited: Option<u32>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LaunchSession {
+    pub harness: String,
+    pub id: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Capture {
     pub session: SessionInfo,
     pub ansi: String,
     pub text: String,
+    /// None identifies an older daemon without per-view history capture.
+    #[serde(default)]
+    pub scrollback_rows: Option<usize>,
 }
 #[derive(Serialize, Deserialize)]
 struct Launch {
@@ -232,23 +258,66 @@ fn rpc_timeout(
     root: &Path,
     id: &str,
     generation: &str,
-    mut request: Value,
+    request: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    rpc_budgeted(root, id, generation, request, timeout, None)
+}
+struct DeadlineStream {
+    stream: TcpStream,
+    deadline: Instant,
+}
+impl DeadlineStream {
+    fn left(deadline: Instant) -> std::io::Result<Duration> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Native RPC deadline reached",
+            ))
+        } else {
+            Ok(left)
+        }
+    }
+}
+impl Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_read_timeout(Some(Self::left(self.deadline)?))?;
+        self.stream.read(bytes)
+    }
+}
+impl Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_write_timeout(Some(Self::left(self.deadline)?))?;
+        self.stream.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+fn rpc_budgeted(
+    root: &Path,
+    id: &str,
+    generation: &str,
+    mut request: Value,
+    timeout: Duration,
+    budget: Option<&super::discovery_budget::Budget>,
+) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
     let endpoint = endpoint(root, id, generation)?;
     let nonce = random()?;
     request["nonce"] = Value::String(nonce.clone());
     request["generation"] = Value::String(generation.into());
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port));
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(250))
-        .map_err(|_| "Native terminal is unavailable")?;
+    let stream = TcpStream::connect_timeout(
+        &address,
+        DeadlineStream::left(deadline).map_err(|e| e.to_string())?,
+    )
+    .map_err(|_| "Native terminal is unavailable")?;
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|e| e.to_string())?;
+    let mut stream = DeadlineStream { stream, deadline };
     serde_json::to_writer(&mut stream, &json!({"nonce":nonce})).map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     // Authenticate the listening daemon before sending terminal input or metadata.
@@ -260,6 +329,9 @@ fn rpc_timeout(
         .map_err(|e| e.to_string())?;
     if hello.len() > 4096 {
         return Err("Native terminal handshake exceeds limit".into());
+    }
+    if let Some(budget) = budget {
+        budget.admit_json(&hello)?;
     }
     let envelope: Value =
         serde_json::from_slice(&hello).map_err(|_| "Invalid native terminal handshake")?;
@@ -282,12 +354,21 @@ fn rpc_timeout(
     stream.write_all(&bytes).map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
+    let reply_limit = budget.map_or(MAX_REPLY, |budget| {
+        MAX_REPLY.min(budget.remaining_bytes() as u64)
+    });
     BufReader::new(stream)
-        .take(MAX_REPLY + 1)
+        .take(reply_limit + 1)
         .read_until(b'\n', &mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_REPLY {
+    if bytes.len() as u64 > reply_limit {
+        if let Some(budget) = budget {
+            return Err(budget.capacity_error());
+        }
         return Err("Native terminal reply exceeds limit".into());
+    }
+    if let Some(budget) = budget {
+        budget.admit_json(&bytes)?;
     }
     let envelope: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid native terminal reply")?;
@@ -298,6 +379,7 @@ fn rpc_timeout(
     if let Some(error) = response["error"].as_str() {
         return Err(error.into());
     }
+    DeadlineStream::left(deadline).map_err(|e| e.to_string())?;
     Ok(response["result"].take())
 }
 fn rpc(id: &str, generation: &str, request: Value) -> Result<Value> {
@@ -308,6 +390,7 @@ pub fn start(mut options: StartOptions) -> Result<SessionInfo> {
     label(&options.name)?;
     label(&options.workspace)?;
     size(options.cols, options.rows)?;
+    scrollback_limit(options.scrollback_rows)?;
     options.cwd = options
         .cwd
         .canonicalize()
@@ -406,28 +489,49 @@ pub fn list() -> Result<Vec<SessionInfo>> {
 /// A bounded inventory refresh. Dead endpoints are omitted; damaged/authentication
 /// failures are reported separately so callers can show incomplete discovery.
 pub fn discover() -> Result<(Vec<SessionInfo>, Vec<String>)> {
+    let settings = super::runtime_settings::Settings::default();
+    let budget = super::discovery_budget::Budget::new(&settings)?;
+    discover_with(&settings, &budget)
+}
+pub(crate) fn discover_with(
+    settings: &super::runtime_settings::Settings,
+    budget: &super::discovery_budget::Budget,
+) -> Result<(Vec<SessionInfo>, Vec<String>)> {
     let root = registry_dir()?;
-    match fs::symlink_metadata(&root) {
-        Ok(_) => validate_registry(&root)?,
+    discover_at(&root, settings, budget)
+}
+fn discover_at(
+    root: &Path,
+    settings: &super::runtime_settings::Settings,
+    budget: &super::discovery_budget::Budget,
+) -> Result<(Vec<SessionInfo>, Vec<String>)> {
+    let deadline = budget
+        .deadline
+        .min(Instant::now() + Duration::from_millis(settings.native_discovery_timeout_ms));
+    match fs::symlink_metadata(root) {
+        Ok(_) => validate_registry(root)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((Vec::new(), Vec::new()));
         }
         Err(error) => return Err(error.to_string()),
     }
     let mut pending = Vec::new();
-    let mut warnings = Vec::new();
-    for (index, entry) in fs::read_dir(&root).map_err(|e| e.to_string())?.enumerate() {
-        if index >= 1024 {
-            warnings.push(
-                "Native terminal registry has more than 1024 entries; discovery is incomplete"
-                    .into(),
+    let mut warnings = std::collections::BTreeSet::new();
+    for (index, entry) in fs::read_dir(root).map_err(|e| e.to_string())?.enumerate() {
+        if Instant::now() >= deadline {
+            warnings.insert("Native terminal discovery deadline reached".into());
+            break;
+        }
+        if index >= settings.native_discovery_entry_limit as usize {
+            warnings.insert(
+                "Native terminal registry entry limit reached; discovery is incomplete".into(),
             );
             break;
         }
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                warnings.push("A native terminal registry entry could not be read".into());
+                warnings.insert("A native terminal registry entry could not be read".into());
                 continue;
             }
         };
@@ -435,30 +539,55 @@ pub fn discover() -> Result<(Vec<SessionInfo>, Vec<String>)> {
             continue;
         }
         match read_private::<Endpoint>(&entry.path()) {
-            Ok(endpoint) => pending.push((endpoint.id, endpoint.generation)),
+            Ok(endpoint)
+                if identity(&endpoint.id).is_ok()
+                    && identity(&endpoint.generation).is_ok()
+                    && identity(&endpoint.token).is_ok()
+                    && endpoint.port != 0
+                    && entry.path().file_stem().and_then(|s| s.to_str())
+                        == Some(endpoint.id.as_str()) =>
+            {
+                let value = serde_json::to_value(&endpoint)
+                    .map_err(|_| "Cannot encode native endpoint metadata")?;
+                if let Err(error) = budget.admit_value(&value) {
+                    warnings.insert(error);
+                    break;
+                }
+                pending.push((endpoint.id, endpoint.generation));
+            }
+            Ok(_) => {
+                warnings.insert("A native terminal registry entry has invalid identity".into());
+            }
             Err(_) => {
-                warnings.push("A native terminal registry entry is invalid or not private".into())
+                warnings
+                    .insert("A native terminal registry entry is invalid or not private".into());
             }
         }
     }
+    let workers = pending.len().min(settings.discovery_workers as usize);
     let queue = Mutex::new(pending);
     let sessions = Mutex::new(Vec::new());
     let warnings = Mutex::new(warnings);
-    let deadline = Instant::now() + Duration::from_secs(1);
     thread::scope(|scope| {
-        for _ in 0..8 {
+        for _ in 0..workers {
             scope.spawn(|| {
                 while Instant::now()<deadline {
                     let item=queue.lock().unwrap().pop();
                     let Some((id,generation))=item else {break;};
-                    match rpc_timeout(&root,&id,&generation,json!({"op":"info"}),Duration::from_millis(250)) {
+                    let timeout = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(settings.native_discovery_rpc_timeout_ms));
+                    match rpc_budgeted(root,&id,&generation,json!({"op":"info"}),timeout,Some(budget)) {
                         Ok(value)=>match serde_json::from_value::<SessionInfo>(value) {
-                            Ok(info) if info.exited.is_none()=>sessions.lock().unwrap().push(info),
+                            Ok(info) if info.id != id || info.generation != generation => { warnings.lock().unwrap().insert("A native terminal returned mismatched session identity".into()); },
+                            Ok(info) if Instant::now() >= deadline => { let _ = info; warnings.lock().unwrap().insert("Native terminal discovery deadline reached".into()); },
+                            Ok(info) if info.exited.is_none()=> match serde_json::to_value(&info).map_err(|_| "Cannot encode native session metadata".to_owned()).and_then(|value| budget.admit_value(&value)) {
+                                Ok(()) => sessions.lock().unwrap().push(info),
+                                Err(error) => { warnings.lock().unwrap().insert(error); },
+                            },
                             Ok(_)=>(),
-                            Err(_)=>warnings.lock().unwrap().push("A native terminal returned invalid session metadata".into()),
+                            Err(_)=>{ warnings.lock().unwrap().insert("A native terminal returned invalid session metadata".into()); },
                         },
                         Err(error) if error=="Native terminal is unavailable"=>(),
-                        Err(_)=>warnings.lock().unwrap().push("A native terminal could not be authenticated or did not respond in time".into()),
+                        Err(_)=>{ warnings.lock().unwrap().insert("A native terminal could not be authenticated or did not respond in time".into()); },
                     }
                 }
             });
@@ -468,13 +597,11 @@ pub fn discover() -> Result<(Vec<SessionInfo>, Vec<String>)> {
         warnings
             .lock()
             .unwrap()
-            .push("Native terminal discovery timed out; refresh to retry".into());
+            .insert("Native terminal discovery timed out; refresh to retry".into());
     }
     let mut sessions = sessions.into_inner().unwrap();
     sessions.sort_by(|a, b| (&a.workspace, &a.name, &a.id).cmp(&(&b.workspace, &b.name, &b.id)));
-    let mut warnings = warnings.into_inner().unwrap();
-    warnings.sort();
-    warnings.dedup();
+    let warnings = warnings.into_inner().unwrap().into_iter().collect();
     Ok((sessions, warnings))
 }
 pub fn info(id: &str, generation: &str) -> Result<SessionInfo> {
@@ -486,7 +613,20 @@ pub fn info(id: &str, generation: &str) -> Result<SessionInfo> {
     Ok(info)
 }
 pub fn capture(id: &str, generation: &str) -> Result<Capture> {
-    serde_json::from_value(rpc(id, generation, json!({"op":"capture"}))?).map_err(|e| e.to_string())
+    capture_at(id, generation, 0)
+}
+fn capture_at(id: &str, generation: &str, rows: u64) -> Result<Capture> {
+    scrollback_limit(rows)?;
+    let capture: Capture = serde_json::from_value(rpc(
+        id,
+        generation,
+        json!({"op":"capture","scrollback_rows":rows}),
+    )?)
+    .map_err(|e| e.to_string())?;
+    if rows > 0 && capture.scrollback_rows.is_none() {
+        return Err("History capture is unavailable in this older native terminal daemon".into());
+    }
+    Ok(capture)
 }
 pub fn input(id: &str, generation: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() > 65536 {
@@ -671,14 +811,33 @@ impl State {
                 if request["lease"].is_string() {
                     self.lease(request)?;
                 }
-                let parser = self
+                let offset = match request.get("scrollback_rows") {
+                    None => 0,
+                    Some(value) => {
+                        scrollback_limit(value.as_u64().ok_or("Invalid scrollback offset")?)?
+                    }
+                };
+                let mut parser = self
                     .screen
                     .lock()
                     .map_err(|_| "Terminal screen unavailable")?;
+                // The parser is shared with the PTY reader and other viewers.
+                // Project history only while holding its lock, then restore live
+                // position before any reader or another capture can observe it.
+                let screen = parser.screen_mut();
+                screen.set_scrollback(offset);
+                let mut ansi = String::from_utf8_lossy(&screen.state_formatted()).into_owned();
+                let text = screen.contents();
+                let actual = screen.scrollback();
+                if actual > 0 {
+                    ansi.push_str("\x1b[?25l");
+                }
+                screen.set_scrollback(0);
                 Ok(json!(Capture {
                     session: self.info.clone(),
-                    ansi: String::from_utf8_lossy(&parser.screen().state_formatted()).into_owned(),
-                    text: parser.screen().contents()
+                    ansi,
+                    text,
+                    scrollback_rows: Some(actual),
                 }))
             }
             "input" => {
@@ -765,6 +924,7 @@ fn serve(root: &Path, id: &str) -> Result<()> {
     let opts = &launch.options;
     label(&opts.name)?;
     label(&opts.workspace)?;
+    let history = scrollback_limit(opts.scrollback_rows)?;
     let pair = portable_pty::native_pty_system()
         .openpty(size(opts.cols, opts.rows)?)
         .map_err(|e| e.to_string())?;
@@ -810,6 +970,12 @@ fn serve(root: &Path, id: &str) -> Result<()> {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned(),
+        launch_session: crate::adapters::harnesses::launch_conversation(&opts.argv).map(
+            |(harness, id)| LaunchSession {
+                harness: harness.into(),
+                id,
+            },
+        ),
         pid: child.0.process_id().unwrap_or(0),
         foreground_pid: None,
         cols: opts.cols,
@@ -839,7 +1005,7 @@ fn serve(root: &Path, id: &str) -> Result<()> {
     });
     let callbacks = TerminalReplies { tx: input.clone() };
     let screen = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
-        opts.rows, opts.cols, 1000, callbacks,
+        opts.rows, opts.cols, history, callbacks,
     )));
     let input = InputWriter { tx: input, busy };
     let reader_screen = screen.clone();
@@ -1049,6 +1215,9 @@ fn stream(id: &str, generation: &str, control: bool, cols: u16, rows: u16) -> Re
         }
     });
     let mut previous = String::new();
+    let mut previous_offset = usize::MAX;
+    let mut previous_size = (0, 0);
+    let mut offset = 0usize;
     loop {
         for _ in 0..32 {
             let value = match rx.try_recv() {
@@ -1063,6 +1232,21 @@ fn stream(id: &str, generation: &str, control: bool, cols: u16, rows: u16) -> Re
                         .as_ref()
                         .ok_or("Observer cannot send terminal input")?;
                     lease.request(json!({"op":"input","bytes":value["bytes"]}))?;
+                    offset = 0;
+                }
+                Some("terminal.scroll") => {
+                    let lines = value["lines"]
+                        .as_u64()
+                        .filter(|n| (1..=1000).contains(n))
+                        .ok_or("Scroll requires 1–1000 lines")?
+                        as usize;
+                    offset = match value["direction"].as_str() {
+                        Some("up") => offset
+                            .saturating_add(lines)
+                            .min(MAX_SCROLLBACK_ROWS as usize),
+                        Some("down") => offset.saturating_sub(lines),
+                        _ => return Err("Scroll direction must be up or down".into()),
+                    };
                 }
                 Some("terminal.resize") => {
                     let cols = value["cols"].as_u64().and_then(|n| u16::try_from(n).ok());
@@ -1081,16 +1265,27 @@ fn stream(id: &str, generation: &str, control: bool, cols: u16, rows: u16) -> Re
             }
         }
         let value = match &lease {
-            Some(lease) => lease.request(json!({"op":"capture"}))?,
-            None => rpc(id, generation, json!({"op":"capture"}))?,
+            Some(lease) => lease.request(json!({"op":"capture","scrollback_rows":offset}))?,
+            None => rpc(
+                id,
+                generation,
+                json!({"op":"capture","scrollback_rows":offset}),
+            )?,
         };
         let capture: Capture = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if offset > 0 && capture.scrollback_rows.is_none() {
+            emit(&json!({"type":"terminal.notice","code":"scrollback_unavailable"}))?;
+        }
+        offset = capture.scrollback_rows.unwrap_or(0);
         // Full frames avoid replaying OSC/clipboard sequences from untrusted applications.
-        if capture.ansi != previous {
+        let dimensions = (capture.session.cols, capture.session.rows);
+        if capture.ansi != previous || offset != previous_offset || dimensions != previous_size {
             emit(
-                &json!({"type":"terminal.frame","width":capture.session.cols,"height":capture.session.rows,"bytes":STANDARD.encode(capture.ansi.as_bytes()),"full":true}),
+                &json!({"type":"terminal.frame","width":capture.session.cols,"height":capture.session.rows,"bytes":STANDARD.encode(capture.ansi.as_bytes()),"full":true,"scrollback_rows":capture.scrollback_rows}),
             )?;
             previous = capture.ansi;
+            previous_offset = offset;
+            previous_size = dimensions;
         }
         if let Some(code) = capture.session.exited {
             emit(
@@ -1270,7 +1465,7 @@ fn number(args: &[String], key: &str, default: u16) -> Result<u16> {
 }
 fn help() {
     println!(
-        "daedalus shell [--name NAME] [--workspace NAME] [--cwd PATH] [-- PROGRAM ARGS...]\n\nNative sessions: terminal-native start | list | capture | input | resize | rename | close | attach | stream\nOperations use ID GENERATION from list. Attach: Ctrl+] then D detaches; exit closes the shell.\nExisting unmanaged shells cannot be retroactively captured. Launch them with daedalus shell."
+        "daedalus shell [--config-dir ABS] [--name NAME] [--workspace NAME] [--cwd PATH] [--cols N] [--rows N] [--scrollback-rows N] [-- PROGRAM ARGS...]\n\nNative sessions: terminal-native start | list | capture | input | resize | rename | close | attach | stream\nstart accepts the same launch flags as shell. --config-dir selects saved shell dimensions and native history capacity. Explicit --cols, --rows and --scrollback-rows override them. capture accepts --scrollback-rows OFFSET for a private read-only history projection.\nOperations use ID GENERATION from list. Attach: Ctrl+] then D detaches; exit closes the shell.\nExisting unmanaged shells cannot be retroactively captured. Launch them with daedalus shell."
     );
 }
 fn options(args: &[String], values: &[&str]) -> Result<()> {
@@ -1323,7 +1518,15 @@ pub fn cli(args: &[String]) -> Result<()> {
         "start" | "shell" => {
             options(
                 &args[1..split],
-                &["--name", "--workspace", "--cwd", "--cols", "--rows"],
+                &[
+                    "--name",
+                    "--workspace",
+                    "--cwd",
+                    "--cols",
+                    "--rows",
+                    "--config-dir",
+                    "--scrollback-rows",
+                ],
             )?;
             if verb == "shell" {
                 use std::io::IsTerminal;
@@ -1333,6 +1536,17 @@ pub fn cli(args: &[String]) -> Result<()> {
             }
             let split = args.iter().position(|v| v == "--").unwrap_or(args.len());
             let options = &args[..split];
+            let settings = if let Some(directory) = flag(options, "--config-dir") {
+                let directory = PathBuf::from(directory);
+                if !directory.is_absolute() {
+                    return Err("Configuration directory must be absolute".into());
+                }
+                let bytes = crate::core::layouts::read_private(&directory.join("control.json"))?
+                    .ok_or("Configuration missing")?;
+                super::config::ControlConfig::parse(&bytes)?.runtime
+            } else {
+                super::runtime_settings::Settings::default()
+            };
             let cwd = flag(options, "--cwd")
                 .map(PathBuf::from)
                 .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
@@ -1352,8 +1566,15 @@ pub fn cli(args: &[String]) -> Result<()> {
                 cwd,
                 argv: args.get(split + 1..).unwrap_or_default().to_vec(),
                 environment: None,
-                cols: number(options, "--cols", 120)?,
-                rows: number(options, "--rows", 36)?,
+                cols: number(options, "--cols", settings.shell_cols)?,
+                rows: number(options, "--rows", settings.shell_rows)?,
+                scrollback_rows: flag(options, "--scrollback-rows")
+                    .map(|v| {
+                        v.parse::<u64>()
+                            .map_err(|_| "Invalid scrollback row limit".to_owned())
+                    })
+                    .transpose()?
+                    .unwrap_or(settings.native_scrollback_rows),
             })?;
             if verb == "shell" {
                 attach(&info.id, &info.generation)
@@ -1369,6 +1590,7 @@ pub fn cli(args: &[String]) -> Result<()> {
             let id = args.get(1).ok_or("Missing terminal ID")?;
             let generation = args.get(2).ok_or("Missing terminal generation")?;
             let allowed: &[&str] = match verb {
+                "capture" => &["--scrollback-rows"],
                 "input" => &["--text", "--base64"],
                 "resize" => &["--cols", "--rows"],
                 "rename" => &["--name", "--workspace"],
@@ -1377,7 +1599,16 @@ pub fn cli(args: &[String]) -> Result<()> {
             };
             options(&args[3..], allowed)?;
             match verb {
-                "capture" => emit(&json!(capture(id, generation)?)),
+                "capture" => {
+                    let rows = flag(args, "--scrollback-rows")
+                        .map(|v| {
+                            v.parse::<u64>()
+                                .map_err(|_| "Invalid scrollback offset".to_owned())
+                        })
+                        .transpose()?
+                        .unwrap_or(0);
+                    emit(&json!(capture_at(id, generation, rows)?))
+                }
                 "input" => {
                     if flag(args, "--text").is_some() && flag(args, "--base64").is_some() {
                         return Err("Use either --text or --base64, not both".into());
@@ -1440,6 +1671,218 @@ pub fn cli(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rpc_deadline_bounds_a_reply_that_keeps_dripping_bytes() {
+        let root = std::env::temp_dir().join(format!("dd-rpc-deadline-{}", random().unwrap()));
+        ensure_private(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let endpoint = Endpoint {
+            id: random().unwrap(),
+            generation: random().unwrap(),
+            token: random().unwrap(),
+            port: listener.local_addr().unwrap().port(),
+        };
+        save(&root.join(format!("{}.json", endpoint.id)), &endpoint).unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut nonce = Vec::new();
+            BufReader::new(&mut stream)
+                .read_until(b'\n', &mut nonce)
+                .unwrap();
+            let stop = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < stop {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        assert!(
+            rpc_timeout(
+                &root,
+                &endpoint.id,
+                &endpoint.generation,
+                json!({"op":"info"}),
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let elapsed = started.elapsed();
+        worker.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "a100ms RPC kept receiving past its deadline: {elapsed:?}"
+        );
+    }
+    struct Registry(PathBuf);
+    impl Registry {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("dd-registry-{}", random().unwrap()));
+            ensure_private(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Registry {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn registry_limits_count_unrelated_entries_and_refuse_invalid_identity() {
+        use super::super::{discovery_budget::Budget, runtime_settings::Settings};
+        let root = Registry::new();
+        fs::write(root.0.join("unrelated-a"), []).unwrap();
+        fs::write(root.0.join("unrelated-b"), []).unwrap();
+        let mut settings = Settings {
+            native_discovery_entry_limit: 1,
+            ..Settings::default()
+        };
+        let (sessions, warnings) =
+            discover_at(&root.0, &settings, &Budget::new(&settings).unwrap()).unwrap();
+        assert!(sessions.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("entry limit"))
+        );
+        settings.native_discovery_entry_limit = 32;
+        let (_, warnings) =
+            discover_at(&root.0, &settings, &Budget::new(&settings).unwrap()).unwrap();
+        assert!(warnings.is_empty());
+        for kind in 0..3 {
+            let mut endpoint = Endpoint {
+                id: random().unwrap(),
+                generation: random().unwrap(),
+                token: random().unwrap(),
+                port: 1,
+            };
+            let name = if kind == 0 {
+                random().unwrap()
+            } else {
+                endpoint.id.clone()
+            };
+            if kind == 1 {
+                endpoint.token = "invalid".into();
+            }
+            if kind == 2 {
+                endpoint.port = 0;
+            }
+            save(&root.0.join(format!("{name}.json")), &endpoint).unwrap();
+        }
+        let (_, warnings) =
+            discover_at(&root.0, &settings, &Budget::new(&settings).unwrap()).unwrap();
+        assert_eq!(
+            warnings,
+            ["A native terminal registry entry has invalid identity"]
+        );
+        let mut expired = Budget::new(&settings).unwrap();
+        expired.deadline = Instant::now() - Duration::from_millis(1);
+        let (sessions, warnings) = discover_at(&root.0, &settings, &expired).unwrap();
+        assert!(sessions.is_empty());
+        assert_eq!(warnings, ["Native terminal discovery deadline reached"]);
+    }
+    #[test]
+    fn authenticated_discovery_requires_the_exact_registered_session_identity() {
+        use super::super::{discovery_budget::Budget, runtime_settings::Settings};
+        for mismatch in 0..3 {
+            let root = Registry::new();
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = Endpoint {
+                id: random().unwrap(),
+                generation: random().unwrap(),
+                token: random().unwrap(),
+                port: listener.local_addr().unwrap().port(),
+            };
+            save(&root.0.join(format!("{}.json", endpoint.id)), &endpoint).unwrap();
+            let worker = thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(3);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(stream) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < until =>
+                        {
+                            thread::sleep(Duration::from_millis(1))
+                        }
+                        Err(error) => panic!("owned listener did not receive discovery: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let nonce = serde_json::from_str::<Value>(&line).unwrap()["nonce"].clone();
+                let challenge = seal(&endpoint.token, json!({"nonce":nonce,"generation":endpoint.generation,"challenge":random().unwrap()})).unwrap();
+                serde_json::to_writer(&mut stream, &challenge).unwrap();
+                stream.write_all(b"\n").unwrap();
+                line.clear();
+                BufReader::new(&mut stream).read_line(&mut line).unwrap();
+                let request =
+                    unseal(&endpoint.token, &serde_json::from_str(&line).unwrap()).unwrap();
+                assert_eq!(request["op"], "info");
+                let info = SessionInfo {
+                    id: if mismatch == 1 {
+                        random().unwrap()
+                    } else {
+                        endpoint.id
+                    },
+                    generation: if mismatch == 2 {
+                        random().unwrap()
+                    } else {
+                        endpoint.generation
+                    },
+                    name: "fixture".into(),
+                    workspace: "fixture".into(),
+                    cwd: PathBuf::from("."),
+                    command: "fixture".into(),
+                    launch_session: None,
+                    pid: 1,
+                    foreground_pid: None,
+                    cols: 80,
+                    rows: 24,
+                    controlled: false,
+                    exited: None,
+                };
+                let response = seal(&endpoint.token, json!({"nonce":nonce,"result":info})).unwrap();
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            });
+            let settings = Settings::default();
+            let budget = Budget::new(&settings).unwrap();
+            let (sessions, warnings) = discover_at(&root.0, &settings, &budget).unwrap();
+            worker.join().unwrap();
+            if mismatch == 0 {
+                assert_eq!(sessions.len(), 1);
+                assert!(warnings.is_empty(), "{warnings:?}");
+            } else {
+                assert!(sessions.is_empty());
+                assert_eq!(
+                    warnings,
+                    ["A native terminal returned mismatched session identity"]
+                );
+            }
+            assert!(
+                budget.remaining_bytes() < settings.discovery_metadata_limit_bytes as usize - 1024
+            );
+        }
+    }
     struct Fixture {
         root: PathBuf,
         id: String,
@@ -1474,6 +1917,7 @@ mod tests {
                     environment: None,
                     cols: 80,
                     rows: 24,
+                    scrollback_rows: DEFAULT_SCROLLBACK_ROWS,
                 },
             };
             save(&root.join(format!("{}.launch", launch.id)), &launch).unwrap();

@@ -1,5 +1,6 @@
 //! Expand progress effects into the ordinary durable Telegram outbox. An edit
 //! references a confirmed message receipt; unknown sends never create another.
+use super::timing::Delay;
 use super::{
     hook_effects::{self, Binding},
     hook_runtime::Registration,
@@ -11,11 +12,12 @@ use crate::core::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, String>;
 #[derive(Default)]
 pub struct Progress {
     after: i64,
-    next: f64,
+    next: Option<Delay>,
 }
 impl Progress {
     pub fn tick(
@@ -26,17 +28,31 @@ impl Progress {
         registrations: &[(std::path::PathBuf, Registration)],
         now: f64,
     ) -> Result<()> {
-        if now < self.next {
+        self.tick_at(journal, routes, config, registrations, now, Instant::now())
+    }
+    fn tick_at(
+        &mut self,
+        journal: &mut Journal,
+        routes: &Registry,
+        config: &ServiceConfig,
+        registrations: &[(std::path::PathBuf, Registration)],
+        now: f64,
+        elapsed: Instant,
+    ) -> Result<()> {
+        if self.next.is_some_and(|delay| !delay.ready(elapsed)) {
             return Ok(());
         }
-        self.next = now + 2.0;
+        self.next = Some(Delay::new(
+            elapsed,
+            Duration::from_millis(config.runtime.progress_interval_ms),
+        ));
         let events = journal
             .events_page(
                 "hook-effects",
                 &config.instance,
                 &["admitted"],
                 self.after,
-                32,
+                config.runtime.progress_batch_limit as usize,
             )
             .map_err(|e| e.to_string())?;
         if events.is_empty() {
@@ -336,6 +352,7 @@ mod tests {
                 hindsight_bank: None,
             };
             let config = ServiceConfig {
+                runtime: Default::default(),
                 version: 1,
                 instance: "fixture".into(),
                 bot_id: 123,
@@ -480,6 +497,69 @@ mod tests {
         );
     }
     #[test]
+    fn configured_batch_and_elapsed_cadence_preserve_durable_wall_timestamps() {
+        let mut f = Fixture::new();
+        f.config.runtime.progress_batch_limit = 1;
+        f.config.runtime.progress_interval_ms = 500;
+        f.admit("start", "start_progress", 1000.0);
+        f.admit("done", "finish_progress", 1001.0);
+        let mut progress = Progress::default();
+        let elapsed = Instant::now();
+        let registrations = [("/unused".into(), f.registration.clone())];
+        progress
+            .tick_at(
+                &mut f.journal,
+                &f.routes,
+                &f.config,
+                &registrations,
+                1002.0,
+                elapsed,
+            )
+            .unwrap();
+        assert_eq!(f.journal.rows().unwrap().len(), 1);
+        assert_eq!(
+            f.journal
+                .events_page("hook-effects", "fixture", &["admitted"], 0, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        f.complete_first(1003.0);
+        // A forward UTC jump cannot bypass the configured elapsed wait.
+        progress
+            .tick_at(
+                &mut f.journal,
+                &f.routes,
+                &f.config,
+                &registrations,
+                1000000.0,
+                elapsed + Duration::from_millis(499),
+            )
+            .unwrap();
+        assert_eq!(f.journal.rows().unwrap().len(), 1);
+        // A backward UTC jump cannot delay ready progress. Journal time is UTC.
+        progress
+            .tick_at(
+                &mut f.journal,
+                &f.routes,
+                &f.config,
+                &registrations,
+                1.0,
+                elapsed + Duration::from_millis(500),
+            )
+            .unwrap();
+        let rows = f.journal.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].created_at, 1.0);
+        assert_eq!(rows[1].payload["edit_message_id"], 9);
+        assert!(
+            rows[1].payload["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Agent turn finished")
+        );
+    }
+    #[test]
     fn in_flight_anchor_is_retried_after_later_non_progress_plans() {
         let mut f = Fixture::new();
         let first = f.admit("start", "start_progress", 1.0);
@@ -495,13 +575,15 @@ mod tests {
             )
             .unwrap();
         let mut progress = Progress::default();
+        let elapsed = Instant::now();
         progress
-            .tick(
+            .tick_at(
                 &mut f.journal,
                 &f.routes,
                 &f.config,
                 &[("/unused".into(), f.registration.clone())],
                 3.0,
+                elapsed,
             )
             .unwrap();
         assert_eq!(f.journal.rows().unwrap().len(), 1);
@@ -514,12 +596,13 @@ mod tests {
         );
         f.complete_first(4.0);
         progress
-            .tick(
+            .tick_at(
                 &mut f.journal,
                 &f.routes,
                 &f.config,
                 &[("/unused".into(), f.registration.clone())],
                 6.0,
+                elapsed + Duration::from_millis(f.config.runtime.progress_interval_ms),
             )
             .unwrap();
         let rows = f.journal.rows().unwrap();

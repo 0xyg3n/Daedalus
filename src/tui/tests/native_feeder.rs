@@ -158,6 +158,7 @@ fn run_fixture(root: &Path) {
     };
     let path = hook_runtime::install(&registration).unwrap();
     let mut feeder = NativeFeeder {
+        runtime: Default::default(),
         instance: "fixture".into(),
         registrations: vec![path.clone()],
         terminals: Terminals::default(),
@@ -227,7 +228,25 @@ fn run_fixture(root: &Path) {
         "fixture-session"
     );
     assert!(matches!(
-        feeder.submit(&frame).unwrap(),
+        {
+            let original_text = frame.text.clone();
+            feeder.runtime.feeder_prompt_limit_bytes = 1024;
+            frame.text = "x".repeat(2000);
+            assert_eq!(feeder.submit(&frame).unwrap(), Submission::Unavailable);
+            assert_eq!(
+                hook_runtime::ready_snapshot(&path, Path::new("/proc"))
+                    .unwrap()
+                    .state,
+                Readiness::Idle
+            );
+            feeder.runtime.feeder_prompt_limit_bytes = 64000;
+            frame.text = original_text;
+            feeder.runtime.feeder_registration_limit = 1;
+            feeder.registrations.push(path.clone());
+            assert!(feeder.live().unwrap_err().contains("Too many"));
+            feeder.registrations.pop();
+            feeder.submit(&frame).unwrap()
+        },
         Submission::Accepted(_)
     ));
     let deadline = Instant::now() + Duration::from_secs(5);

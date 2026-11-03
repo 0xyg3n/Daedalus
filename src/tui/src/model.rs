@@ -89,8 +89,9 @@ impl PaneDivider {
             (start.1, end.1)
         };
         let delta = i32::from(end) - i32::from(start);
-        let scaled = delta * i32::from(self.native_length) / i32::from(self.screen_length.max(1));
-        scaled.clamp(self.minimum, self.maximum)
+        let scaled =
+            i64::from(delta) * i64::from(self.native_length) / i64::from(self.screen_length.max(1));
+        scaled.clamp(i64::from(self.minimum), i64::from(self.maximum)) as i32
     }
 }
 #[derive(Clone)]
@@ -112,105 +113,100 @@ impl Layout {
         };
         canonical(self) == canonical(other)
     }
-    pub fn dividers(&self, screen: ratatui::layout::Rect) -> Vec<PaneDivider> {
-        if self.zoomed || self.width == 0 || self.height == 0 {
+    pub fn geometry(&self) -> Option<daedalus_tui::core::geometry::Geometry> {
+        use daedalus_tui::core::geometry::{Geometry, Rect, unique_ids};
+        if !unique_ids(self.panes.iter().map(|pane| pane.id.as_str())) {
+            return None;
+        }
+        Geometry::new(
+            self.width,
+            self.height,
+            self.panes
+                .iter()
+                .map(|p| Rect {
+                    x: p.x,
+                    y: p.y,
+                    w: p.w,
+                    h: p.h,
+                })
+                .collect(),
+        )
+    }
+    pub fn dividers(
+        &self,
+        screen: ratatui::layout::Rect,
+        policy: &daedalus_tui::core::geometry::ResizePolicy,
+    ) -> Vec<PaneDivider> {
+        if self.zoomed || !policy.validate() || self.panes.len() as u64 > policy.pane_limit {
             return Vec::new();
         }
+        let Some(geometry) = self.geometry() else {
+            return Vec::new();
+        };
         let scale = |at: u16, size: u16, origin: u16, length: u16| {
             origin.saturating_add(
                 (u32::from(at.min(size)) * u32::from(length) / u32::from(size.max(1))) as u16,
             )
         };
         let mut edges = Vec::new();
-        for a in &self.panes {
-            for b in &self.panes {
-                if a.id == b.id {
-                    continue;
-                }
-                for horizontal in [true, false] {
-                    let (end, start, a0, a1, b0, b1, a_size, b_size) = if horizontal {
-                        (
-                            a.x.saturating_add(a.w),
-                            b.x,
-                            a.y,
-                            a.y.saturating_add(a.h),
-                            b.y,
-                            b.y.saturating_add(b.h),
-                            a.w,
-                            b.w,
-                        )
-                    } else {
-                        (
-                            a.y.saturating_add(a.h),
-                            b.y,
-                            a.x,
-                            a.x.saturating_add(a.w),
-                            b.x,
-                            b.x.saturating_add(b.w),
-                            a.h,
-                            b.h,
-                        )
-                    };
-                    let overlap0 = a0.max(b0);
-                    let overlap1 = a1.min(b1);
-                    if end > start || start - end > 1 || overlap1 <= overlap0 {
-                        continue;
-                    }
-                    let min_size = if horizontal { 4 } else { 3 };
-                    if a_size < min_size
-                        || b_size < min_size
-                        || (a_size == min_size && b_size == min_size)
-                    {
-                        continue;
-                    }
-                    let area = if horizontal {
-                        let x = scale(start, self.width, screen.x, screen.width)
-                            .saturating_sub(1)
-                            .max(screen.x);
-                        let y0 =
-                            scale(overlap0, self.height, screen.y, screen.height).saturating_add(1);
-                        let y1 =
-                            scale(overlap1, self.height, screen.y, screen.height).saturating_sub(1);
-                        ratatui::layout::Rect::new(
-                            x,
-                            y0,
-                            2.min(screen.right().saturating_sub(x)),
-                            y1.saturating_sub(y0),
-                        )
-                    } else {
-                        let y = scale(start, self.height, screen.y, screen.height)
-                            .saturating_sub(1)
-                            .max(screen.y);
-                        let x0 =
-                            scale(overlap0, self.width, screen.x, screen.width).saturating_add(1);
-                        let x1 =
-                            scale(overlap1, self.width, screen.x, screen.width).saturating_sub(1);
-                        ratatui::layout::Rect::new(
-                            x0,
-                            y,
-                            x1.saturating_sub(x0),
-                            2.min(screen.bottom().saturating_sub(y)),
-                        )
-                    };
-                    if area.width == 0 || area.height == 0 {
-                        continue;
-                    }
-                    edges.push(PaneDivider {
-                        area,
-                        leading: a.id.clone(),
-                        trailing: b.id.clone(),
-                        horizontal,
-                        native_length: if horizontal { self.width } else { self.height },
-                        screen_length: if horizontal {
-                            screen.width
-                        } else {
-                            screen.height
-                        },
-                        minimum: -(i32::from(a_size) - i32::from(min_size)),
-                        maximum: i32::from(b_size) - i32::from(min_size),
-                    });
-                }
+        for edge in geometry.edges() {
+            let a = &self.panes[edge.leading];
+            let b = &self.panes[edge.trailing];
+            let horizontal = edge.horizontal;
+            let (a_size, b_size, start) = if horizontal {
+                (a.w, b.w, b.x)
+            } else {
+                (a.h, b.h, b.y)
+            };
+            let min_size = policy.minimum(horizontal);
+            if i32::from(a_size) < min_size
+                || i32::from(b_size) < min_size
+                || (i32::from(a_size) == min_size && i32::from(b_size) == min_size)
+            {
+                continue;
             }
+            let area = if horizontal {
+                let x = scale(start, self.width, screen.x, screen.width)
+                    .saturating_sub(1)
+                    .max(screen.x);
+                let y0 = scale(edge.start, self.height, screen.y, screen.height).saturating_add(1);
+                let y1 = scale(edge.end, self.height, screen.y, screen.height).saturating_sub(1);
+                ratatui::layout::Rect::new(
+                    x,
+                    y0,
+                    2.min(screen.right().saturating_sub(x)),
+                    y1.saturating_sub(y0),
+                )
+            } else {
+                let y = scale(start, self.height, screen.y, screen.height)
+                    .saturating_sub(1)
+                    .max(screen.y);
+                let x0 = scale(edge.start, self.width, screen.x, screen.width).saturating_add(1);
+                let x1 = scale(edge.end, self.width, screen.x, screen.width).saturating_sub(1);
+                ratatui::layout::Rect::new(
+                    x0,
+                    y,
+                    x1.saturating_sub(x0),
+                    2.min(screen.bottom().saturating_sub(y)),
+                )
+            };
+            if area.width == 0 || area.height == 0 {
+                continue;
+            }
+            edges.push(PaneDivider {
+                area,
+                leading: a.id.clone(),
+                trailing: b.id.clone(),
+                horizontal,
+                native_length: if horizontal { self.width } else { self.height },
+                screen_length: if horizontal {
+                    screen.width
+                } else {
+                    screen.height
+                },
+                minimum: (-(i32::from(a_size) - min_size)).max(-(policy.max_cells as i32)),
+                maximum: (i32::from(b_size) - min_size).min(policy.max_cells as i32),
+            });
         }
         edges
     }
@@ -815,6 +811,22 @@ pub struct Entry {
     pub aliases: Vec<String>,
     pub badges: Vec<(String, String)>,
 }
+impl From<daedalus_tui::app::registry::CatalogEntry> for Entry {
+    fn from(entry: daedalus_tui::app::registry::CatalogEntry) -> Self {
+        Self {
+            id: entry.id,
+            category: entry.category,
+            group: entry.group,
+            title: entry.title,
+            description: entry.description,
+            interface: entry.interface,
+            detail: entry.detail,
+            icon: entry.icon,
+            aliases: entry.aliases,
+            badges: entry.badges,
+        }
+    }
+}
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Light {
@@ -838,6 +850,8 @@ pub struct Overview {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub struct Snapshot {
+    pub ui_settings: daedalus_tui::app::interface_settings::InterfaceSettings,
+    pub resize_settings: daedalus_tui::core::geometry::ResizePolicy,
     pub tree: Vec<Node>,
     pub sections: Vec<Section>,
     /// Sent with the first snapshot only; later snapshots keep the previous one.
@@ -963,6 +977,17 @@ impl Dialog {
             description: s("description"),
             text: s("text"),
             secret: value["secret"].as_bool().unwrap_or(false),
+            // Prefill is opt-in; existing forms keep their blank-entry/default
+            // behavior. Never hydrate a secret or truncate reviewed text.
+            input: if value["mode"] == "input" && value["secret"] != true {
+                value["input"]
+                    .as_str()
+                    .filter(|text| text.len() <= 65536 && !text.chars().any(char::is_control))
+                    .unwrap_or("")
+                    .to_owned()
+            } else {
+                String::new()
+            },
             options: serde_json::from_value(value["options"].clone()).unwrap_or_default(),
             icons: serde_json::from_value(value["icons"].clone()).unwrap_or_default(),
             ..Self::default()
@@ -1112,8 +1137,14 @@ impl DetailView {
     }
 }
 
+/// Visible terminal cells mapped to their source rows and horizontal offsets.
+pub type RenderedScreen = (ratatui::layout::Rect, String, Vec<(u16, u16)>);
+/// Terminal identity and the inclusive source coordinates selected for copying.
+pub type TerminalSelection = (String, (u16, u16), (u16, u16));
+
 #[derive(Default)]
 pub struct Ui {
+    pub settings: daedalus_tui::app::interface_settings::InterfaceSettings,
     pub binding_search: Option<String>,
     pub binding_scroll: usize,
     pub binding_notice: Option<String>,
@@ -1137,6 +1168,10 @@ pub struct Ui {
     pub status: String,
     pub status_error: bool,
     pub action_pending: bool,
+    /// Changes even when reopening the same page, such as a new Ctrl+P search.
+    pub(crate) navigation_revision: u64,
+    /// Captured when the user selects a request, before any background wait.
+    pub(crate) request_navigation_revision: Option<u64>,
     /// Screen row → list row, for mouse selection.
     pub list_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub nav_hits: Vec<(ratatui::layout::Rect, usize)>,
@@ -1171,9 +1206,9 @@ pub struct Ui {
     pub inline_screen: Option<ratatui::layout::Rect>,
     /// Terminal screens drawn last frame: rect, node id, and each display row's
     /// source row and left column. Selection uses these in every view.
-    pub screens: Vec<(ratatui::layout::Rect, String, Vec<(u16, u16)>)>,
+    pub screens: Vec<RenderedScreen>,
     /// Selected source cells on one screen: id, anchor, head, as row and column.
-    pub selection: Option<(String, (u16, u16), (u16, u16))>,
+    pub selection: Option<TerminalSelection>,
     /// Left-button drag that can become `selection`.
     pub text_drag: Option<(String, (u16, u16))>,
     pub tile_hits: Vec<(ratatui::layout::Rect, usize)>,
@@ -1279,6 +1314,22 @@ fn search_hint(terms: &[String], shown: &str, aliases: &[String]) -> Option<Stri
             .collect::<Vec<_>>()
             .join(", "),
     )
+}
+
+fn exact_search_rank(terms: &[String], title: &str, aliases: &[String]) -> u8 {
+    let exact = |value: &str| {
+        value
+            .to_lowercase()
+            .split_whitespace()
+            .eq(terms.iter().map(String::as_str))
+    };
+    if exact(title) {
+        0
+    } else if aliases.iter().any(|alias| exact(alias)) {
+        1
+    } else {
+        2
+    }
 }
 
 impl Ui {
@@ -1635,7 +1686,13 @@ impl Ui {
             return;
         };
         let mut group = None;
-        for (i, item) in section.items.iter().enumerate() {
+        let mut entries = section.items.iter().enumerate().collect::<Vec<_>>();
+        if !terms.is_empty() {
+            entries.sort_by_cached_key(|(_, item)| {
+                exact_search_rank(terms, &item.title, &item.aliases)
+            });
+        }
+        for (i, item) in entries {
             let shown = format!("{} {} {}", item.title, item.note, item.group);
             let Some(hint) = search_hint(terms, &shown, &item.aliases) else {
                 continue;
@@ -1666,7 +1723,13 @@ impl Ui {
     }
     fn catalog_rows(&self, terms: &[String], rows: &mut Vec<Row>) {
         let mut group = None;
-        for (i, e) in self.snapshot.catalog.iter().enumerate() {
+        let mut entries = self.snapshot.catalog.iter().enumerate().collect::<Vec<_>>();
+        if !terms.is_empty() {
+            entries.sort_by_cached_key(|(_, entry)| {
+                exact_search_rank(terms, &entry.title, &entry.aliases)
+            });
+        }
+        for (i, e) in entries {
             let shown = format!(
                 "{} {} {} {} {}",
                 e.title, e.description, e.group, e.category, e.interface
@@ -1964,6 +2027,7 @@ impl Ui {
         }]
     }
     pub fn navigate(&mut self, page: usize) {
+        self.note_navigation();
         if page != self.page {
             self.paged_at = Some(Instant::now());
         }
@@ -1973,6 +2037,21 @@ impl Ui {
         self.filter.clear();
         self.searching = false;
         self.select(0, true);
+    }
+    pub(crate) fn note_navigation(&mut self) {
+        self.navigation_revision = self.navigation_revision.wrapping_add(1);
+    }
+    pub(crate) fn begin_request(&mut self, action: bool, navigation_revision: u64) {
+        self.action_pending = action;
+        self.request_navigation_revision = Some(navigation_revision);
+    }
+    pub(crate) fn request_navigation_is_current(&self) -> bool {
+        self.request_navigation_revision
+            .is_none_or(|revision| revision == self.navigation_revision)
+    }
+    pub(crate) fn finish_request(&mut self) {
+        self.action_pending = false;
+        self.request_navigation_revision = None;
     }
     pub fn select(&mut self, index: usize, forward: bool) {
         let rows = self.rows();
@@ -2011,6 +2090,18 @@ impl Ui {
         }
     }
     pub fn update(&mut self, mut snapshot: Snapshot) {
+        if snapshot.ui_settings != self.settings && snapshot.ui_settings.validate().is_ok() {
+            let mut theme = crate::theme::Theme::from_env(&snapshot.ui_settings);
+            theme.epoch = self.theme.epoch;
+            self.still = theme.reduced_motion;
+            theme.reduced_motion |= !self.prefs.motion;
+            self.theme = theme;
+            if !theme.splash {
+                self.splash = None;
+            }
+            self.saver.since = None;
+            self.settings = snapshot.ui_settings.clone();
+        }
         let old = self.selected_row();
         let ancestry = old
             .as_ref()
@@ -2107,6 +2198,97 @@ impl Ui {
 pub mod tests {
     use super::*;
     #[test]
+    fn indexed_dividers_obey_saved_limits_and_extreme_drag_coordinates() {
+        let mut layout = Layout {
+            width: 100,
+            height: 40,
+            zoomed: false,
+            panes: vec![
+                LayoutPane {
+                    id: "a".into(),
+                    x: 0,
+                    y: 0,
+                    w: 49,
+                    h: 40,
+                    focused: false,
+                },
+                LayoutPane {
+                    id: "b".into(),
+                    x: 50,
+                    y: 0,
+                    w: 50,
+                    h: 40,
+                    focused: false,
+                },
+            ],
+        };
+        let screen = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let mut policy = daedalus_tui::core::geometry::ResizePolicy {
+            max_cells: 2,
+            ..Default::default()
+        };
+        let edges = layout.dividers(screen, &policy);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].cells((0, 0), (65535, 0)), 2);
+        assert_eq!(edges[0].cells((65535, 0), (0, 0)), -2);
+        policy.min_cols = 50;
+        assert!(layout.dividers(screen, &policy).is_empty());
+        layout.width = 50000;
+        layout.height = 20;
+        layout.panes = (0..5000)
+            .map(|n| LayoutPane {
+                id: format!("p{n}"),
+                x: n * 10,
+                y: 0,
+                w: 9,
+                h: 20,
+                focused: false,
+            })
+            .collect();
+        policy = daedalus_tui::core::geometry::ResizePolicy::default();
+        assert!(
+            layout
+                .dividers(ratatui::layout::Rect::new(0, 0, 65535, 20), &policy)
+                .is_empty()
+        );
+        policy.pane_limit = 5000;
+        let edges = layout.dividers(ratatui::layout::Rect::new(0, 0, 65535, 20), &policy);
+        assert_eq!(edges.len(), 4999);
+        let divider = PaneDivider {
+            area: screen,
+            leading: "a".into(),
+            trailing: "b".into(),
+            horizontal: true,
+            native_length: 65535,
+            screen_length: 1,
+            minimum: -65535,
+            maximum: 65535,
+        };
+        assert_eq!(divider.cells((0, 0), (65535, 0)), 65535);
+        assert_eq!(divider.cells((65535, 0), (0, 0)), -65535);
+    }
+    #[test]
+    fn valid_interface_refresh_preserves_epoch_and_rejects_invalid_timing() {
+        let mut ui = Ui::default();
+        let epoch = ui.theme.epoch;
+        let mut snapshot = Snapshot::default();
+        snapshot.ui_settings.colors = false;
+        snapshot.ui_settings.preview_interval_ms = 700;
+        ui.update(snapshot);
+        assert_eq!(ui.settings.preview_interval_ms, 700);
+        assert!(!ui.theme.color && !ui.theme.backdrop);
+        assert_eq!(ui.theme.epoch, epoch);
+        let mut snapshot = Snapshot {
+            ui_settings: ui.settings.clone(),
+            ..Snapshot::default()
+        };
+        snapshot.ui_settings.preview_interval_ms = 0;
+        snapshot.ui_settings.colors = true;
+        ui.update(snapshot);
+        assert_eq!(ui.settings.preview_interval_ms, 700);
+        assert!(!ui.theme.color);
+    }
+    #[test]
     fn parent_cycles_cannot_trap_selection_or_inventory_refresh() {
         let mut ui = Ui {
             page: WORKSPACES,
@@ -2189,6 +2371,30 @@ pub mod tests {
             0,
             "a partial wide glyph cannot become a cursor"
         );
+    }
+    #[test]
+    fn form_prefill_is_exact_opt_in_and_never_hydrates_secrets_or_partial_text() {
+        use serde_json::json;
+        let query = "\"Decisions\\nwith 界 and \\\"quotes\\\"\"";
+        let dialog = Dialog::from(json!({"mode":"input","input":query,"secret":false}));
+        assert_eq!(dialog.input, query);
+        assert!(
+            Dialog::from(json!({"mode":"input","default":"old default"}))
+                .input
+                .is_empty()
+        );
+        assert!(
+            Dialog::from(json!({"mode":"input","input":"fixture-secret","secret":true}))
+                .input
+                .is_empty()
+        );
+        for text in ["\x1b[31m".into(), "x".repeat(65537)] {
+            assert!(
+                Dialog::from(json!({"mode":"input","input":text}))
+                    .input
+                    .is_empty()
+            );
+        }
     }
     fn fixture() -> Ui {
         let mut ui = Ui {
@@ -2303,6 +2509,64 @@ pub mod tests {
         assert_eq!(ui.selected_row().unwrap().id, "telegram.route");
         let headers: Vec<_> = rows.iter().filter(|r| r.kind == Kind::Header).collect();
         assert_eq!(headers.len(), 2);
+    }
+    #[test]
+    fn exact_command_titles_and_aliases_rank_first_without_changing_activation_indices() {
+        let mut ui = fixture();
+        let mut approximate = ui.snapshot.catalog[0].clone();
+        approximate.id = "approximate".into();
+        approximate.title = "Dashboard and instance discovery".into();
+        approximate.description = "Instance settings and preferred tools".into();
+        let mut exact = approximate.clone();
+        exact.id = "exact".into();
+        exact.title = "Instance settings".into();
+        exact.description = "Portable configuration".into();
+        exact.aliases = vec!["preferred tools".into()];
+        ui.snapshot.catalog = vec![approximate, exact];
+        ui.navigate(COMMANDS);
+        for query in ["  INSTANCE    settings  ", "preferred tools"] {
+            ui.filter = query.into();
+            ui.select(0, true);
+            let row = ui.selected_row().unwrap();
+            assert_eq!(row.id, "exact");
+            assert_eq!(row.source, 1);
+        }
+        ui.filter.clear();
+        assert_eq!(
+            ui.rows()
+                .into_iter()
+                .filter(|r| r.kind == Kind::Entry)
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec!["approximate", "exact"]
+        );
+        let mut approximate = ui.snapshot.sections[3].items[0].clone();
+        approximate.id = "approximate-action".into();
+        approximate.title = "Dashboard and instance discovery".into();
+        approximate.note = "Instance settings and preferred tools".into();
+        let mut exact = approximate.clone();
+        exact.id = "exact-action".into();
+        exact.title = "Instance settings".into();
+        exact.note = "Portable configuration".into();
+        exact.aliases = vec!["preferred tools".into()];
+        ui.snapshot.sections[3].items = vec![approximate, exact];
+        ui.navigate(3);
+        for query in ["instance settings", "preferred tools"] {
+            ui.filter = query.into();
+            ui.select(0, true);
+            let row = ui.selected_row().unwrap();
+            assert_eq!(row.id, "exact-action");
+            assert_eq!(row.source, 1);
+        }
+        ui.filter.clear();
+        assert_eq!(
+            ui.rows()
+                .into_iter()
+                .filter(|r| r.kind == Kind::Action)
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec!["approximate-action", "exact-action"]
+        );
     }
     #[test]
     fn alias_search_finds_canonical_entry_once_with_hint() {
@@ -2928,7 +3192,10 @@ pub mod tests {
             panes: vec![a, b],
         };
         let screen = ratatui::layout::Rect::new(5, 3, 100, 20);
-        let edges = layout.dividers(screen);
+        let edges = layout.dividers(
+            screen,
+            &daedalus_tui::core::geometry::ResizePolicy::default(),
+        );
         assert_eq!(edges.len(), 1);
         let edge = &edges[0];
         assert!(edge.horizontal);
@@ -2945,7 +3212,10 @@ pub mod tests {
         layout.panes[1].y = 10;
         layout.panes[1].w = 100;
         layout.panes[1].h = 10;
-        let edges = layout.dividers(screen);
+        let edges = layout.dividers(
+            screen,
+            &daedalus_tui::core::geometry::ResizePolicy::default(),
+        );
         assert_eq!(edges.len(), 1);
         assert!(!edges[0].horizontal);
         assert_eq!(
@@ -2954,7 +3224,14 @@ pub mod tests {
             "retain at least three rows in the neighbor"
         );
         layout.zoomed = true;
-        assert!(layout.dividers(screen).is_empty());
+        assert!(
+            layout
+                .dividers(
+                    screen,
+                    &daedalus_tui::core::geometry::ResizePolicy::default()
+                )
+                .is_empty()
+        );
     }
     #[test]
     fn wall_working_filter_and_order_use_state_and_reject_invalid_recency() {
