@@ -506,6 +506,42 @@ mod parent_metadata_tests {
             .as_deref(),
             Some("actual-child")
         );
+        let case_file = root.join("case-parent.jsonl");
+        layouts::write_private(
+            &case_file,
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"session","version":3,"id":"OwnedParent","cwd":root})
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let case_argv = ["pi".into(), "--fork".into(), "case-parent.jsonl".into()];
+        let case_parent = fork_parent(&case_argv, &root).unwrap().unwrap();
+        assert_eq!(
+            crate::core::checkpoints::resolve_sid_with_pi_parent(
+                &case_argv,
+                "pi",
+                "ownedparent",
+                Some(&case_parent.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("ownedparent")
+        );
+        let mut creation = case_argv.to_vec();
+        creation.extend(["--session-id".into(), "ownedparent".into()]);
+        assert_eq!(
+            crate::core::checkpoints::resolve_sid_with_pi_parent(
+                &creation,
+                "pi",
+                "",
+                Some(&case_parent.id)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("ownedparent")
+        );
         layouts::write_private(&file, raw.as_bytes()).unwrap();
         assert!(parent.verify().is_err());
         layouts::write_private(

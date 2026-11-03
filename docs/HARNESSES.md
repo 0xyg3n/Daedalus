@@ -51,7 +51,7 @@ OpenCode1.19.5 help, plus their
 live-provider behavior or every CLI spelling.
 
 Pi1.1.0, Hermes0.20.0 and Cursor2026.10.22 selectors are also checked against
-installed help and their native references. Pi's `--resume`/`-r` opens a picker;
+installed help and their native references. Pi IDs retain their native case. Pi's `--resume`/`-r` opens a picker;
 `--session` selects a path/ID and `--session-id` is an exact creation ID.
 A Pi `--fork` parent is never reported as its child. A known distinct creation
 ID can identify the child. Checkpoint capture verifies an explicitly selected

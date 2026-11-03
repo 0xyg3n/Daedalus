@@ -503,11 +503,11 @@ pub fn resolve_sid_with_pi_parent(
             let Some(parent) = selected else {
                 return Ok(None);
             };
-            if created.is_some_and(|child| child.eq_ignore_ascii_case(parent)) {
+            if created.is_some_and(|child| child == parent) {
                 return Err("Fork child ID must differ from its parent".into());
             }
             return Ok(if !reported.is_empty() {
-                (!parent.eq_ignore_ascii_case(reported)).then(|| reported.to_owned())
+                (parent != reported).then(|| reported.to_owned())
             } else {
                 created.map(str::to_owned)
             });
