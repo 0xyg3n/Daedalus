@@ -69,7 +69,7 @@ jobs:
           }
           & $nsis "/DPRODUCT_VERSION=$version" "/DBINARY=$pwd/dist/daedalus-$version-x86_64-windows.exe" "/DOUTPUT=$pwd/dist/Daedalus-$version-setup.exe" "/DICON=$pwd/assets/daedalus.ico" scripts/windows-installer.nsi
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-          Get-ChildItem dist -File | ForEach-Object {
+          @(Get-ChildItem dist -File -Filter '*.exe') | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             [IO.File]::WriteAllText($_.FullName + '.sha256', "$hash  $($_.Name)`n", [Text.UTF8Encoding]::new($false))
           }
