@@ -1191,21 +1191,19 @@ impl NativeOperations {
     fn registration(&self, target: &Target, require_goal: bool) -> Result<std::path::PathBuf> {
         let directory = self.directory.join("hooks");
         let mut found = Vec::new();
-        for (index, entry) in std::fs::read_dir(directory)
-            .map_err(|_| "No hook registrations for this instance")?
-            .enumerate()
+        let mut guard =
+            crate::core::native_metadata::Guard::new(self.config.runtime.native_metadata_policy())?;
+        for entry in
+            std::fs::read_dir(directory).map_err(|_| "No hook registrations for this instance")?
         {
-            if index >= 1024 {
-                return Err("Hook registration limit exceeded".into());
-            }
+            guard.entries(1)?;
             let path = entry
                 .map_err(|_| "Cannot inspect hook registrations")?
                 .path();
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            let registration = super::hook_runtime::inspect(&path)
-                .map_err(|_| "Hook registration is invalid; inspect local diagnostics")?;
+            let registration = super::hook_runtime::inspect_metadata(&path, &mut guard)?;
             if registration.scope.instance == self.instance
                 && registration.scope.terminal == target.terminal
                 && Some(&registration.scope.conversation) == target.conversation.as_ref()
@@ -1215,6 +1213,7 @@ impl NativeOperations {
                 found.push(path);
             }
         }
+        guard.check()?;
         if found.len() != 1 {
             return Err("Observation requires exactly one registered conversation binding".into());
         }
@@ -1732,6 +1731,74 @@ impl NativeOperations {
                 Err("Route actions must use the registry transaction".into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_lookup_tests {
+    use super::*;
+    #[test]
+    fn saved_lookup_policy_counts_ignored_entries_and_never_selects_partial_or_ambiguous_scope() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "dd-native-binding-{:x}",
+            u128::from_le_bytes(nonce)
+        )));
+        crate::core::layouts::write_private(&fixture.0.join("marker"), b"").unwrap();
+        let config = super::super::config::ControlConfig::fresh(&fixture.0).unwrap();
+        let mut registration: super::super::hook_runtime::Registration = serde_json::from_value(serde_json::json!({"version":1,"id":"fixture","directory":fixture.0,"scope":{"instance":config.agent_name,"terminal":{"backend":"herdr","endpoint":"example","pane":"pane","generation":"generation"},"harness":"claude","conversation":"session"},"events":["Stop"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000})).unwrap();
+        let path = super::super::hook_runtime::install(&registration).unwrap();
+        let target = Target {
+            terminal: registration.scope.terminal.clone(),
+            conversation: Some("session".into()),
+        };
+        let mut operations = NativeOperations {
+            instance: config.agent_name.clone(),
+            directory: fixture.0.clone(),
+            config,
+            terminals: Default::default(),
+            environment: Default::default(),
+        };
+        assert_eq!(operations.registration(&target, false).unwrap(), path);
+        operations.config.runtime.native_metadata_value_limit = 16;
+        assert!(
+            operations
+                .registration(&target, false)
+                .unwrap_err()
+                .contains("native_metadata_value_limit")
+        );
+        operations.config.runtime.native_metadata_value_limit = 262144;
+        let ignored = fixture.0.join("hooks/ignored");
+        std::fs::write(&ignored, b"").unwrap();
+        operations.config.runtime.native_metadata_entry_limit = 1;
+        assert!(
+            operations
+                .registration(&target, false)
+                .unwrap_err()
+                .contains("native_metadata_entry_limit")
+        );
+        operations.config.runtime.native_metadata_entry_limit = 16384;
+        std::fs::remove_file(ignored).unwrap();
+        registration.id = "duplicate".into();
+        super::super::hook_runtime::install(&registration).unwrap();
+        assert!(
+            operations
+                .registration(&target, false)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        let foreign = Target {
+            conversation: Some("other-session".into()),
+            ..target
+        };
+        assert!(operations.registration(&foreign, false).is_err());
     }
 }
 

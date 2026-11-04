@@ -114,6 +114,8 @@ Linux and Windows have automated tests and native terminal checks. See
 [installation](INSTALL.md#native-windows-install) for setup and
 [testing](ARCHITECTURE.md#testing) for the contributor workflow.
 
+OpenCode local-server enrollment and saved-binding reconnect share the native identity metadata policy in **Terminals and discovery**. Linux reads child lists, command arguments and process stability metadata through bounded streams; exhausted process, scan, entry, byte or time budgets refuse enrollment. Reconnect and Telegram registration lookup count ignored files and parse registration JSON within the cumulative budget. A partial or ambiguous scan cannot choose a server or conversation. Windows subtree process admission is cumulative across repeated scans.
+
 ## Upstream references
 
 - [Claude Code hooks](https://code.claude.com/docs/en/hooks)

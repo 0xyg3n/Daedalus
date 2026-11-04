@@ -191,8 +191,8 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `native_metadata_value_limit` | 262144 | 16–16777216; cumulative strict JSON values and keys |
 | `native_metadata_header_limit_bytes` | 16384 | 128–1048576; Pi header only, through its newline |
 | `native_metadata_timeout_ms` | 2000 | 1–60000; cooperative native metadata deadline |
-| `native_metadata_process_limit` | 128 | 1–65536; Windows subtree candidates including root |
-| `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows subtree snapshot entries |
+| `native_metadata_process_limit` | 128 | 1–65536; cumulative Windows subtree and Linux OpenCode candidates including roots |
+| `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows snapshots or Linux OpenCode child PID entries |
 | `native_metadata_depth_limit` | 32 | 1–256; Windows subtree ancestry depth |
 | `native_command_argument_limit_bytes` | 2048 | 1–65536; reviewed native command argument bytes, including `/cc` syntax |
 | `native_command_model_limit_bytes` | 128 | 1–4096; model ID bytes, also bounded by the argument limit |
@@ -679,7 +679,7 @@ Cube resizing: drag the front face's right/bottom edges, or use `<` / `>` for
 width and `+` / `-` for height. While attached, prefix the resize key with
 `Ctrl+]`. Double-click an edge to reset it; proportions persist in local layouts.
 
-Native identity metadata uses one cumulative policy per Pi/Hermes operation, including stability rechecks. Duplicate JSON keys, ambiguous matches, exhausted budgets and expired observations are refused. Pi reads only its first header line. Windows subtree discovery and display labels use the saved process, snapshot and depth limits. These cooperative deadlines do not preempt blocking operating-system calls. Native slash-command verification uses the saved probe timeout and output limit; audited command-version support remains explicit.
+Native identity metadata uses one cumulative policy per Pi/Hermes operation, including stability rechecks. OpenCode direct-child discovery and saved-binding reconnect share one policy; Linux process streams obey the saved file/work limits and all child candidates count toward the process/scan limits. Hook-binding lookup for reconnect and Telegram uses the saved cumulative entry, file, work, JSON-value and deadline limits, counting ignored directory entries. It never accepts a match from an incomplete scan. Hook registrations also retain their 64 KiB protocol ceiling and private ownership/location checks. Duplicate JSON keys, ambiguous matches, exhausted budgets and expired observations are refused. Pi reads only its first header line. Windows subtree discovery and display labels use the saved process, snapshot and depth limits. These cooperative deadlines do not preempt blocking operating-system calls. Native slash-command verification uses the saved probe timeout and output limit; audited command-version support remains explicit.
 
 Native command confirmations show the observed audited version, verified conversation, impact flags and review fingerprint before the command preview. Telegram stores this exact review and rechecks native executable identity, version, configuration, scope and idle observation when the one-use button is pressed. Older native confirmations without that review are refused; request a new one. Submission remains distinct from completion.
 

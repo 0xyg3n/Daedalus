@@ -523,7 +523,37 @@ pub fn inspect(path: &Path) -> Result<Registration> {
     if bytes.len() > 64 * 1024 {
         return Err(Error::Invalid("Hook registration exceeds size limit"));
     }
-    let registration: Registration = serde_json::from_slice(&bytes)
+    registration_from_bytes(path, &bytes)
+}
+/// Discovery uses the caller's cumulative metadata admission in addition to the
+/// registration protocol's fixed 64 KiB ceiling and existing ownership checks.
+pub(crate) fn inspect_metadata(
+    path: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<Registration, String> {
+    let bytes = guard
+        .read_with(path, |path, limit| {
+            let file = private_file(path).map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            file.take(limit.min(64 * 1024) + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "Cannot read hook registration")?;
+            if bytes.len() as u64 > limit {
+                return Err("State file exceeds size limit".into());
+            }
+            if bytes.len() > 64 * 1024 {
+                return Err("Hook registration exceeds size limit".into());
+            }
+            Ok(Some(bytes))
+        })?
+        .ok_or("Hook registration disappeared")?;
+    guard.json(&bytes)?;
+    let registration = registration_from_bytes(path, &bytes).map_err(|e| e.to_string())?;
+    guard.check()?;
+    Ok(registration)
+}
+fn registration_from_bytes(path: &Path, bytes: &[u8]) -> Result<Registration> {
+    let registration: Registration = serde_json::from_slice(bytes)
         .map_err(|_| Error::Invalid("Invalid hook registration JSON"))?;
     registration.validate()?;
     private_directory(&registration.directory)?;
@@ -535,6 +565,92 @@ pub fn inspect(path: &Path) -> Result<Registration> {
     }
     active_directory(&registration.directory)?;
     Ok(registration)
+}
+#[cfg(test)]
+mod metadata_inspection_tests {
+    use super::*;
+    use crate::core::native_metadata::{Guard, Policy};
+    #[test]
+    fn discovery_inspection_preserves_binding_checks_and_cumulative_admission() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "dd-registration-metadata-{:x}",
+            u128::from_le_bytes(nonce)
+        )));
+        layouts::write_private(&fixture.0.join("marker"), b"").unwrap();
+        let registration: Registration = serde_json::from_value(json!({"version":1,"id":"fixture","directory":fixture.0,"scope":{"instance":"example","terminal":{"backend":"herdr","endpoint":"example","pane":"pane","generation":"generation"},"harness":"claude","conversation":"session"},"events":["Stop"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000})).unwrap();
+        let path = install(&registration).unwrap();
+        assert_eq!(
+            inspect_metadata(&path, &mut Guard::new(Default::default()).unwrap())
+                .unwrap()
+                .scope,
+            registration.scope
+        );
+        let mut guard = Guard::new(Policy {
+            values: 16,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            inspect_metadata(&path, &mut guard)
+                .unwrap_err()
+                .contains("native_metadata_value_limit")
+        );
+        let mut guard = Guard::new(Policy {
+            work_bytes: 1024,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut admitted = 0;
+        loop {
+            match inspect_metadata(&path, &mut guard) {
+                Ok(_) => {
+                    admitted += 1;
+                    assert!(admitted < 32);
+                }
+                Err(error) => {
+                    assert!(error.contains("native_metadata_work_limit_bytes"));
+                    break;
+                }
+            }
+        }
+        assert!(admitted > 0);
+        let original = fs::read(&path).unwrap();
+        let wrong = path.with_file_name("wrong.json");
+        layouts::write_private(&wrong, &original).unwrap();
+        assert!(inspect_metadata(&wrong, &mut Guard::new(Default::default()).unwrap()).is_err());
+        let mut oversized = original.clone();
+        oversized.resize(1025, b' ');
+        layouts::write_private(&path, &oversized).unwrap();
+        assert!(
+            inspect_metadata(
+                &path,
+                &mut Guard::new(Policy {
+                    file_bytes: 1024,
+                    ..Default::default()
+                })
+                .unwrap()
+            )
+            .unwrap_err()
+            .contains("native_metadata_file_limit_bytes")
+        );
+        let duplicate = format!(
+            "{{\"version\":1,{}",
+            std::str::from_utf8(&original)
+                .unwrap()
+                .strip_prefix('{')
+                .unwrap()
+        );
+        layouts::write_private(&path, duplicate.as_bytes()).unwrap();
+        assert!(inspect_metadata(&path, &mut Guard::new(Default::default()).unwrap()).is_err());
+    }
 }
 /// A proved Codex binding may refresh process incarnations and the generation
 /// of its already registered pane. It never retargets routes or copies grants.
@@ -4514,7 +4630,7 @@ pub fn capture_server_emitter(
     Ok(pin)
 }
 #[cfg(unix)]
-pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+fn verify_server_image(server: &ServerEmitter, proc_root: &Path) -> Result<PathBuf> {
     if server.process.pid == 0 || server.process.start_ticks == 0 {
         return Err(Error::Identity);
     }
@@ -4552,6 +4668,11 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     if live.dev() != server.device || live.ino() != server.inode {
         return Err(Error::Identity);
     }
+    Ok(process_dir)
+}
+#[cfg(unix)]
+pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    let process_dir = verify_server_image(server, proc_root)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -4564,7 +4685,11 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     if bytes.len() > 8192 {
         return Err(Error::Identity);
     }
-    let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
+    verify_server_stat(server, &bytes)
+}
+#[cfg(unix)]
+fn verify_server_stat(server: &ServerEmitter, bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
         .rsplit_once(')')
         .ok_or(Error::Identity)?
@@ -4579,6 +4704,36 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
         return Err(Error::Identity);
     }
     Ok(())
+}
+#[cfg(unix)]
+pub(crate) fn verify_server_metadata(
+    server: &ServerEmitter,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<(), String> {
+    guard.check()?;
+    let directory = verify_server_image(server, proc_root).map_err(|e| e.to_string())?;
+    let bytes = guard.process_file(&directory.join("stat"))?;
+    verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
+    guard.check()
+}
+#[cfg(unix)]
+pub(crate) fn capture_server_metadata(
+    process: ProcessIdentity,
+    executable: &Path,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<ServerEmitter, String> {
+    guard.check()?;
+    let metadata = fs::metadata(executable).map_err(|_| "Server executable disappeared")?;
+    let server = ServerEmitter {
+        process,
+        executable: executable.into(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    verify_server_metadata(&server, proc_root, guard)?;
+    Ok(server)
 }
 #[cfg(windows)]
 pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
@@ -4625,7 +4780,11 @@ pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()>
     if bytes.len() > 8192 {
         return Err(Error::Identity);
     }
-    let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
+    verify_process_stat(process, &bytes)
+}
+#[cfg(unix)]
+fn verify_process_stat(process: &ProcessIdentity, bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
         .rsplit_once(')')
         .ok_or(Error::Identity)?
@@ -4646,6 +4805,20 @@ pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()>
         return Err(Error::Identity);
     }
     Ok(())
+}
+#[cfg(unix)]
+pub(crate) fn verify_process_metadata(
+    process: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<(), String> {
+    guard.check()?;
+    if process.pid == 0 || process.start_ticks == 0 {
+        return Err(Error::Identity.to_string());
+    }
+    let bytes = guard.process_file(&proc_root.join(process.pid.to_string()).join("stat"))?;
+    verify_process_stat(process, &bytes).map_err(|e| e.to_string())?;
+    guard.check()
 }
 #[cfg(windows)]
 #[allow(unused_variables)]

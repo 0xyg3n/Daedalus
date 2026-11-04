@@ -693,6 +693,7 @@ fn descendant_processes_guarded(
     let root_parent = *parents
         .get(&root_pid)
         .ok_or_else(|| io::Error::other("Root process unavailable"))?;
+    guard.processes(1).map_err(io::Error::other)?;
     let root = observe(root_pid, Some(root_parent))?;
     if root.owner != current_identity()? {
         return Err(denied("Foreign process tree"));
@@ -710,11 +711,7 @@ fn descendant_processes_guarded(
         guard.check().map_err(io::Error::other)?;
         for &pid in children.get(&parent.pid).into_iter().flatten() {
             guard.entries(1).map_err(io::Error::other)?;
-            if seen.len() as u64 >= guard.policy.processes {
-                return Err(io::Error::other(
-                    "Native metadata subtree limit reached; review native_metadata_process_limit",
-                ));
-            }
+            guard.processes(1).map_err(io::Error::other)?;
             if depth as u64 >= guard.policy.depth {
                 return Err(io::Error::other(
                     "Native metadata ancestry limit reached; review native_metadata_depth_limit",

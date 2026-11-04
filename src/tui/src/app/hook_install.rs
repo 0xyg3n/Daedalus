@@ -334,20 +334,17 @@ pub fn preview_live(
             .map_err(|_| "Invalid foreground generation")?,
     };
     let server_emitter = if harness == Harness::Opencode {
+        let mut metadata =
+            crate::core::native_metadata::Guard::new(config.runtime.native_metadata_policy())?;
         Some(
-            match local_opencode_server_budgeted(
-                &process,
-                &terminals.proc_root,
-                &mut crate::core::native_metadata::Guard::new(
-                    config.runtime.native_metadata_policy(),
-                )?,
-            ) {
+            match local_opencode_server_budgeted(&process, &terminals.proc_root, &mut metadata) {
                 Ok(server) => server,
-                Err(error) if error == NO_LOCAL_SERVER => reconnect_opencode_server(
+                Err(error) if error == NO_LOCAL_SERVER => reconnect_opencode_server_budgeted(
                     &request.directory,
                     &crate::adapters::terminals::identity(&frozen)?,
                     &process,
                     &terminals.proc_root,
+                    &mut metadata,
                 )?,
                 Err(error) => return Err(error),
             },
@@ -392,7 +389,7 @@ pub fn preview_live(
 // A shared/remote server cannot be inferred from a terminal label. Guided
 // enrollment supports one native local server directly owned by the selected UI.
 // The review pins both process incarnations and the executable's file identity.
-#[cfg(all(test, windows))]
+#[cfg(test)]
 fn local_opencode_server(
     ui: &ProcessIdentity,
     proc_root: &Path,
@@ -404,17 +401,6 @@ fn local_opencode_server(
             crate::core::native_metadata::Policy::default(),
         )?,
     )
-}
-#[cfg(unix)]
-fn local_opencode_server_budgeted(
-    ui: &ProcessIdentity,
-    proc_root: &Path,
-    guard: &mut crate::core::native_metadata::Guard<'_>,
-) -> Result<hook_runtime::ServerEmitter> {
-    guard.check()?;
-    let result = local_opencode_server(ui, proc_root)?;
-    guard.check()?;
-    Ok(result)
 }
 #[cfg(windows)]
 fn local_opencode_server_budgeted(
@@ -461,34 +447,37 @@ fn local_opencode_server_budgeted(
 }
 
 #[cfg(unix)]
-fn local_opencode_server(
+fn local_opencode_server_budgeted(
     ui: &ProcessIdentity,
     proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
 ) -> Result<hook_runtime::ServerEmitter> {
-    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    guard.processes(1)?;
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
     let ui_dir = proc_root.join(ui.pid.to_string());
     let executable =
         fs::canonicalize(ui_dir.join("exe")).map_err(|_| "OpenCode UI executable disappeared")?;
-    let children = fs::read_to_string(ui_dir.join(format!("task/{}/children", ui.pid)))
-        .map_err(|_| "Cannot discover the local OpenCode server")?;
+    let children = guard.process_file(&ui_dir.join(format!("task/{}/children", ui.pid)))?;
+    let children = std::str::from_utf8(&children).map_err(|_| "Invalid OpenCode child PIDs")?;
     let mut servers = Vec::new();
-    let children: Vec<_> = children.split_whitespace().collect();
-    if children.len() > 128 {
-        return Err("OpenCode server process tree exceeds limit".into());
-    }
-    for pid in children {
-        let Ok(pid) = pid.parse::<u32>() else {
-            return Err("Invalid OpenCode child PID".into());
-        };
+    let mut seen = std::collections::BTreeSet::from([ui.pid]);
+    for word in children.split_whitespace() {
+        guard.snapshot_entries(1)?;
+        guard.processes(1)?;
+        let pid = word
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or("Invalid OpenCode child PID")?;
+        if !seen.insert(pid) {
+            return Err("OpenCode child process list is ambiguous".into());
+        }
         let directory = proc_root.join(pid.to_string());
         if fs::canonicalize(directory.join("exe")).ok().as_ref() != Some(&executable) {
             continue;
         }
-        let argv =
-            fs::read(directory.join("cmdline")).map_err(|_| "OpenCode server disappeared")?;
-        if argv.len() > 65536 {
-            return Err("OpenCode server arguments exceed limit".into());
-        }
+        let argv = guard.process_file(&directory.join("cmdline"))?;
         let args: Vec<_> = argv.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
         if !args
             .windows(2)
@@ -496,33 +485,35 @@ fn local_opencode_server(
         {
             continue;
         }
-        let stat = fs::read_to_string(directory.join("stat"))
-            .map_err(|_| "OpenCode server disappeared")?;
-        if stat.len() > 8192
-            || stat
-                .rsplit_once(')')
-                .and_then(|(_, tail)| tail.split_whitespace().nth(1))
-                .and_then(|p| p.parse::<u32>().ok())
-                != Some(ui.pid)
-        {
+        let stat = guard.process_file(&directory.join("stat"))?;
+        let stat = std::str::from_utf8(&stat).map_err(|_| "Invalid OpenCode server metadata")?;
+        let fields: Vec<_> = stat
+            .rsplit_once(')')
+            .ok_or("Invalid OpenCode server metadata")?
+            .1
+            .split_whitespace()
+            .collect();
+        if fields.get(1).and_then(|p| p.parse::<u32>().ok()) != Some(ui.pid) {
             return Err("OpenCode server ancestry changed during discovery".into());
         }
-        let start = crate::adapters::terminals::process_start(proc_root, &pid.to_string())
+        let start = fields
+            .get(19)
             .and_then(|s| s.parse().ok())
             .ok_or("OpenCode server generation unavailable")?;
-        servers.push(
-            hook_runtime::capture_server_emitter(
-                ProcessIdentity {
-                    pid,
-                    start_ticks: start,
-                },
-                &executable,
-                proc_root,
-            )
-            .map_err(|e| e.to_string())?,
-        );
+        guard.check()?;
+        servers.push(hook_runtime::capture_server_metadata(
+            ProcessIdentity {
+                pid,
+                start_ticks: start,
+            },
+            &executable,
+            proc_root,
+            guard,
+        )?);
+        guard.check()?;
     }
-    hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
     select_local_server(servers)
 }
 fn select_local_server(
@@ -541,12 +532,32 @@ const NO_LOCAL_SERVER: &str = "No directly owned OpenCode server was found. Open
 /// A background server can outlive the UI that first started it. Reconnect only
 /// a previously reviewed emitter for this exact terminal generation, never an
 /// arbitrary process with the same executable name or the latest saved session.
+#[cfg(all(test, unix))]
 fn reconnect_opencode_server(
     directory: &Path,
     terminal: &TerminalId,
     ui: &ProcessIdentity,
     proc_root: &Path,
 ) -> Result<hook_runtime::ServerEmitter> {
+    reconnect_opencode_server_budgeted(
+        directory,
+        terminal,
+        ui,
+        proc_root,
+        &mut crate::core::native_metadata::Guard::new(Default::default())?,
+    )
+}
+fn reconnect_opencode_server_budgeted(
+    directory: &Path,
+    terminal: &TerminalId,
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    guard.processes(1)?;
+    #[cfg(unix)]
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    #[cfg(windows)]
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     let executable = crate::platform::process_identity(ui.pid)
@@ -557,17 +568,15 @@ fn reconnect_opencode_server(
         .map_err(|_| "OpenCode UI disappeared")?;
     let entries = fs::read_dir(directory.join("hooks")).map_err(|_| NO_LOCAL_SERVER)?;
     let mut servers = Vec::new();
-    for (index, entry) in entries.enumerate() {
-        if index >= 4096 {
-            return Err("Hook registration limit exceeded".into());
-        }
+    for entry in entries {
+        guard.entries(1)?;
         let path = entry
             .map_err(|_| "Cannot inspect saved hook binding")?
             .path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let r = hook_runtime::inspect(&path).map_err(|e| e.to_string())?;
+        let r = hook_runtime::inspect_metadata(&path, guard)?;
         if r.directory != directory
             || r.scope.harness != Harness::Opencode
             || &r.scope.terminal != terminal
@@ -577,7 +586,16 @@ fn reconnect_opencode_server(
         let Some(server) = r.server_emitter else {
             continue;
         };
-        if hook_runtime::verify_server_emitter(&server, proc_root).is_err() {
+        guard.processes(1)?;
+        guard.check()?;
+        #[cfg(unix)]
+        let verified = hook_runtime::verify_server_metadata(&server, proc_root, guard);
+        #[cfg(windows)]
+        let verified =
+            hook_runtime::verify_server_emitter(&server, proc_root).map_err(|e| e.to_string());
+        // An exhausted scan must never become a partial successful match.
+        guard.check()?;
+        if verified.is_err() {
             continue;
         }
         // Pin the current UI to the very same native executable as the emitter.
@@ -593,7 +611,11 @@ fn reconnect_opencode_server(
             servers.push(server);
         }
     }
+    #[cfg(unix)]
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    #[cfg(windows)]
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    guard.check()?;
     select_local_server(servers)
 }
 
@@ -1539,6 +1561,63 @@ mod tests {
         .unwrap();
         fs::write(proc.join("43/cmdline"), b"opencode\0serve\0--service\0").unwrap();
         let server = local_opencode_server(&f.request.process, proc).unwrap();
+        let mut limited =
+            crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
+                processes: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            local_opencode_server_budgeted(&f.request.process, proc, &mut limited)
+                .is_err_and(|error| error.contains("native_metadata_process_limit")),
+            "OpenCode discovery ignored the saved native process limit"
+        );
+        let limited = |policy| {
+            local_opencode_server_budgeted(
+                &f.request.process,
+                proc,
+                &mut crate::core::native_metadata::Guard::new(policy).unwrap(),
+            )
+            .unwrap_err()
+        };
+        assert!(
+            limited(crate::core::native_metadata::Policy {
+                entries: 1,
+                ..Default::default()
+            })
+            .contains("native_metadata_entry_limit")
+        );
+        fs::write(proc.join("42/task/42/children"), b"43 44").unwrap();
+        assert!(
+            limited(crate::core::native_metadata::Policy {
+                snapshot_entries: 1,
+                ..Default::default()
+            })
+            .contains("native_metadata_process_scan_limit")
+        );
+        fs::write(proc.join("42/task/42/children"), b"43 43").unwrap();
+        assert!(limited(Default::default()).contains("ambiguous"));
+        fs::write(proc.join("42/task/42/children"), b"43").unwrap();
+        let mut args = b"opencode\0serve\0--service\0".to_vec();
+        args.resize(1020, b'x');
+        fs::write(proc.join("43/cmdline"), &args).unwrap();
+        assert!(
+            limited(crate::core::native_metadata::Policy {
+                work_bytes: 1024,
+                ..Default::default()
+            })
+            .contains("native_metadata_work_limit_bytes")
+        );
+        args.resize(1025, b'x');
+        fs::write(proc.join("43/cmdline"), &args).unwrap();
+        assert!(
+            limited(crate::core::native_metadata::Policy {
+                file_bytes: 1024,
+                ..Default::default()
+            })
+            .contains("native_metadata_file_limit_bytes")
+        );
+        fs::write(proc.join("43/cmdline"), b"opencode\0serve\0--service\0").unwrap();
         assert_eq!(
             server.process,
             ProcessIdentity {
@@ -1573,6 +1652,84 @@ mod tests {
             reconnect_opencode_server(&f.dir, &registration.scope.terminal, &next_ui, proc)
                 .unwrap();
         assert_eq!(rebound_server, server);
+        let mut metadata =
+            crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
+                entries: 3,
+                ..Default::default()
+            })
+            .unwrap();
+        // Direct discovery consumes this operation's entry allowance; fallback
+        // must not reset it and accept an incomplete saved-binding scan.
+        assert_eq!(
+            local_opencode_server_budgeted(&next_ui, proc, &mut metadata).unwrap_err(),
+            NO_LOCAL_SERVER
+        );
+        assert!(
+            reconnect_opencode_server_budgeted(
+                &f.dir,
+                &registration.scope.terminal,
+                &next_ui,
+                proc,
+                &mut metadata
+            )
+            .unwrap_err()
+            .contains("native_metadata_entry_limit")
+        );
+        let ignored = f.dir.join("hooks/ignored");
+        fs::write(&ignored, b"").unwrap();
+        assert!(
+            reconnect_opencode_server_budgeted(
+                &f.dir,
+                &registration.scope.terminal,
+                &next_ui,
+                proc,
+                &mut crate::core::native_metadata::Guard::new(
+                    crate::core::native_metadata::Policy {
+                        entries: 1,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+            )
+            .unwrap_err()
+            .contains("native_metadata_entry_limit")
+        );
+        fs::remove_file(ignored).unwrap();
+        assert!(
+            reconnect_opencode_server_budgeted(
+                &f.dir,
+                &registration.scope.terminal,
+                &next_ui,
+                proc,
+                &mut crate::core::native_metadata::Guard::new(
+                    crate::core::native_metadata::Policy {
+                        values: 16,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+            )
+            .unwrap_err()
+            .contains("native_metadata_value_limit")
+        );
+
+        assert!(
+            reconnect_opencode_server_budgeted(
+                &f.dir,
+                &registration.scope.terminal,
+                &next_ui,
+                proc,
+                &mut crate::core::native_metadata::Guard::new(
+                    crate::core::native_metadata::Policy {
+                        processes: 1,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+            )
+            .unwrap_err()
+            .contains("native_metadata_process_limit")
+        );
         let mut foreign = registration.scope.terminal.clone();
         foreign.generation = "different".into();
         assert!(reconnect_opencode_server(&f.dir, &foreign, &next_ui, proc).is_err());

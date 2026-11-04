@@ -56,8 +56,8 @@ pub struct Guard<'a> {
     work: u64,
     entries: u64,
     values: u64,
-    #[cfg(windows)]
     snapshots: u64,
+    processes: u64,
     failure: Option<String>,
     progress: Option<&'a dyn Fn() -> Result<()>>,
 }
@@ -73,8 +73,8 @@ impl<'a> Guard<'a> {
             work: policy.work_bytes,
             entries: policy.entries,
             values: policy.values,
-            #[cfg(windows)]
             snapshots: policy.snapshot_entries,
+            processes: policy.processes,
             failure: None,
             progress: None,
         })
@@ -121,7 +121,6 @@ impl<'a> Guard<'a> {
         self.check()?;
         Ok((self.snapshots as usize, self.deadline))
     }
-    #[cfg(windows)]
     pub fn snapshot_entries(&mut self, count: usize) -> Result<()> {
         self.check()?;
         match self.snapshots.checked_sub(count as u64) {
@@ -130,6 +129,58 @@ impl<'a> Guard<'a> {
                 Ok(())
             }
             None => self.fail("native_metadata_process_scan_limit"),
+        }
+    }
+    pub fn processes(&mut self, count: usize) -> Result<()> {
+        self.check()?;
+        match self.processes.checked_sub(count as u64) {
+            Some(left) => {
+                self.processes = left;
+                Ok(())
+            }
+            None => self.fail("native_metadata_process_limit"),
+        }
+    }
+    /// Procfs files report zero length. Bound the actual stream, refuse special
+    /// files/symlinks and charge each chunk before inspecting more metadata.
+    #[cfg(unix)]
+    pub fn process_file(&mut self, path: &Path) -> Result<Vec<u8>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.entries(1)?;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(|_| "Cannot open native process metadata")?;
+        if !file
+            .metadata()
+            .map_err(|_| "Cannot inspect native process metadata")?
+            .is_file()
+        {
+            return Err("Native process metadata must be a regular file".into());
+        }
+        let cap = self.policy.file_bytes.min(self.work);
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            self.check()?;
+            let count = ((cap - bytes.len() as u64 + 1).min(buffer.len() as u64)) as usize;
+            let read = file
+                .read(&mut buffer[..count])
+                .map_err(|_| "Cannot read native process metadata")?;
+            if read == 0 {
+                self.check()?;
+                return Ok(bytes);
+            }
+            if bytes.len() as u64 + read as u64 > cap {
+                return self.fail(if cap < self.policy.file_bytes {
+                    "native_metadata_work_limit_bytes"
+                } else {
+                    "native_metadata_file_limit_bytes"
+                });
+            }
+            self.work -= read as u64;
+            bytes.extend_from_slice(&buffer[..read]);
         }
     }
     pub fn json(&mut self, bytes: &[u8]) -> Result<()> {
@@ -219,6 +270,129 @@ impl<'a> Guard<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_and_snapshot_admission_is_cumulative_and_failure_is_sticky() {
+        let mut guard = Guard::new(Policy {
+            processes: 2,
+            snapshot_entries: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        guard.processes(1).unwrap();
+        guard.processes(1).unwrap();
+        assert!(
+            guard
+                .processes(1)
+                .unwrap_err()
+                .contains("native_metadata_process_limit")
+        );
+        assert!(
+            guard
+                .snapshot_entries(0)
+                .unwrap_err()
+                .contains("native_metadata_process_limit")
+        );
+        let mut guard = Guard::new(Policy {
+            snapshot_entries: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        guard.snapshot_entries(1).unwrap();
+        guard.snapshot_entries(1).unwrap();
+        assert!(
+            guard
+                .snapshot_entries(1)
+                .unwrap_err()
+                .contains("native_metadata_process_scan_limit")
+        );
+        assert!(
+            guard
+                .processes(0)
+                .unwrap_err()
+                .contains("native_metadata_process_scan_limit")
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn process_streams_obey_cumulative_file_work_entry_limits_and_refuse_special_files() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "dd-process-metadata-{:x}",
+            u128::from_le_bytes(nonce)
+        )));
+        std::fs::create_dir(&fixture.0).unwrap();
+        let path = fixture.0.join("metadata");
+        std::fs::write(&path, vec![b'x'; 600]).unwrap();
+        let mut guard = Guard::new(Policy {
+            work_bytes: 1024,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(guard.process_file(&path).unwrap().len(), 600);
+        assert!(
+            guard
+                .process_file(&path)
+                .unwrap_err()
+                .contains("native_metadata_work_limit_bytes")
+        );
+        let mut guard = Guard::new(Policy {
+            entries: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        guard.process_file(&path).unwrap();
+        assert!(
+            guard
+                .process_file(&path)
+                .unwrap_err()
+                .contains("native_metadata_entry_limit")
+        );
+        std::fs::write(&path, vec![b'x'; 1025]).unwrap();
+        assert!(
+            Guard::new(Policy {
+                file_bytes: 1024,
+                ..Default::default()
+            })
+            .unwrap()
+            .process_file(&path)
+            .unwrap_err()
+            .contains("native_metadata_file_limit_bytes")
+        );
+        let alias = fixture.0.join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(
+            Guard::new(Default::default())
+                .unwrap()
+                .process_file(&alias)
+                .is_err()
+        );
+        let fifo = fixture.0.join("fifo");
+        let cpath = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert!(
+            Guard::new(Default::default())
+                .unwrap()
+                .process_file(&fifo)
+                .unwrap_err()
+                .contains("regular file")
+        );
+        let mut guard = Guard::new(Default::default())
+            .unwrap()
+            .with_deadline(Some(Instant::now()));
+        assert!(
+            guard
+                .process_file(&path)
+                .unwrap_err()
+                .contains("native_metadata_timeout_ms")
+        );
+    }
     #[test]
     fn cumulative_reads_values_and_ignored_entries_cannot_reset_admission() {
         let mut guard = Guard::new(Policy {

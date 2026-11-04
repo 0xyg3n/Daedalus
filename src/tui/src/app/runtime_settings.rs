@@ -460,17 +460,17 @@ pub const SETTINGS: &[Setting] = &[
     ),
     setting!(
         native_metadata_process_limit,
-        "Windows subtree process limit",
+        "Native process limit",
         "Native identity metadata",
-        "Maximum processes in a native identity subtree, including its root and exited candidates.",
+        "Combined processes inspected in native identity subtrees and OpenCode direct-child discovery, including roots and exited candidates.",
         1,
         65536
     ),
     setting!(
         native_metadata_process_scan_limit,
-        "Windows snapshot entry limit",
+        "Native process scan entry limit",
         "Native identity metadata",
-        "Combined process snapshot entries across native identity scans in one operation.",
+        "Combined Windows snapshot entries or Linux OpenCode child PID entries across native identity scans in one operation.",
         1,
         1048576
     ),

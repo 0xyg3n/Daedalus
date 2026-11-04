@@ -589,3 +589,5 @@ Fit size is enabled. Unused space carries a circuit pattern with moving lights
 and brief glitch fragments. Reduced motion keeps the pattern stationary.
 
 Native command argument/model ID byte limits are editable in Configuration settings → Terminals and discovery → Native commands. These saved limits apply to command preparation before a native version probe; changing them does not bypass the audited version or command grammar. Native command confirmations put the observed version, verified conversation and potential model-work/context effects before the command preview.
+
+Native identity metadata settings also govern Linux OpenCode child/server discovery and hook-binding lookup for reconnect and Telegram. Limit errors name the saved setting to review. Direct discovery and reconnect share their allowance, and an exhausted scan never selects a partial match.
