@@ -12,6 +12,7 @@ use crate::{
         checkpoints::{self, Capabilities, Checkpoint, LaunchPlan, Operation, Registry},
         identity::{Backend, TerminalId},
         layouts::{self, TerminalRef},
+        native_metadata::Guard as MetadataGuard,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -19,8 +20,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::io::Read;
 #[cfg(unix)]
 use std::os::{
     fd::AsRawFd,
@@ -203,36 +202,63 @@ struct ProcessEvidence {
     cwd: String,
     profile: String,
 }
+fn metadata_guard(
+    adapter: &Terminals,
+    settings: &super::runtime_settings::Settings,
+) -> Result<MetadataGuard<'static>> {
+    Ok(
+        crate::core::native_metadata::Guard::new(settings.native_metadata_policy())?.with_deadline(
+            adapter
+                .discovery_budget
+                .as_ref()
+                .map(|budget| budget.deadline),
+        ),
+    )
+}
 #[cfg(unix)]
-fn read_process(adapter: &Terminals, pid: &str, harness: &str) -> Result<Option<ProcessEvidence>> {
+fn stat_fields(raw: &[u8]) -> Result<Vec<&str>> {
+    let end = raw
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or("Invalid process metadata")?;
+    Ok(std::str::from_utf8(&raw[end + 1..])
+        .map_err(|_| "Invalid process metadata")?
+        .split_whitespace()
+        .take(20)
+        .collect())
+}
+#[cfg(unix)]
+fn read_process(
+    adapter: &Terminals,
+    pid: &str,
+    harness: &str,
+    guard: &mut MetadataGuard<'_>,
+) -> Result<Option<ProcessEvidence>> {
     if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
         return Err("Invalid foreground process ID".into());
     }
-    let Some(start) = terminals::process_start(&adapter.proc_root, pid) else {
+    guard.processes(1)?;
+    let directory = adapter.proc_root.join(pid);
+    let Some(raw_stat) = guard.process_file_optional(&directory.join("stat"))? else {
         return Ok(None);
     };
-    let directory = adapter.proc_root.join(pid);
-    fn read(path: &Path) -> Result<Vec<u8>> {
-        let file = File::open(path).map_err(|_| "Foreground process is unavailable")?;
-        let mut data = Vec::new();
-        file.take(1_048_577)
-            .read_to_end(&mut data)
-            .map_err(|_| "Cannot read foreground process metadata")?;
-        if data.len() > 1_048_576 {
-            return Err("Foreground process metadata exceeds limit".into());
-        }
-        Ok(data)
+    let fields = stat_fields(&raw_stat)?;
+    let start = fields
+        .get(19)
+        .filter(|s| s.parse::<u64>().is_ok_and(|start| start > 0))
+        .ok_or("Foreground process generation is unavailable")?
+        .to_string();
+    let Some(raw) = guard.process_file_optional(&directory.join("cmdline"))? else {
+        return Ok(None);
+    };
+    let mut argv = Vec::new();
+    for arg in raw.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        guard.entries(1)?;
+        argv.push(String::from_utf8_lossy(arg).into_owned());
     }
-    let raw = read(&directory.join("cmdline"))?;
-    let argv: Vec<String> = raw
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
-        .collect();
     let Some(tool) = harnesses::tool(harness) else {
         return Ok(None);
     };
-    // Match executable names in native argv, never terminal labels or titles.
     let managed_pi = harness == "pi"
         && argv.windows(2).any(|a| a[0] == "--session-dir")
         && argv.windows(2).any(|a| a[0] == "--extension")
@@ -242,22 +268,23 @@ fn read_process(adapter: &Terminals, pid: &str, harness: &str) -> Result<Option<
     if !managed_pi && harnesses::conversation_argv(&argv, harness).is_none() {
         return Ok(None);
     }
+    guard.check()?;
     let cwd = fs::read_link(directory.join("cwd"))
-        .map_err(|_| "Foreground project directory is unavailable")?
-        .to_str()
-        .ok_or("Project directory is not UTF-8")?
-        .to_owned();
-    let raw_env = read(&directory.join("environ"))?;
-    let mut profile = None;
-    let mut home = None;
-    for pair in raw_env.split(|b| *b == 0) {
+        .map_err(|_| "Foreground project directory is unavailable")?;
+    let cwd = cwd.to_str().ok_or("Project directory is not UTF-8")?;
+    guard.byte_work(cwd.len())?;
+    let Some(raw_env) = guard.process_file_optional(&directory.join("environ"))? else {
+        return Ok(None);
+    };
+    let (mut profile, mut home) = (None, None);
+    for pair in raw_env.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        guard.entries(1)?;
         let Some(equal) = pair.iter().position(|b| *b == b'=') else {
             continue;
         };
-        let name = &pair[..equal];
-        if name == tool.profile_variable.as_bytes() {
+        if &pair[..equal] == tool.profile_variable.as_bytes() {
             profile = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
-        } else if name == b"HOME" {
+        } else if &pair[..equal] == b"HOME" {
             home = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
         }
     }
@@ -271,27 +298,42 @@ fn read_process(adapter: &Terminals, pid: &str, harness: &str) -> Result<Option<
             })
         })
         .unwrap_or_default();
-    if terminals::process_start(&adapter.proc_root, pid).as_deref() != Some(&start) {
+    let Some(after) = guard.process_file_optional(&directory.join("stat"))? else {
+        return Err("Foreground process disappeared while reading metadata".into());
+    };
+    if stat_fields(&after)?.get(19).copied() != Some(start.as_str()) {
         return Err("Foreground process changed while reading metadata".into());
     }
+    guard.check()?;
     Ok(Some(ProcessEvidence {
         pid: pid.into(),
         start,
         argv,
-        cwd,
+        cwd: cwd.into(),
         profile,
     }))
 }
+#[cfg(all(test, unix))]
 fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option<ProcessEvidence>> {
+    foreground_guarded(adapter, pane, harness, &mut adapter.metadata_guard()?)
+}
+fn foreground_guarded(
+    adapter: &Terminals,
+    pane: &Value,
+    harness: &str,
+    guard: &mut MetadataGuard<'_>,
+) -> Result<Option<ProcessEvidence>> {
+    guard.check()?;
     let id = terminals::identity(pane)?;
     let mut pids = Vec::new();
     if id.backend == Backend::Herdr {
         let info =
             adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
+        guard.check()?;
         if let Some(rows) = info["process_info"]["foreground_processes"].as_array() {
-            if rows.len() > 128
-                || (!rows.is_empty()
-                    && info["process_info"]["pane_id"].as_str() != Some(id.pane.as_str()))
+            guard.entries(rows.len())?;
+            if !rows.is_empty()
+                && info["process_info"]["pane_id"].as_str() != Some(id.pane.as_str())
             {
                 return Err("Foreground pane metadata changed".into());
             }
@@ -301,34 +343,39 @@ fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option
                         .as_str()
                         .map(str::to_owned)
                         .unwrap_or_else(|| pid.to_string());
+                    guard.byte_work(pid.len())?;
                     pids.push(pid);
                 }
             }
         }
     } else {
         let pid = field(pane, "pid");
-        if !pid.is_empty() {
+        if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
             pids.push(pid.clone());
-        }
-        // The shell's controlling tty identifies its foreground process group.
-        if let Ok(stat) = fs::read_to_string(adapter.proc_root.join(&pid).join("stat"))
-            && let Some((_, tail)) = stat.rsplit_once(')')
-        {
-            let fields: Vec<_> = tail.split_whitespace().collect();
-            if let Some(tty) = fields.get(4).filter(|tty| **tty != "0")
-                && let Ok(entries) = fs::read_dir(&adapter.proc_root)
+            #[cfg(unix)]
+            if let Some(raw) =
+                guard.process_file_optional(&adapter.proc_root.join(&pid).join("stat"))?
             {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !name.bytes().all(|b| b.is_ascii_digit()) {
-                        continue;
-                    }
-                    if let Ok(stat) = fs::read_to_string(entry.path().join("stat"))
-                        && let Some((_, tail)) = stat.rsplit_once(')')
-                    {
-                        let row: Vec<_> = tail.split_whitespace().collect();
+                let fields = stat_fields(&raw)?;
+                if let Some(tty) = fields.get(4).filter(|tty| **tty != "0") {
+                    let entries = fs::read_dir(&adapter.proc_root)
+                        .map_err(|_| "Cannot enumerate foreground processes")?;
+                    for entry in entries {
+                        guard.snapshot_entries(1)?;
+                        let entry = entry.map_err(|_| "Cannot inspect foreground process entry")?;
+                        let name = entry.file_name();
+                        let Some(name) = name.to_str().filter(|name| {
+                            !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+                        }) else {
+                            continue;
+                        };
+                        let Some(stat) = guard.process_file_optional(&entry.path().join("stat"))?
+                        else {
+                            continue;
+                        };
+                        let row = stat_fields(&stat)?;
                         if row.get(4) == Some(tty) && row.get(2) == row.get(5) {
-                            pids.push(name);
+                            pids.push(name.to_owned());
                         }
                     }
                 }
@@ -339,28 +386,36 @@ fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option
     pids.dedup();
     let mut candidates = Vec::new();
     for pid in pids {
-        if let Some(evidence) = read_process(adapter, &pid, harness)? {
+        if let Some(evidence) = read_process(adapter, &pid, harness, guard)? {
             if id.backend == Backend::Native {
                 let process = super::hook_runtime::ProcessIdentity {
-                    pid: evidence
-                        .pid
-                        .parse()
-                        .map_err(|_| "Invalid native process PID")?,
+                    pid: evidence.pid.parse().map_err(|_| "Invalid native PID")?,
                     start_ticks: evidence
                         .start
                         .parse()
                         .map_err(|_| "Invalid native process generation")?,
                 };
-                if super::hook_runtime::verify_process(&process, &adapter.proc_root).is_err() {
+                #[cfg(unix)]
+                let verified = super::hook_runtime::verify_process_metadata(
+                    &process,
+                    &adapter.proc_root,
+                    guard,
+                );
+                #[cfg(windows)]
+                let verified = super::hook_runtime::verify_process(&process, &adapter.proc_root)
+                    .map_err(|e| e.to_string());
+                guard.check()?;
+                if verified.is_err() {
                     continue;
                 }
+            }
+            if !candidates.is_empty() {
+                return Err("Foreground harness identity is ambiguous".into());
             }
             candidates.push(evidence);
         }
     }
-    if candidates.len() > 1 {
-        return Err("Foreground harness identity is ambiguous".into());
-    }
+    guard.check()?;
     Ok(candidates.pop())
 }
 fn process_fingerprint(evidence: &Option<ProcessEvidence>) -> Value {
@@ -371,11 +426,13 @@ fn capture_fingerprint(
     _pane: &Value,
     _harness: &str,
     evidence: &Option<ProcessEvidence>,
+    guard: &mut MetadataGuard<'_>,
 ) -> Result<Value> {
+    guard.check()?;
     let observed = process_fingerprint(evidence);
     #[cfg(windows)]
     return native_fingerprint_or(observed, || {
-        windows_native_process(_adapter, _pane, _harness)
+        windows_native_process(_adapter, _pane, _harness, guard)
     });
     #[cfg(not(windows))]
     Ok(observed)
@@ -392,10 +449,12 @@ fn check_process(
     adapter: &Terminals,
     evidence: &Option<ProcessEvidence>,
     harness: &str,
+    guard: &mut MetadataGuard<'_>,
 ) -> Result<()> {
+    guard.check()?;
     if let Some(before) = evidence {
-        let after =
-            read_process(adapter, &before.pid, harness)?.ok_or("Foreground harness disappeared")?;
+        let after = read_process(adapter, &before.pid, harness, guard)?
+            .ok_or("Foreground harness disappeared")?;
         if before.start != after.start
             || before.argv != after.argv
             || before.profile != after.profile
@@ -414,6 +473,21 @@ pub fn enrich_sessions(
     snapshot: &mut Value,
     adapter: &Terminals,
 ) -> Result<usize> {
+    let settings = SessionStore {
+        directory: directory.to_path_buf(),
+    }
+    .checkpoint_settings()?;
+    let mut metadata = metadata_guard(adapter, &settings)?;
+    enrich_sessions_guarded(directory, snapshot, adapter, &settings, &mut metadata)
+}
+fn enrich_sessions_guarded(
+    directory: &Path,
+    snapshot: &mut Value,
+    adapter: &Terminals,
+    settings: &super::runtime_settings::Settings,
+    metadata: &mut MetadataGuard<'_>,
+) -> Result<usize> {
+    metadata.check()?;
     if let Some(panes) = snapshot["panes"].as_array_mut() {
         for pane in panes {
             if pane["agent_session"]["source"] == "foreground" {
@@ -421,15 +495,12 @@ pub fn enrich_sessions(
             }
         }
     }
-    let settings = SessionStore {
-        directory: directory.to_path_buf(),
-    }
-    .checkpoint_settings()?;
-    let hooks = super::hook_runtime::enrich_native_sessions_observed(
+    let hooks = super::hook_runtime::enrich_native_sessions_guarded(
         directory,
         snapshot,
         adapter,
-        Some(&settings),
+        Some(settings),
+        metadata,
     );
     let mut enriched = 0;
     if let Some(panes) = snapshot["panes"].as_array_mut() {
@@ -458,7 +529,9 @@ pub fn enrich_sessions(
                 enriched += 1;
                 continue;
             }
-            let Ok(Some(sid)) = foreground_session_id(adapter, &actual, harness) else {
+            let discovered = foreground_session_id(adapter, &actual, harness, metadata);
+            metadata.check()?;
+            let Ok(Some(sid)) = discovered else {
                 continue;
             };
             let Ok(again) = adapter.verify(&actual) else {
@@ -475,6 +548,7 @@ pub fn enrich_sessions(
             enriched += 1;
         }
     }
+    metadata.check()?;
     hooks
         .map(|hooks| hooks + enriched)
         .map_err(|error| error.to_string())
@@ -485,21 +559,23 @@ fn foreground_session_id(
     adapter: &Terminals,
     pane: &Value,
     harness: &str,
+    metadata: &mut MetadataGuard<'_>,
 ) -> Result<Option<String>> {
-    let Some(process) = foreground(adapter, pane, harness)? else {
+    let Some(process) = foreground_guarded(adapter, pane, harness, metadata)? else {
         return Ok(None);
     };
     let sid = harnesses::launch_conversation(&process.argv).map(|(_, sid)| sid);
-    check_process(adapter, &Some(process), harness)?;
+    check_process(adapter, &Some(process), harness, metadata)?;
     Ok(sid)
 }
 
 #[cfg(any(windows, test))]
-fn structured_foreground(
+fn structured_foreground_guarded(
     info: &Value,
     pane: &Value,
     harness: &str,
     mut verify: impl FnMut(u32, &str) -> Result<String>,
+    metadata: &mut MetadataGuard<'_>,
 ) -> Result<Option<ProcessEvidence>> {
     if info["pane_id"] != pane["pane_id"] {
         return Err("Foreground pane changed".into());
@@ -507,9 +583,8 @@ fn structured_foreground(
     let rows = info["foreground_processes"]
         .as_array()
         .ok_or("Missing foreground processes")?;
-    if rows.len() > 128 {
-        return Err("Too many foreground processes".into());
-    }
+    metadata.entries(rows.len())?;
+    metadata.processes(rows.len())?;
     let mut seen = BTreeSet::new();
     let mut found = None;
     for row in rows {
@@ -527,11 +602,13 @@ fn structured_foreground(
         let Some(values) = row["argv"].as_array() else {
             continue;
         };
-        let argv = values
-            .iter()
-            .map(|value| value.as_str().map(str::to_owned))
-            .collect::<Option<Vec<_>>>()
-            .ok_or("Invalid foreground arguments")?;
+        metadata.entries(values.len())?;
+        let mut argv = Vec::new();
+        for value in values {
+            let value = value.as_str().ok_or("Invalid foreground arguments")?;
+            metadata.byte_work(value.len())?;
+            argv.push(value.to_owned());
+        }
         if harnesses::conversation_argv(&argv, harness).is_none() {
             continue;
         }
@@ -547,7 +624,24 @@ fn structured_foreground(
             profile: String::new(),
         });
     }
+    metadata.check()?;
     Ok(found)
+}
+
+#[cfg(test)]
+fn structured_foreground(
+    info: &Value,
+    pane: &Value,
+    harness: &str,
+    verify: impl FnMut(u32, &str) -> Result<String>,
+) -> Result<Option<ProcessEvidence>> {
+    structured_foreground_guarded(
+        info,
+        pane,
+        harness,
+        verify,
+        &mut MetadataGuard::new(Default::default())?,
+    )
 }
 
 #[cfg(windows)]
@@ -555,32 +649,41 @@ fn foreground_session_id(
     adapter: &Terminals,
     pane: &Value,
     harness: &str,
+    metadata: &mut MetadataGuard<'_>,
 ) -> Result<Option<String>> {
     let id = terminals::identity(pane)?;
     if id.backend != Backend::Herdr {
         return Ok(None);
     }
-    let inspect = || -> Result<Option<ProcessEvidence>> {
+    let mut inspect = || -> Result<Option<ProcessEvidence>> {
         let info =
             adapter.herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
-        structured_foreground(&info["process_info"], pane, harness, |pid, executable| {
-            let process =
-                crate::platform::process_identity(pid).map_err(|_| "Foreground process changed")?;
-            if process.owner != crate::platform::current_identity().map_err(|e| e.to_string())?
-                || process
-                    .executable
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_none_or(|name| {
-                        !name.eq_ignore_ascii_case(
-                            executable.rsplit(['/', '\\']).next().unwrap_or_default(),
-                        )
-                    })
-            {
-                return Err("Foreground executable changed".into());
-            }
-            Ok(process.creation_time.to_string())
-        })
+        metadata.check()?;
+        structured_foreground_guarded(
+            &info["process_info"],
+            pane,
+            harness,
+            |pid, executable| {
+                let process = crate::platform::process_metadata(pid)
+                    .map_err(|_| "Foreground process changed")?;
+                if process.owner
+                    != crate::platform::current_identity().map_err(|e| e.to_string())?
+                    || process
+                        .executable
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_none_or(|name| {
+                            !name.eq_ignore_ascii_case(
+                                executable.rsplit(['/', '\\']).next().unwrap_or_default(),
+                            )
+                        })
+                {
+                    return Err("Foreground executable changed".into());
+                }
+                Ok(process.creation_time.to_string())
+            },
+            metadata,
+        )
     };
     let before = inspect()?;
     let after = inspect()?;
@@ -596,15 +699,28 @@ fn foreground_session_id(
 impl SessionStore {
     /// Native transport proves terminal identity; private hooks and current
     /// foreground processes independently establish harness/session metadata.
-    fn verify_pane(&self, adapter: &Terminals, pane: &Value) -> Result<Value> {
+    fn verify_pane(
+        &self,
+        adapter: &Terminals,
+        pane: &Value,
+        metadata: &mut MetadataGuard<'_>,
+    ) -> Result<Value> {
+        metadata.check()?;
         let actual = adapter.verify(pane)?;
+        metadata.check()?;
         if terminals::identity(&actual)?.backend != Backend::Native
             && terminals::reported_session(&actual).is_some()
         {
             return Ok(actual);
         }
         let mut snapshot = json!({"panes":[actual]});
-        enrich_sessions(&self.directory, &mut snapshot, adapter)?;
+        enrich_sessions_guarded(
+            &self.directory,
+            &mut snapshot,
+            adapter,
+            &self.checkpoint_settings()?,
+            metadata,
+        )?;
         let mut actual = snapshot["panes"][0].take();
         if terminals::identity(&actual)?.backend == Backend::Native
             && actual["agent_session"].is_null()
@@ -612,11 +728,11 @@ impl SessionStore {
             let mut matches = Vec::new();
             for tool in harnesses::tools() {
                 #[cfg(unix)]
-                if let Some(process) = foreground(adapter, &actual, tool.id)? {
+                if let Some(process) = foreground_guarded(adapter, &actual, tool.id, metadata)? {
                     matches.push((tool.id, Some(process)));
                 }
                 #[cfg(windows)]
-                if !windows_native_process(adapter, &actual, tool.id)?.is_null() {
+                if !windows_native_process(adapter, &actual, tool.id, metadata)?.is_null() {
                     matches.push((tool.id, None::<ProcessEvidence>));
                 }
             }
@@ -922,26 +1038,30 @@ impl SessionStore {
         pane: &Value,
         supplied_sid: &str,
     ) -> Result<Checkpoint> {
-        let metadata_progress = || {
-            adapter
-                .discovery_budget
-                .as_ref()
-                .map_or(Ok(()), |budget| budget.time_left().map(|_| ()))
-        };
-        let mut metadata =
-            crate::core::native_metadata::Guard::new(config.runtime.native_metadata_policy())?
-                .with_progress(&metadata_progress)
-                .with_deadline(
-                    adapter
-                        .discovery_budget
-                        .as_ref()
-                        .map(|budget| budget.deadline),
-                );
-        let actual = self.verify_pane(adapter, pane)?;
+        let mut metadata = metadata_guard(adapter, &config.runtime)?;
+        self.live_source_guarded(
+            adapter,
+            config,
+            environment,
+            pane,
+            supplied_sid,
+            &mut metadata,
+        )
+    }
+    fn live_source_guarded(
+        &self,
+        adapter: &Terminals,
+        config: &ControlConfig,
+        environment: &BTreeMap<String, String>,
+        pane: &Value,
+        supplied_sid: &str,
+        metadata: &mut MetadataGuard<'_>,
+    ) -> Result<Checkpoint> {
+        let actual = self.verify_pane(adapter, pane, metadata)?;
         let observed_harness = harness_name(&actual);
         let mut harness = observed_harness.clone();
         if matches!(harness.as_str(), "" | "node" | "nodejs") {
-            let process = foreground(adapter, &actual, "pi")?
+            let process = foreground_guarded(adapter, &actual, "pi", metadata)?
                 .ok_or("Terminal has no verified managed harness")?;
             pi_sessions::live(
                 &self.directory,
@@ -949,7 +1069,7 @@ impl SessionStore {
                 &process.pid,
                 &process.start,
                 &process.argv,
-                &mut metadata,
+                metadata,
             )?
             .ok_or("Terminal has no verified Pi session")?;
             harness = "pi".into();
@@ -957,7 +1077,7 @@ impl SessionStore {
         let reported = terminals::reported_session(&actual)
             .unwrap_or_default()
             .to_owned();
-        let evidence = foreground(adapter, &actual, &harness)?;
+        let evidence = foreground_guarded(adapter, &actual, &harness, metadata)?;
         let discovered_pi = if harness == "pi" {
             evidence
                 .as_ref()
@@ -968,7 +1088,7 @@ impl SessionStore {
                         &process.pid,
                         &process.start,
                         &process.argv,
-                        &mut metadata,
+                        metadata,
                     )
                 })
                 .transpose()?
@@ -986,10 +1106,10 @@ impl SessionStore {
         };
         #[cfg(windows)]
         let discovered_hermes = if harness == "hermes" && reported.is_empty() {
-            let process = windows_native_process(adapter, &actual, &harness)?;
+            let process = windows_native_process(adapter, &actual, &harness, metadata)?;
             let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
             let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
-            super::hermes_sessions::live(&root, &process, &mut metadata)?
+            super::hermes_sessions::live(&root, &process, metadata)?
         } else {
             None
         };
@@ -1002,7 +1122,7 @@ impl SessionStore {
             evidence
                 .as_ref()
                 .map(|process| {
-                    pi_sessions::fork_parent(&process.argv, Path::new(&process.cwd), &mut metadata)
+                    pi_sessions::fork_parent(&process.argv, Path::new(&process.cwd), metadata)
                 })
                 .transpose()?
                 .flatten()
@@ -1083,30 +1203,29 @@ impl SessionStore {
             context_file: String::new(),
             source: Some(terminal_ref(&actual)?),
         };
-        let again = self.verify_pane(adapter, pane)?;
+        let again = self.verify_pane(adapter, pane, metadata)?;
         if harness_name(&again) != observed_harness
             || again.get("agent_session") != actual.get("agent_session")
         {
             return Err("Native harness metadata changed; refresh".into());
         }
-        check_process(adapter, &evidence, &harness)?;
+        check_process(adapter, &evidence, &harness, metadata)?;
         if let Some(parent) = &pi_parent {
-            parent.verify(&mut metadata)?;
+            parent.verify(metadata)?;
         }
         if let Some(session) = &discovered_pi {
-            session.verify(&mut metadata)?;
+            session.verify(metadata)?;
         }
         #[cfg(windows)]
         if let Some(session) = &discovered_hermes {
-            let process = windows_native_process(adapter, &again, &harness)?;
+            let process = windows_native_process(adapter, &again, &harness, metadata)?;
             let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
             let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
-            if super::hermes_sessions::live(&root, &process, &mut metadata)?.as_ref()
-                != Some(session)
-            {
+            if super::hermes_sessions::live(&root, &process, metadata)?.as_ref() != Some(session) {
                 return Err("Hermes conversation changed during discovery; refresh".into());
             }
         }
+        metadata.check()?;
         // A live source without an ID can still be offered for context handoff.
         if !row.sid.is_empty() {
             row.validate()?;
@@ -1123,12 +1242,20 @@ impl SessionStore {
         pane: &Value,
         supplied_sid: &str,
     ) -> Result<(Checkpoint, Value)> {
-        let before = self.verify_pane(adapter, pane)?;
+        let mut metadata = metadata_guard(adapter, &config.runtime)?;
+        let before = self.verify_pane(adapter, pane, &mut metadata)?;
         let harness = harness_name(&before);
-        let evidence = foreground(adapter, &before, &harness)?;
-        let checkpoint = self.live_source(adapter, config, environment, pane, supplied_sid)?;
-        check_process(adapter, &evidence, &harness)?;
-        let after = self.verify_pane(adapter, pane)?;
+        let evidence = foreground_guarded(adapter, &before, &harness, &mut metadata)?;
+        let checkpoint = self.live_source_guarded(
+            adapter,
+            config,
+            environment,
+            pane,
+            supplied_sid,
+            &mut metadata,
+        )?;
+        check_process(adapter, &evidence, &harness, &mut metadata)?;
+        let after = self.verify_pane(adapter, pane, &mut metadata)?;
         if before.get("agent_session") != after.get("agent_session")
             || before.get("agent") != after.get("agent")
         {
@@ -1136,7 +1263,7 @@ impl SessionStore {
         }
         let mut frozen = before;
         frozen["_daedalus_handoff_process"] =
-            capture_fingerprint(adapter, &frozen, &harness, &evidence)?;
+            capture_fingerprint(adapter, &frozen, &harness, &evidence, &mut metadata)?;
         if checkpoint.sid.is_empty() && frozen["_daedalus_handoff_process"].is_null() {
             return Err(
                 "Handoff requires a native session ID or a verifiable foreground process".into(),
@@ -1155,9 +1282,10 @@ impl SessionStore {
         let _lock = lock(&self.directory)?;
         let mut guard =
             crate::core::checkpoint_budget::Guard::new(config.runtime.checkpoint_policy())?;
+        let mut metadata = metadata_guard(adapter, &config.runtime)?;
         let saved_rows = self.list_guard(&mut guard)?.0;
         guard.entries(1)?;
-        let before = self.verify_pane(adapter, pane)?;
+        let before = self.verify_pane(adapter, pane, &mut metadata)?;
         let observed = harness_name(&before);
         // A terminal excerpt is useful even when no native conversation can be
         // identified. Never promote shell/Node metadata into a provider ID.
@@ -1167,9 +1295,18 @@ impl SessionStore {
         let mut row = if context_only {
             // Preserve registered Pi identity when it is genuinely observable;
             // failure here only falls back to an explicitly context-only record.
-            match self.live_source(adapter, config, environment, pane, "") {
+            let live =
+                self.live_source_guarded(adapter, config, environment, pane, "", &mut metadata);
+            metadata.check()?;
+            match live {
                 Ok(row) if row.harness == "pi" => row,
-                _ => self.capture_terminal_context(adapter, pane, &before, &request.name)?,
+                _ => self.capture_terminal_context(
+                    adapter,
+                    pane,
+                    &before,
+                    &request.name,
+                    &mut metadata,
+                )?,
             }
         } else {
             if harnesses::tool(&observed).is_none()
@@ -1180,10 +1317,17 @@ impl SessionStore {
                         .into(),
                 );
             }
-            self.live_source(adapter, config, environment, pane, &request.sid)?
+            self.live_source_guarded(
+                adapter,
+                config,
+                environment,
+                pane,
+                &request.sid,
+                &mut metadata,
+            )?
         };
         let process = if row.context_file.is_empty() {
-            foreground(adapter, &before, &row.harness)?
+            foreground_guarded(adapter, &before, &row.harness, &mut metadata)?
         } else {
             None
         };
@@ -1191,12 +1335,12 @@ impl SessionStore {
         if request.include_output && row.context_file.is_empty() {
             let mut frozen = before.clone();
             frozen["_daedalus_handoff_process"] =
-                capture_fingerprint(adapter, &frozen, &row.harness, &process)?;
-            row = self.capture_handoff(adapter, &frozen, row)?;
+                capture_fingerprint(adapter, &frozen, &row.harness, &process, &mut metadata)?;
+            row = self.capture_handoff_guarded(adapter, &frozen, row, &mut metadata)?;
         }
         row.validate()?;
-        let after = self.verify_pane(adapter, pane)?;
-        check_process(adapter, &process, &row.harness)?;
+        let after = self.verify_pane(adapter, pane, &mut metadata)?;
+        check_process(adapter, &process, &row.harness, &mut metadata)?;
         if before.get("agent_session") != after.get("agent_session")
             || before.get("agent") != after.get("agent")
         {
@@ -1223,6 +1367,7 @@ impl SessionStore {
         pane: &Value,
         before: &Value,
         name: &str,
+        metadata: &mut MetadataGuard<'_>,
     ) -> Result<Checkpoint> {
         let cwd = first(before, &["foreground_cwd", "cwd"]);
         if !Path::new(&cwd).is_dir() {
@@ -1240,7 +1385,7 @@ impl SessionStore {
             source: Some(terminal_ref(before)?),
         };
         let content = adapter.capture(pane, 120)?;
-        let after = self.verify_pane(adapter, pane)?;
+        let after = self.verify_pane(adapter, pane, metadata)?;
         if !terminal_ref(before)?.same_identity(&terminal_ref(&after)?)
             || before.get("agent") != after.get("agent")
             || before.get("agent_session") != after.get("agent_session")
@@ -1248,6 +1393,7 @@ impl SessionStore {
         {
             return Err("Terminal changed during context capture; select it again".into());
         }
+        metadata.check()?;
         self.write_context(&mut checkpoint, &content)?;
         Ok(checkpoint)
     }
@@ -1268,25 +1414,19 @@ impl SessionStore {
         &self,
         adapter: &Terminals,
         pane: &Value,
-        mut checkpoint: Checkpoint,
+        checkpoint: Checkpoint,
     ) -> Result<Checkpoint> {
-        let metadata_progress = || {
-            adapter
-                .discovery_budget
-                .as_ref()
-                .map_or(Ok(()), |budget| budget.time_left().map(|_| ()))
-        };
-        let mut metadata = crate::core::native_metadata::Guard::new(
-            self.checkpoint_settings()?.native_metadata_policy(),
-        )?
-        .with_progress(&metadata_progress)
-        .with_deadline(
-            adapter
-                .discovery_budget
-                .as_ref()
-                .map(|budget| budget.deadline),
-        );
-        let before = self.verify_pane(adapter, pane)?;
+        let mut metadata = metadata_guard(adapter, &self.checkpoint_settings()?)?;
+        self.capture_handoff_guarded(adapter, pane, checkpoint, &mut metadata)
+    }
+    fn capture_handoff_guarded(
+        &self,
+        adapter: &Terminals,
+        pane: &Value,
+        mut checkpoint: Checkpoint,
+        metadata: &mut MetadataGuard<'_>,
+    ) -> Result<Checkpoint> {
+        let before = self.verify_pane(adapter, pane, metadata)?;
         let actual_reference = terminal_ref(&before)?;
         if checkpoint
             .source
@@ -1305,8 +1445,8 @@ impl SessionStore {
         {
             return Err("Handoff harness changed; select it again".into());
         }
-        let process = foreground(adapter, &before, &harness)?;
-        let fingerprint = capture_fingerprint(adapter, &before, &harness, &process)?;
+        let process = foreground_guarded(adapter, &before, &harness, metadata)?;
+        let fingerprint = capture_fingerprint(adapter, &before, &harness, &process, metadata)?;
         if let Some(frozen) = pane.get("_daedalus_handoff_process") {
             if *frozen != fingerprint {
                 return Err("Handoff foreground process changed; select it again".into());
@@ -1328,11 +1468,7 @@ impl SessionStore {
             process
                 .as_ref()
                 .map(|evidence| {
-                    pi_sessions::fork_parent(
-                        &evidence.argv,
-                        Path::new(&evidence.cwd),
-                        &mut metadata,
-                    )
+                    pi_sessions::fork_parent(&evidence.argv, Path::new(&evidence.cwd), metadata)
                 })
                 .transpose()?
                 .flatten()
@@ -1360,12 +1496,12 @@ impl SessionStore {
             return Err("Handoff conversation or project changed; select it again".into());
         }
         let content = adapter.capture(pane, 120)?;
-        let after = self.verify_pane(adapter, pane)?;
-        check_process(adapter, &process, &harness)?;
+        let after = self.verify_pane(adapter, pane, metadata)?;
+        check_process(adapter, &process, &harness, metadata)?;
         if let Some(parent) = &pi_parent {
-            parent.verify(&mut metadata)?;
+            parent.verify(metadata)?;
         }
-        if fingerprint != capture_fingerprint(adapter, &after, &harness, &process)? {
+        if fingerprint != capture_fingerprint(adapter, &after, &harness, &process, metadata)? {
             return Err("Handoff foreground process changed during context capture".into());
         }
         if before.get("agent") != after.get("agent")
@@ -2142,31 +2278,48 @@ pub fn unlink_window(adapter: &Terminals, pane: &Value) -> Result<Receipt> {
 /// Supported Windows APIs prove the native executable and its incarnation.
 /// Never pretend command-line/profile inspection was available on Windows.
 #[cfg(windows)]
-fn windows_native_process(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Value> {
+fn windows_native_process(
+    adapter: &Terminals,
+    pane: &Value,
+    harness: &str,
+    metadata: &mut MetadataGuard<'_>,
+) -> Result<Value> {
+    metadata.check()?;
     let id = terminals::identity(pane)?;
-    let rows = match id.backend {
+    let info;
+    let direct;
+    let rows: &[Value] = match id.backend {
         Backend::Herdr => {
-            let info = adapter
+            info = adapter
                 .herdr_result(&id.endpoint, &["pane", "process-info", "--pane", &id.pane])?;
+            metadata.check()?;
+            if info["process_info"]["pane_id"].as_str() != Some(id.pane.as_str()) {
+                return Err("Foreground pane changed".into());
+            }
             info["process_info"]["foreground_processes"]
                 .as_array()
                 .ok_or("Missing foreground process information")?
-                .clone()
         }
         // ConPTY does not establish shell-child foreground ownership. Only the
         // exact directly launched PTY child can supply process evidence here.
-        Backend::Native => vec![json!({"pid":pane["pid"]})],
+        Backend::Native => {
+            direct = [json!({"pid":pane["pid"]})];
+            &direct
+        }
         Backend::Tmux => return Ok(Value::Null),
     };
     let mut candidates = Vec::new();
-    for row in rows.iter().take(128) {
+    metadata.entries(rows.len())?;
+    metadata.processes(rows.len())?;
+    for row in rows {
+        metadata.check()?;
         let pid = row["pid"]
             .as_u64()
             .and_then(|p| u32::try_from(p).ok())
             .or_else(|| row["pid"].as_str().and_then(|p| p.parse().ok()))
             .ok_or("Invalid foreground PID")?;
         let actual =
-            crate::platform::process_identity(pid).map_err(|_| "Foreground process changed")?;
+            crate::platform::process_metadata(pid).map_err(|_| "Foreground process changed")?;
         if actual.owner != crate::platform::current_identity().map_err(|e| e.to_string())? {
             return Err("Foreground process belongs to another account".into());
         }
@@ -2174,6 +2327,7 @@ fn windows_native_process(adapter: &Terminals, pane: &Value, harness: &str) -> R
             candidates.push(actual);
         }
     }
+    metadata.check()?;
     if candidates.len() > 1 {
         return Err("Foreground native executable is ambiguous".into());
     }
@@ -2427,12 +2581,54 @@ mod tests {
         publish_script(&f.adapter.herdr, script);
         assert!(
             f.store
-                .capture_terminal_context(&f.adapter, &f.pane, &before, "Context")
+                .capture_terminal_context(
+                    &f.adapter,
+                    &f.pane,
+                    &before,
+                    "Context",
+                    &mut metadata_guard(&f.adapter, &f.config.runtime).unwrap()
+                )
                 .unwrap_err()
                 .contains("changed during context capture")
         );
         assert!(f.store.list().unwrap().is_empty());
         assert!(!f.store.directory.join("checkpoints").exists());
+    }
+    #[test]
+    fn context_only_save_does_not_hide_exhausted_metadata_as_a_capture_fallback() {
+        let mut f = fixture();
+        f.pane["agent"] = json!("bash");
+        f.pane["agent_session"] = Value::Null;
+        fs::write(
+            f.dir.join("pane.json"),
+            serde_json::to_vec(&json!({"pane":f.pane})).unwrap(),
+        )
+        .unwrap();
+        let info = json!({"process_info":{"pane_id":"pane","foreground_processes":[{"pid":900},{"pid":901}]}});
+        let command = format!(
+            "#!/bin/sh\ncase \"$4\" in\nget) /bin/cat '{}' ;;\nprocess-info) printf '%s\\n' '{info}' ;;\nread) exit 99 ;;\n*) exit 2 ;;\nesac\n",
+            f.dir.join("pane.json").display()
+        );
+        publish_script(&f.adapter.herdr, command);
+
+        f.config.runtime.native_metadata_process_limit = 1;
+        let request = SaveRequest {
+            name: "Context".into(),
+            sid: String::new(),
+            include_output: true,
+        };
+        let error = f
+            .store
+            .save(&f.adapter, &f.config, &f.environment, &f.pane, &request)
+            .unwrap_err();
+        assert!(error.contains("native_metadata_process_limit"), "{error}");
+        assert!(!f.store.directory.join("checkpoints").exists());
+        assert!(
+            !f.store
+                .directory
+                .join("dashboard-checkpoints.json")
+                .exists()
+        );
     }
     #[test]
     fn saves_verified_reference_and_private_context() {
@@ -2744,6 +2940,78 @@ mod tests {
         let process = foreground(&f.adapter, &pane, "claude").unwrap().unwrap();
         assert_eq!(process.pid, "90");
         assert_eq!(process.start, "500");
+        let mut limited = f.adapter.clone();
+        let settings = super::super::runtime_settings::Settings {
+            native_metadata_process_limit: 1,
+            ..Default::default()
+        };
+        limited.apply_settings(&settings).unwrap();
+        assert!(
+            foreground(&limited, &pane, "claude")
+                .is_err_and(|error| error.contains("native_metadata_process_limit")),
+            "Native foreground discovery ignored the saved process limit"
+        );
+        for (policy, key) in [
+            (
+                crate::core::native_metadata::Policy {
+                    snapshot_entries: 1,
+                    ..Default::default()
+                },
+                "native_metadata_process_scan_limit",
+            ),
+            (
+                crate::core::native_metadata::Policy {
+                    entries: 1,
+                    ..Default::default()
+                },
+                "native_metadata_entry_limit",
+            ),
+        ] {
+            let mut guard = MetadataGuard::new(policy).unwrap();
+            assert!(
+                foreground_guarded(&f.adapter, &pane, "claude", &mut guard)
+                    .unwrap_err()
+                    .contains(key)
+            );
+            assert!(guard.check().unwrap_err().contains(key));
+        }
+        let mut guard = MetadataGuard::new(crate::core::native_metadata::Policy {
+            processes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let evidence = read_process(&f.adapter, "90", "claude", &mut guard).unwrap();
+        assert!(evidence.is_some());
+        assert!(
+            check_process(&f.adapter, &evidence, "claude", &mut guard)
+                .unwrap_err()
+                .contains("native_metadata_process_limit")
+        );
+        // Rejected argv/environment must not become a successful partial match.
+        for name in ["cmdline", "environ"] {
+            let path = f.adapter.proc_root.join("90").join(name);
+            let original = fs::read(&path).unwrap();
+            fs::write(&path, vec![b'x'; 1025]).unwrap();
+            let mut guard = MetadataGuard::new(crate::core::native_metadata::Policy {
+                file_bytes: 1024,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(
+                foreground_guarded(&f.adapter, &pane, "claude", &mut guard)
+                    .unwrap_err()
+                    .contains("native_metadata_file_limit_bytes")
+            );
+            fs::write(path, original).unwrap();
+        }
+        let mut guard = MetadataGuard::new(Default::default())
+            .unwrap()
+            .with_deadline(Some(std::time::Instant::now()));
+        assert!(
+            foreground_guarded(&f.adapter, &pane, "claude", &mut guard)
+                .unwrap_err()
+                .contains("native_metadata_timeout_ms")
+        );
         let path = f.adapter.proc_root.join("90/stat");
         let stat = fs::read_to_string(&path).unwrap();
         fs::write(path, stat.replacen("90 0 99 90", "90 0 99 42", 1)).unwrap();
@@ -3643,16 +3911,20 @@ fn read_process(
     _adapter: &Terminals,
     pid: &str,
     _harness: &str,
+    guard: &mut MetadataGuard<'_>,
 ) -> Result<Option<ProcessEvidence>> {
+    guard.processes(1)?;
+    guard.entries(1)?;
     let pid = pid.parse().map_err(|_| "Invalid foreground process ID")?;
     let actual =
-        crate::platform::process_identity(pid).map_err(|_| "Cannot verify foreground process")?;
+        crate::platform::process_metadata(pid).map_err(|_| "Cannot verify foreground process")?;
     if actual.owner != crate::platform::current_identity().map_err(|e| e.to_string())? {
         return Err("Foreground process belongs to another account".into());
     }
     // Windows does not expose supported argv/cwd/environment APIs for another
     // process. Herdr's correlated native session metadata remains available;
     // never invent argv evidence by treating its display label as a command.
+    guard.check()?;
     Ok(None)
 }
 
@@ -3689,6 +3961,43 @@ mod fingerprint_tests {
             ))
             .unwrap()
             .is_none()
+        );
+    }
+    #[test]
+    fn structured_foreground_uses_saved_process_and_argument_limits() {
+        let pane = json!({"pane_id":"pane"});
+        let info = json!({"pane_id":"pane","foreground_processes":[{"pid":1,"argv":["codex","resume",SID]},{"pid":2,"argv":["shell"]}]});
+        let mut guard = MetadataGuard::new(crate::core::native_metadata::Policy {
+            processes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            structured_foreground_guarded(
+                &info,
+                &pane,
+                "codex",
+                |_, _| panic!("must refuse before process lookup"),
+                &mut guard
+            )
+            .unwrap_err()
+            .contains("native_metadata_process_limit")
+        );
+        let mut guard = MetadataGuard::new(crate::core::native_metadata::Policy {
+            entries: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            structured_foreground_guarded(
+                &info,
+                &pane,
+                "codex",
+                |_, _| panic!("must refuse before argv lookup"),
+                &mut guard
+            )
+            .unwrap_err()
+            .contains("native_metadata_entry_limit")
         );
     }
     #[test]

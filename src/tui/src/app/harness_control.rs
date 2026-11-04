@@ -203,7 +203,7 @@ pub fn prepare(
     #[cfg(unix)]
     let executable = terminals.proc_root.join(pid.pid.to_string()).join("exe");
     #[cfg(windows)]
-    let executable = crate::platform::process_identity(pid.pid)
+    let executable = crate::platform::process_metadata(pid.pid)
         .map_err(|_| "Harness executable unavailable")?
         .executable;
     let before = executable_stamp(&executable)?;

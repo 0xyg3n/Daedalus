@@ -434,7 +434,7 @@ pub const SETTINGS: &[Setting] = &[
         native_metadata_file_limit_bytes,
         "File byte limit",
         "Native identity metadata",
-        "Maximum bytes per native identity file.",
+        "Maximum bytes per native identity file, including Linux process arguments, environment and stat metadata.",
         1024,
         67108864
     ),
@@ -482,7 +482,7 @@ pub const SETTINGS: &[Setting] = &[
         native_metadata_process_limit,
         "Native process limit",
         "Native identity metadata",
-        "Combined processes inspected in native identity subtrees and OpenCode direct-child discovery, including roots and exited candidates.",
+        "Combined foreground, ancestry, subtree and stability process checks per operation on Linux and Windows, including roots and exited candidates.",
         1,
         65536
     ),
@@ -490,13 +490,13 @@ pub const SETTINGS: &[Setting] = &[
         native_metadata_process_scan_limit,
         "Native process scan entry limit",
         "Native identity metadata",
-        "Combined Windows snapshot entries or Linux OpenCode child PID entries across native identity scans in one operation.",
+        "Combined Windows snapshot rows or Linux process-directory and child PID entries across native identity scans in one operation.",
         1,
         1048576
     ),
     setting!(
         native_metadata_depth_limit,
-        "Windows subtree depth limit",
+        "Process ancestry depth limit",
         "Native identity metadata",
         "Maximum native identity process ancestry depth.",
         1,

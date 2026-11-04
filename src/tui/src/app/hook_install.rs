@@ -269,7 +269,7 @@ fn ensure_service_allows_hook_change_windows(
             "Telegram service identity is unreadable. Stop it before changing hooks.".into(),
         );
     }
-    let process = crate::platform::process_identity(record.pid).map_err(|_| {
+    let process = crate::platform::process_metadata(record.pid).map_err(|_| {
         "Telegram is running a Daedalus image that is no longer installed. Stop it before changing hooks."
     })?;
     if process.creation_time != record.start_ticks || record.executable.as_os_str().is_empty() {
@@ -410,7 +410,8 @@ fn local_opencode_server_budgeted(
 ) -> Result<hook_runtime::ServerEmitter> {
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
     guard.entries(1)?;
-    let root = crate::platform::process_identity(ui.pid).map_err(|_| "OpenCode UI disappeared")?;
+    guard.processes(1)?;
+    let root = crate::platform::process_metadata(ui.pid).map_err(|_| "OpenCode UI disappeared")?;
     let executable = crate::platform::open_regular(&root.executable).map_err(|e| e.to_string())?;
     let identity = crate::platform::file_identity(&executable).map_err(|e| e.to_string())?;
     let children = crate::platform::descendant_processes_budgeted(ui.pid, guard)
@@ -418,8 +419,9 @@ fn local_opencode_server_budgeted(
     let mut servers = Vec::new();
     for child in children.into_iter().filter(|p| p.parent_pid == ui.pid) {
         guard.entries(1)?;
-        let current = crate::platform::process_identity(child.pid)
-            .map_err(|_| "OpenCode server changed during discovery")?;
+        let observed = crate::platform::process_identity_budgeted(child.pid, guard);
+        guard.check()?;
+        let current = observed.map_err(|_| "OpenCode server changed during discovery")?;
         if current.parent_pid != ui.pid || current.creation_time != child.creation_time {
             return Err("OpenCode server ancestry changed during discovery".into());
         }
@@ -560,7 +562,7 @@ fn reconnect_opencode_server_budgeted(
     #[cfg(windows)]
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
     #[cfg(windows)]
-    let executable = crate::platform::process_identity(ui.pid)
+    let executable = crate::platform::process_metadata(ui.pid)
         .map_err(|_| "OpenCode UI disappeared")?
         .executable;
     #[cfg(unix)]
@@ -3111,7 +3113,7 @@ mod windows_server_tests {
                 let _ = self.0.wait();
             }
         }
-        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let observed = crate::platform::process_metadata(std::process::id()).unwrap();
         let ui = ProcessIdentity {
             pid: observed.pid,
             start_ticks: observed.creation_time,
@@ -3261,7 +3263,7 @@ mod windows_server_tests {
         let stdin = child.stdin.take().unwrap();
         let started = std::time::Instant::now();
         let process = loop {
-            if let Ok(process) = crate::platform::process_identity(child.id())
+            if let Ok(process) = crate::platform::process_metadata(child.id())
                 && service_lock_held(&directory)
             {
                 break process;

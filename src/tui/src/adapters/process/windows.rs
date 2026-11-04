@@ -70,7 +70,17 @@ fn create_job(allow_breakaway: bool) -> io::Result<Job> {
         Ok(job)
     }
 }
-fn resume(pid: u32) -> io::Result<()> {
+fn check_deadline(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Adapter query timed out",
+        ));
+    }
+    Ok(())
+}
+fn resume(pid: u32, deadline: Instant) -> io::Result<()> {
+    check_deadline(deadline)?;
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if snapshot == INVALID_HANDLE_VALUE {
@@ -81,6 +91,7 @@ fn resume(pid: u32) -> io::Result<()> {
         entry.dwSize = std::mem::size_of_val(&entry) as u32;
         let mut more = Thread32First(snapshot.as_raw_handle(), &mut entry);
         while more != 0 {
+            check_deadline(deadline)?;
             if entry.th32OwnerProcessID == pid {
                 let handle = OpenThread(
                     THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION,
@@ -94,6 +105,7 @@ fn resume(pid: u32) -> io::Result<()> {
                 if GetProcessIdOfThread(thread.as_raw_handle()) != pid {
                     return Err(io::Error::other("Owned query thread identity changed"));
                 }
+                check_deadline(deadline)?;
                 if ResumeThread(thread.as_raw_handle()) == u32::MAX {
                     return Err(error());
                 }
@@ -183,6 +195,13 @@ fn run_inner(
         ));
     }
     let start = Instant::now();
+    let deadline = start.checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Adapter timeout exceeds clock range",
+        )
+    })?;
+    check_deadline(deadline)?;
     let job = create_job(allow_breakaway)?;
     command
         .stdin(if input.is_empty() {
@@ -200,7 +219,7 @@ fn run_inner(
     if unsafe { AssignProcessToJobObject(owned.job.0, owned.child.as_raw_handle()) } == 0 {
         return Err(error());
     }
-    resume(owned.child.id())?;
+    resume(owned.child.id(), deadline)?;
     let mut out = owned
         .child
         .stdout
@@ -226,12 +245,7 @@ fn run_inner(
     let mut remaining = max_bytes;
     let result = (|| {
         loop {
-            if start.elapsed() >= timeout {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Adapter query timed out",
-                ));
-            }
+            check_deadline(deadline)?;
             if !written {
                 match receiver.try_recv() {
                     Ok(Ok(())) => written = true,
@@ -297,6 +311,21 @@ mod tests {
             20,
         );
         assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
+    }
+    #[test]
+    fn exhausted_deadline_refuses_before_spawning_or_scanning_threads() {
+        let result = run(
+            &mut Command::new("nonexistent-daedalus-owned-fixture.exe"),
+            Duration::ZERO,
+            100,
+        );
+        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            resume(std::process::id(), Instant::now())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
     }
     #[test]
     fn timeout_terminates_owned_job_without_waiting_for_pipe_eof() {

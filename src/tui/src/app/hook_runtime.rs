@@ -42,11 +42,13 @@ pub enum Error {
     Input,
     Output,
     Deadline,
+    Metadata(String),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Invalid(s) => s,
+            Self::Metadata(s) => s,
             Self::Identity => "Hook process does not match its registered terminal",
             Self::PrivateState => "Hook state requires private owned regular files",
             Self::Persistence => "Hook state could not be persisted",
@@ -571,6 +573,43 @@ mod metadata_inspection_tests {
     use super::*;
     use crate::core::native_metadata::{Guard, Policy};
     #[test]
+    fn hook_process_policy_loads_the_saved_instance_settings() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("dd-hook-policy-{:x}", u128::from_le_bytes(nonce))),
+        );
+        layouts::write_private(&fixture.0.join("marker"), b"").unwrap();
+        let registration:Registration=serde_json::from_value(json!({"version":1,"id":"fixture","directory":fixture.0,"scope":{"instance":"example","terminal":{"backend":"herdr","endpoint":"example","pane":"pane","generation":"generation"},"harness":"claude","conversation":"session"},"events":["Stop"],"options":{"telegram_delivery":false,"telegram_progress":false,"notifications":false,"hindsight":false},"activity_lease_ms":30000,"pending_timeout_ms":30000,"hook_timeout_ms":12000})).unwrap();
+        let mut config = super::super::config::ControlConfig::fresh(&fixture.0).unwrap();
+        config.runtime.native_metadata_process_limit = 1;
+        layouts::write_private(&fixture.0.join("control.json"), &config.encode().unwrap()).unwrap();
+        let terminals = Terminals::default();
+        let mut guard = registration_metadata_guard(&registration, &terminals).unwrap();
+        guard.processes(1).unwrap();
+        assert!(
+            guard
+                .processes(1)
+                .unwrap_err()
+                .contains("native_metadata_process_limit")
+        );
+        config.runtime.native_metadata_process_limit = 3;
+        layouts::write_private(&fixture.0.join("control.json"), &config.encode().unwrap()).unwrap();
+        registration_metadata_guard(&registration, &terminals)
+            .unwrap()
+            .processes(2)
+            .unwrap();
+        let mut invalid = registration;
+        invalid.hook_timeout_ms = u64::MAX;
+        assert!(registration_metadata_guard(&invalid, &terminals).is_err());
+    }
+    #[test]
     fn discovery_inspection_preserves_binding_checks_and_cumulative_admission() {
         struct Fixture(PathBuf);
         impl Drop for Fixture {
@@ -807,6 +846,39 @@ pub trait Verifier {
 pub struct NativeVerifier {
     pub terminals: Terminals,
 }
+fn registration_metadata_guard(
+    registration: &Registration,
+    terminals: &Terminals,
+) -> Result<crate::core::native_metadata::Guard<'static>> {
+    registration.validate()?;
+    let policy = layouts::read_private(&registration.directory.join("control.json"))
+        .map_err(|_| Error::PrivateState)?
+        .map(|bytes| {
+            super::config::ControlConfig::parse(&bytes)
+                .map(|config| config.runtime.native_metadata_policy())
+        })
+        .transpose()
+        .map_err(|_| Error::Invalid("Invalid native metadata configuration"))?
+        .unwrap_or(terminals.native_metadata_policy);
+    Ok(crate::core::native_metadata::Guard::new(policy)
+        .map_err(Error::Metadata)?
+        .with_deadline(Some(
+            std::time::Instant::now() + Duration::from_millis(registration.hook_timeout_ms),
+        ))
+        .with_deadline(
+            terminals
+                .discovery_budget
+                .as_ref()
+                .map(|budget| budget.deadline),
+        ))
+}
+fn process_metadata_error(guard: &crate::core::native_metadata::Guard<'_>) -> Error {
+    guard
+        .check()
+        .err()
+        .map(Error::Metadata)
+        .unwrap_or(Error::Identity)
+}
 #[cfg(unix)]
 impl Verifier for NativeVerifier {
     #[cfg(target_os = "linux")]
@@ -819,7 +891,8 @@ impl Verifier for NativeVerifier {
         )
     }
     fn verify(&mut self, registration: &Registration) -> Result<()> {
-        let actual = verify_live_session(registration, &self.terminals)?;
+        let mut metadata = registration_metadata_guard(registration, &self.terminals)?;
+        let actual = verify_live_session_guarded(registration, &self.terminals, &mut metadata)?;
         let mut terminal_pid = actual
             .get("pid")
             .and_then(|v| {
@@ -829,16 +902,23 @@ impl Verifier for NativeVerifier {
             .filter(|pid| *pid > 0)
             .ok_or(Error::Identity)?;
         if let Some(process) = &registration.harness_process {
-            verify_process(process, &self.terminals.proc_root)?;
+            verify_process_metadata(process, &self.terminals.proc_root, &mut metadata)
+                .map_err(|_| process_metadata_error(&metadata))?;
         }
         let mut emitter_seen = registration.harness_process.is_none();
         if let Some(server) = &registration.server_emitter {
-            verify_server_emitter(server, &self.terminals.proc_root)?;
+            verify_server_metadata(server, &self.terminals.proc_root, &mut metadata)
+                .map_err(|_| process_metadata_error(&metadata))?;
             terminal_pid = u64::from(server.process.pid);
             emitter_seen = true;
         }
         let mut pid = std::process::id();
-        for _ in 0..128 {
+        let mut seen = std::collections::BTreeSet::new();
+        for depth in 0..=metadata.policy.depth {
+            metadata.check().map_err(Error::Metadata)?;
+            if !seen.insert(pid) {
+                return Err(Error::Identity);
+            }
             if registration
                 .harness_process
                 .as_ref()
@@ -853,19 +933,16 @@ impl Verifier for NativeVerifier {
                     Err(Error::Identity)
                 };
             }
-            let path = self.terminals.proc_root.join(pid.to_string()).join("stat");
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(path)
-                .map_err(|_| Error::Identity)?;
-            let mut bytes = Vec::new();
-            file.take(8193)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Error::Identity)?;
-            if bytes.len() > 8192 {
-                return Err(Error::Identity);
+            if depth == metadata.policy.depth {
+                return Err(Error::Metadata(
+                    "Native metadata ancestry limit reached; review native_metadata_depth_limit"
+                        .into(),
+                ));
             }
+            metadata.processes(1).map_err(Error::Metadata)?;
+            let bytes = metadata
+                .process_file(&self.terminals.proc_root.join(pid.to_string()).join("stat"))
+                .map_err(|_| process_metadata_error(&metadata))?;
             let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
             let parent = text
                 .rsplit_once(')')
@@ -1343,7 +1420,7 @@ fn invocation_id() -> Result<String> {
 #[cfg(windows)]
 fn invocation_id() -> Result<String> {
     let process =
-        crate::platform::process_identity(std::process::id()).map_err(|_| Error::EventIdentity)?;
+        crate::platform::process_metadata(std::process::id()).map_err(|_| Error::EventIdentity)?;
     let encoded = serde_json::to_vec(&(process.owner, process.pid, process.creation_time))
         .map_err(|_| Error::EventIdentity)?;
     Ok(format!("invocation-{:x}", Sha256::digest(encoded)))
@@ -4711,7 +4788,7 @@ pub(crate) fn verify_server_metadata(
     proc_root: &Path,
     guard: &mut crate::core::native_metadata::Guard<'_>,
 ) -> std::result::Result<(), String> {
-    guard.check()?;
+    guard.processes(1)?;
     let directory = verify_server_image(server, proc_root).map_err(|e| e.to_string())?;
     let bytes = guard.process_file(&directory.join("stat"))?;
     verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
@@ -4739,7 +4816,7 @@ pub(crate) fn capture_server_metadata(
 pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
     verify_process(&server.process, proc_root)?;
     let observed =
-        crate::platform::process_identity(server.process.pid).map_err(|_| Error::Identity)?;
+        crate::platform::process_metadata(server.process.pid).map_err(|_| Error::Identity)?;
     // The stored path is where the executable lived at review time. An update
     // can rename that file or replace the path while this process image is
     // still the reviewed one. Trust the live image's file identity, not the
@@ -4812,7 +4889,7 @@ pub(crate) fn verify_process_metadata(
     proc_root: &Path,
     guard: &mut crate::core::native_metadata::Guard<'_>,
 ) -> std::result::Result<(), String> {
-    guard.check()?;
+    guard.processes(1)?;
     if process.pid == 0 || process.start_ticks == 0 {
         return Err(Error::Identity.to_string());
     }
@@ -4823,7 +4900,7 @@ pub(crate) fn verify_process_metadata(
 #[cfg(windows)]
 #[allow(unused_variables)]
 pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
-    let observed = crate::platform::process_identity(process.pid).map_err(|_| Error::Identity)?;
+    let observed = crate::platform::process_metadata(process.pid).map_err(|_| Error::Identity)?;
     if process.start_ticks == 0
         || observed.creation_time != process.start_ticks
         || observed.owner != crate::platform::current_identity().map_err(|_| Error::Identity)?
@@ -5096,6 +5173,26 @@ pub(crate) fn enrich_native_sessions_observed(
     terminals: &Terminals,
     settings: Option<&super::runtime_settings::Settings>,
 ) -> Result<usize> {
+    let policy = settings
+        .map(|settings| settings.native_metadata_policy())
+        .unwrap_or(terminals.native_metadata_policy);
+    let mut metadata = crate::core::native_metadata::Guard::new(policy)
+        .map_err(Error::Metadata)?
+        .with_deadline(
+            terminals
+                .discovery_budget
+                .as_ref()
+                .map(|budget| budget.deadline),
+        );
+    enrich_native_sessions_guarded(directory, snapshot, terminals, settings, &mut metadata)
+}
+pub(crate) fn enrich_native_sessions_guarded(
+    directory: &Path,
+    snapshot: &mut Value,
+    terminals: &Terminals,
+    settings: Option<&super::runtime_settings::Settings>,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<usize> {
     // A reused snapshot must not retain a conversation after its evidence expires.
     apply_native_sessions(snapshot, &[]);
     if let Some(panes) = snapshot["panes"].as_array_mut() {
@@ -5118,18 +5215,18 @@ pub(crate) fn enrich_native_sessions_observed(
     };
     let mut verified = Vec::new();
     let mut invalid = None;
-    for (index, entry) in entries.enumerate() {
-        if index >= 4096 {
-            return Err(Error::Invalid("Hook registration limit exceeded"));
-        }
+    for entry in entries {
+        metadata.entries(1).map_err(Error::Metadata)?;
         let path = entry.map_err(|_| Error::PrivateState)?.path();
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let registration = match inspect(&path) {
+        let inspected = inspect_metadata(&path, metadata);
+        metadata.check().map_err(Error::Metadata)?;
+        let registration = match inspected {
             Ok(registration) => registration,
             Err(error) => {
-                invalid = Some(error);
+                invalid = Some(Error::Metadata(error));
                 continue;
             }
         };
@@ -5145,10 +5242,12 @@ pub(crate) fn enrich_native_sessions_observed(
         }) {
             continue;
         }
-        if registration.harness_process.is_some()
-            && verify_live_session(&registration, terminals).is_ok()
-        {
-            verified.push(registration);
+        if registration.harness_process.is_some() {
+            let result = verify_live_session_guarded(&registration, terminals, metadata);
+            metadata.check().map_err(Error::Metadata)?;
+            if result.is_ok() {
+                verified.push(registration);
+            }
         }
     }
     let enriched = apply_native_sessions(
@@ -5179,6 +5278,7 @@ pub(crate) fn enrich_native_sessions_observed(
         )
         .map_err(|_| Error::Invalid("Agent activity observation is unavailable"))?;
     }
+    metadata.check().map_err(Error::Metadata)?;
     invalid.map_or(Ok(enriched), Err)
 }
 fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
@@ -5231,11 +5331,30 @@ fn apply_native_sessions(snapshot: &mut Value, verified: &[Scope]) -> usize {
 /// Daemon-side live verification deliberately does not require daemon ancestry.
 /// Only registrations with a pinned harness process can be feeder destinations.
 pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -> Result<Value> {
+    let mut metadata = registration_metadata_guard(registration, terminals)?;
+    verify_live_session_guarded(registration, terminals, &mut metadata)
+}
+fn verify_live_session_guarded(
+    registration: &Registration,
+    terminals: &Terminals,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<Value> {
+    metadata.check().map_err(Error::Metadata)?;
     registration.validate()?;
     if let Some(server) = &registration.server_emitter {
+        metadata.processes(1).map_err(Error::Metadata)?;
+        #[cfg(unix)]
+        verify_server_metadata(server, &terminals.proc_root, metadata)
+            .map_err(|_| process_metadata_error(metadata))?;
+        #[cfg(windows)]
         verify_server_emitter(server, &terminals.proc_root)?;
     }
     if let Some(process) = &registration.harness_process {
+        metadata.processes(1).map_err(Error::Metadata)?;
+        #[cfg(unix)]
+        verify_process_metadata(process, &terminals.proc_root, metadata)
+            .map_err(|_| process_metadata_error(metadata))?;
+        #[cfg(windows)]
         verify_process(process, &terminals.proc_root)?;
     }
     let id = &registration.scope.terminal;
@@ -5252,14 +5371,14 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
             .ok_or(Error::Identity)?;
         #[cfg(unix)]
         {
-            let tty = process_tty(process.pid, &terminals.proc_root)?;
-            if tty == 0 || tty != process_tty(terminal_pid, &terminals.proc_root)? {
+            let tty = process_tty(process.pid, &terminals.proc_root, metadata)?;
+            if tty == 0 || tty != process_tty(terminal_pid, &terminals.proc_root, metadata)? {
                 return Err(Error::Identity);
             }
         }
         #[cfg(windows)]
         {
-            windows_descendant(process.pid, terminal_pid)?;
+            windows_descendant(process.pid, terminal_pid, metadata)?;
             match id.backend {
                 crate::core::identity::Backend::Herdr => {
                     let info = terminals
@@ -5268,6 +5387,9 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
                     let foreground = info["process_info"]["foreground_processes"]
                         .as_array()
                         .ok_or(Error::Identity)?;
+                    metadata
+                        .entries(foreground.len())
+                        .map_err(Error::Metadata)?;
                     if !foreground.iter().any(|p| {
                         p["pid"]
                             .as_u64()
@@ -5303,22 +5425,19 @@ pub fn verify_live_session(registration: &Registration, terminals: &Terminals) -
             }
         }
     }
+    metadata.check().map_err(Error::Metadata)?;
     Ok(actual)
 }
 #[cfg(unix)]
-fn process_tty(pid: u32, proc_root: &Path) -> Result<i64> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(proc_root.join(pid.to_string()).join("stat"))
-        .map_err(|_| Error::Identity)?;
-    let mut bytes = Vec::new();
-    file.take(8193)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error::Identity)?;
-    if bytes.len() > 8192 {
-        return Err(Error::Identity);
-    }
+fn process_tty(
+    pid: u32,
+    proc_root: &Path,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<i64> {
+    metadata.processes(1).map_err(Error::Metadata)?;
+    let bytes = metadata
+        .process_file(&proc_root.join(pid.to_string()).join("stat"))
+        .map_err(|_| process_metadata_error(metadata))?;
     std::str::from_utf8(&bytes)
         .ok()
         .and_then(|s| s.rsplit_once(')'))
@@ -5443,16 +5562,39 @@ fn transcript_proves_reply(
 }
 
 #[cfg(windows)]
-fn windows_descendant(mut child: u32, ancestor: u32) -> Result<()> {
+fn windows_descendant(
+    mut child: u32,
+    ancestor: u32,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<()> {
     let owner = crate::platform::current_identity().map_err(|_| Error::Identity)?;
     let mut youngest = u64::MAX;
-    for _ in 0..128 {
-        let process = crate::platform::process_identity(child).map_err(|_| Error::Identity)?;
-        if process.owner != owner || process.creation_time > youngest {
+    let mut seen = std::collections::BTreeSet::new();
+    for depth in 0..=metadata.policy.depth {
+        metadata.check().map_err(Error::Metadata)?;
+        if !seen.insert(child) {
             return Err(Error::Identity);
         }
+        // The terminal itself needs no parent lookup.
         if child == ancestor {
-            return Ok(());
+            metadata.processes(1).map_err(Error::Metadata)?;
+            let process = crate::platform::process_metadata(child).map_err(|_| Error::Identity)?;
+            metadata.check().map_err(Error::Metadata)?;
+            return if process.owner == owner && process.creation_time <= youngest {
+                Ok(())
+            } else {
+                Err(Error::Identity)
+            };
+        }
+        if depth == metadata.policy.depth {
+            return Err(Error::Metadata(
+                "Native metadata ancestry limit reached; review native_metadata_depth_limit".into(),
+            ));
+        }
+        let process = crate::platform::process_identity_budgeted(child, metadata)
+            .map_err(|_| process_metadata_error(metadata))?;
+        if process.owner != owner || process.creation_time > youngest {
+            return Err(Error::Identity);
         }
         if process.parent_pid == 0 || process.parent_pid == child {
             return Err(Error::Identity);
@@ -5465,7 +5607,8 @@ fn windows_descendant(mut child: u32, ancestor: u32) -> Result<()> {
 #[cfg(windows)]
 impl Verifier for NativeVerifier {
     fn verify(&mut self, registration: &Registration) -> Result<()> {
-        verify_live_session(registration, &self.terminals)?;
+        let mut metadata = registration_metadata_guard(registration, &self.terminals)?;
+        verify_live_session_guarded(registration, &self.terminals, &mut metadata)?;
         let process = registration
             .harness_process
             .as_ref()
@@ -5475,8 +5618,9 @@ impl Verifier for NativeVerifier {
             .as_ref()
             .map(|server| &server.process)
             .unwrap_or(process);
-        windows_descendant(std::process::id(), emitter.pid)?;
-        verify_process(emitter, &self.terminals.proc_root)
+        windows_descendant(std::process::id(), emitter.pid, &mut metadata)?;
+        verify_process(emitter, &self.terminals.proc_root)?;
+        metadata.check().map_err(Error::Metadata)
     }
 }
 
@@ -5490,7 +5634,7 @@ mod windows_tests {
         let directory =
             std::env::temp_dir().join(format!("daedalus-hooks-windows-{}", std::process::id()));
         crate::platform::ensure_private_dir(&directory).unwrap();
-        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let observed = crate::platform::process_metadata(std::process::id()).unwrap();
         let process = ProcessIdentity {
             pid: observed.pid,
             start_ticks: observed.creation_time,
@@ -5572,7 +5716,7 @@ mod windows_tests {
     }
     #[test]
     fn replaced_emitter_path_still_matches_the_live_image() {
-        let observed = crate::platform::process_identity(std::process::id()).unwrap();
+        let observed = crate::platform::process_metadata(std::process::id()).unwrap();
         let pin = capture_server_emitter(
             ProcessIdentity {
                 pid: observed.pid,

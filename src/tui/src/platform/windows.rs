@@ -487,8 +487,51 @@ pub struct ProcessIdentity {
     pub executable: PathBuf,
     pub owner: String,
 }
+/// Atomic metadata only: this never enumerates other processes or invents a parent.
+#[derive(Debug, Clone)]
+pub struct ProcessMetadata {
+    pub pid: u32,
+    pub creation_time: u64,
+    pub executable: PathBuf,
+    pub owner: String,
+}
+impl ProcessMetadata {
+    fn with_parent(self, parent_pid: u32) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: self.pid,
+            parent_pid,
+            creation_time: self.creation_time,
+            executable: self.executable,
+            owner: self.owner,
+        }
+    }
+}
+pub fn process_metadata(pid: u32) -> io::Result<ProcessMetadata> {
+    observe_process(pid, Ok)
+}
+#[cfg(test)]
 pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
-    process_identity_with_parent(pid, None)
+    let mut guard =
+        crate::core::native_metadata::Guard::new(Default::default()).map_err(io::Error::other)?;
+    process_identity_budgeted(pid, &mut guard)
+}
+pub fn process_identity_budgeted(
+    pid: u32,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> io::Result<ProcessIdentity> {
+    guard.processes(1).map_err(io::Error::other)?;
+    guard.entries(1).map_err(io::Error::other)?;
+    let observed = observe_process(pid, |metadata| {
+        let snapshot = process_snapshot_guarded(guard)?;
+        let parent = snapshot
+            .into_iter()
+            .find(|(candidate, _, _)| *candidate == pid)
+            .map(|(_, parent, _)| parent)
+            .ok_or_else(|| io::Error::other("Process no longer observed"))?;
+        Ok(metadata.with_parent(parent))
+    })?;
+    guard.check().map_err(io::Error::other)?;
+    Ok(observed)
 }
 /// Refuse removal while any process still uses this executable. Names only
 /// narrow the snapshot; file identity establishes which installation is in use.
@@ -501,7 +544,10 @@ pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
     let name = executable
         .file_name()
         .ok_or_else(|| denied("Missing executable name"))?;
-    for (pid, parent, observed) in process_snapshot()? {
+    let mut guard =
+        crate::core::native_metadata::Guard::new(Default::default()).map_err(io::Error::other)?;
+    for (pid, parent, observed) in process_snapshot_guarded(&mut guard)? {
+        guard.check().map_err(io::Error::other)?;
         if !observed.eq_ignore_ascii_case(&name.to_string_lossy()) {
             continue;
         }
@@ -521,15 +567,42 @@ pub fn check_executable_not_running(executable: &Path) -> io::Result<()> {
             return Err(io::Error::other("Installed executable is still running"));
         }
     }
-    Ok(())
+    guard.check().map_err(io::Error::other)
 }
-fn process_snapshot() -> io::Result<Vec<(u32, u32, String)>> {
-    process_snapshot_with(65536, None)
+fn process_snapshot_guarded(
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> io::Result<Vec<(u32, u32, String)>> {
+    let (limit, deadline) = guard.snapshot_capacity().map_err(io::Error::other)?;
+    if limit == 0 {
+        return Err(io::Error::other(guard.snapshot_entries(1).unwrap_err()));
+    }
+    let snapshot = match process_snapshot_with(limit, deadline) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.to_string() == "Process snapshot exceeds bound" => {
+            return Err(io::Error::other(
+                guard.snapshot_entries(limit + 1).unwrap_err(),
+            ));
+        }
+        Err(error) => {
+            guard.check().map_err(io::Error::other)?;
+            return Err(error);
+        }
+    };
+    guard
+        .snapshot_entries(snapshot.len())
+        .map_err(io::Error::other)?;
+    Ok(snapshot)
 }
 fn process_snapshot_with(
     limit: usize,
-    deadline: Option<std::time::Instant>,
+    deadline: std::time::Instant,
 ) -> io::Result<Vec<(u32, u32, String)>> {
+    if std::time::Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Process snapshot deadline reached",
+        ));
+    }
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
@@ -544,7 +617,7 @@ fn process_snapshot_with(
             return Err(last());
         }
         while more != 0 {
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            if std::time::Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Process snapshot deadline reached",
@@ -571,12 +644,6 @@ fn process_snapshot_with(
         Ok(result)
     }
 }
-fn process_parents() -> io::Result<std::collections::BTreeMap<u32, u32>> {
-    Ok(process_snapshot()?
-        .into_iter()
-        .map(|(pid, parent, _)| (pid, parent))
-        .collect())
-}
 pub struct TerminalProcesses {
     pub processes: Vec<ProcessIdentity>,
     pub parents: std::collections::BTreeMap<u32, u32>,
@@ -587,7 +654,7 @@ pub fn terminal_processes(
     query_limit: usize,
     deadline: std::time::Instant,
 ) -> io::Result<TerminalProcesses> {
-    let snapshot = process_snapshot_with(entry_limit, Some(deadline))?;
+    let snapshot = process_snapshot_with(entry_limit, deadline)?;
     let parents = snapshot
         .iter()
         .map(|(pid, parent, _)| (*pid, *parent))
@@ -672,19 +739,7 @@ fn descendant_processes_guarded(
     guard: &mut crate::core::native_metadata::Guard<'_>,
     mut observe: impl FnMut(u32, Option<u32>) -> io::Result<ProcessIdentity>,
 ) -> io::Result<Vec<ProcessIdentity>> {
-    let (limit, deadline) = guard.snapshot_capacity().map_err(io::Error::other)?;
-    let snapshot = match process_snapshot_with(limit, Some(deadline)) {
-        Ok(snapshot) => snapshot,
-        Err(error) if error.to_string() == "Process snapshot exceeds bound" => {
-            return Err(io::Error::other(
-                guard.snapshot_entries(limit.saturating_add(1)).unwrap_err(),
-            ));
-        }
-        Err(error) => return Err(error),
-    };
-    guard
-        .snapshot_entries(snapshot.len())
-        .map_err(io::Error::other)?;
+    let snapshot = process_snapshot_guarded(guard)?;
     let parents: std::collections::BTreeMap<_, _> = snapshot
         .into_iter()
         .map(|(pid, parent, _)| (pid, parent))
@@ -762,6 +817,14 @@ fn process_identity_with_parent(
     pid: u32,
     known_parent: Option<u32>,
 ) -> io::Result<ProcessIdentity> {
+    let parent =
+        known_parent.ok_or_else(|| io::Error::other("Process ancestry was not observed"))?;
+    observe_process(pid, |metadata| Ok(metadata.with_parent(parent)))
+}
+fn observe_process<T>(
+    pid: u32,
+    observe: impl FnOnce(ProcessMetadata) -> io::Result<T>,
+) -> io::Result<T> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
         if handle.is_null() {
@@ -769,7 +832,7 @@ fn process_identity_with_parent(
         }
         let _process = File::from_raw_handle(handle);
         require_running_process(handle)?;
-        let observed = (|| -> io::Result<ProcessIdentity> {
+        let observed = (|| -> io::Result<T> {
             let (_token, user) = token_user(handle)?;
             let owner = sid_string((*(user.as_ptr().cast::<TOKEN_USER>())).User.Sid)?;
             let mut created: FILETIME = std::mem::zeroed();
@@ -792,15 +855,8 @@ fn process_identity_with_parent(
                 return Err(last());
             }
             let executable = PathBuf::from(String::from_utf16_lossy(&name[..size as usize]));
-            let parent = match known_parent {
-                Some(parent) => parent,
-                None => *process_parents()?
-                    .get(&pid)
-                    .ok_or_else(|| io::Error::other("Process no longer observed"))?,
-            };
-            Ok(ProcessIdentity {
+            observe(ProcessMetadata {
                 pid,
-                parent_pid: parent,
                 creation_time: ((created.dwHighDateTime as u64) << 32)
                     | created.dwLowDateTime as u64,
                 executable,
@@ -1512,6 +1568,45 @@ mod tests {
             .unwrap();
         std::io::stdout().flush().unwrap();
         let _ = std::io::stdin().read_exact(&mut [0]);
+    }
+    #[test]
+    fn scalar_metadata_needs_no_snapshot_and_parent_metadata_obeys_saved_limits() {
+        let observed = process_metadata(std::process::id()).unwrap();
+        assert_eq!(observed.pid, std::process::id());
+        assert_eq!(observed.owner, current_identity().unwrap());
+        assert!(observed.creation_time > 0);
+        let mut guard =
+            crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
+                snapshot_entries: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let error = process_identity_budgeted(observed.pid, &mut guard).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("native_metadata_process_scan_limit")
+        );
+        // The unrelated scalar query remains valid even after an ancestry cap.
+        assert_eq!(
+            process_metadata(observed.pid).unwrap().creation_time,
+            observed.creation_time
+        );
+        let mut guard = crate::core::native_metadata::Guard::new(Default::default())
+            .unwrap()
+            .with_deadline(Some(std::time::Instant::now()));
+        assert!(
+            process_identity_budgeted(observed.pid, &mut guard)
+                .unwrap_err()
+                .to_string()
+                .contains("native_metadata_timeout_ms")
+        );
+        assert!(
+            process_identity_with_parent(observed.pid, None)
+                .unwrap_err()
+                .to_string()
+                .contains("ancestry was not observed")
+        );
     }
     #[test]
     fn bounded_descendants_include_only_live_owned_children() {

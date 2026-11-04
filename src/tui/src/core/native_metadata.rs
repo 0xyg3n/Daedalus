@@ -145,13 +145,25 @@ impl<'a> Guard<'a> {
     /// files/symlinks and charge each chunk before inspecting more metadata.
     #[cfg(unix)]
     pub fn process_file(&mut self, path: &Path) -> Result<Vec<u8>> {
+        self.process_file_optional(path)?
+            .ok_or_else(|| "Native process metadata disappeared".into())
+    }
+    #[cfg(unix)]
+    pub fn process_file_optional(&mut self, path: &Path) -> Result<Option<Vec<u8>>> {
         use std::os::unix::fs::OpenOptionsExt;
         self.entries(1)?;
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(path)
-            .map_err(|_| "Cannot open native process metadata")?;
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.check()?;
+                return Ok(None);
+            }
+            Err(_) => return Err("Cannot open native process metadata".into()),
+        };
         if !file
             .metadata()
             .map_err(|_| "Cannot inspect native process metadata")?
@@ -170,7 +182,7 @@ impl<'a> Guard<'a> {
                 .map_err(|_| "Cannot read native process metadata")?;
             if read == 0 {
                 self.check()?;
-                return Ok(bytes);
+                return Ok(Some(bytes));
             }
             if bytes.len() as u64 + read as u64 > cap {
                 return self.fail(if cap < self.policy.file_bytes {
@@ -181,6 +193,16 @@ impl<'a> Guard<'a> {
             }
             self.work -= read as u64;
             bytes.extend_from_slice(&buffer[..read]);
+        }
+    }
+    pub fn byte_work(&mut self, count: usize) -> Result<()> {
+        self.check()?;
+        match self.work.checked_sub(count as u64) {
+            Some(left) => {
+                self.work = left;
+                Ok(())
+            }
+            None => self.fail("native_metadata_work_limit_bytes"),
         }
     }
     pub fn json(&mut self, bytes: &[u8]) -> Result<()> {

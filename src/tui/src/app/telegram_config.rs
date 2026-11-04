@@ -708,7 +708,7 @@ pub(crate) fn running_service(directory: &Path) -> Option<super::telegram_superv
     if record.instance != config.instance || record.bot_id != config.bot_id {
         return None;
     }
-    let process = crate::platform::process_identity(record.pid).ok()?;
+    let process = crate::platform::process_metadata(record.pid).ok()?;
     let owner = crate::platform::current_identity().ok()?;
     if process.creation_time != record.start_ticks || process.owner != owner {
         return None;
@@ -741,7 +741,7 @@ fn daedalus_image(path: &Path) -> bool {
 /// enough: Windows can replace the path while the old image keeps running.
 #[cfg(windows)]
 pub(crate) fn service_matches_current(record: &super::telegram_supervisor::Record) -> bool {
-    let Ok(process) = crate::platform::process_identity(record.pid) else {
+    let Ok(process) = crate::platform::process_metadata(record.pid) else {
         return false;
     };
     if process.creation_time != record.start_ticks {

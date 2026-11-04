@@ -98,7 +98,6 @@ pub struct Terminals {
     pub timeout: Duration,
     pub output_limit: usize,
     pub discovery_budget: Option<std::sync::Arc<crate::app::discovery_budget::Budget>>,
-    #[cfg(windows)]
     pub native_metadata_policy: crate::core::native_metadata::Policy,
     pub native_launch_cols: u16,
     pub native_launch_rows: u16,
@@ -114,7 +113,6 @@ impl Default for Terminals {
             timeout: Duration::from_millis(settings.terminal_query_timeout_ms),
             output_limit: settings.terminal_query_limit_bytes as usize,
             discovery_budget: None,
-            #[cfg(windows)]
             native_metadata_policy: settings.native_metadata_policy(),
             native_launch_cols: settings.native_launch_cols,
             native_launch_rows: settings.native_launch_rows,
@@ -136,16 +134,19 @@ impl Terminals {
         settings.validate()?;
         self.timeout = Duration::from_millis(settings.terminal_query_timeout_ms);
         self.output_limit = settings.terminal_query_limit_bytes as usize;
-        #[cfg(windows)]
-        {
-            self.native_metadata_policy = settings.native_metadata_policy();
-        }
+        self.native_metadata_policy = settings.native_metadata_policy();
         self.native_launch_cols = settings.native_launch_cols;
         self.native_launch_rows = settings.native_launch_rows;
         self.native_scrollback_rows = settings.native_scrollback_rows;
         Ok(())
     }
 
+    pub fn metadata_guard(&self) -> Result<crate::core::native_metadata::Guard<'static>> {
+        Ok(
+            crate::core::native_metadata::Guard::new(self.native_metadata_policy)?
+                .with_deadline(self.discovery_budget.as_ref().map(|budget| budget.deadline)),
+        )
+    }
     pub(crate) fn query(&self, executable: &Path, args: &[&str]) -> Result<String> {
         let timeout = match &self.discovery_budget {
             Some(budget) => self.timeout.min(budget.time_left()?),
@@ -684,7 +685,7 @@ pub(crate) fn discover_sockets_with(
 }
 #[cfg(windows)]
 pub fn process_start(_proc_root: &Path, pid: &str) -> Option<String> {
-    let process = crate::platform::process_identity(pid.parse().ok()?).ok()?;
+    let process = crate::platform::process_metadata(pid.parse().ok()?).ok()?;
     (process.owner == crate::platform::current_identity().ok()?)
         .then(|| process.creation_time.to_string())
 }

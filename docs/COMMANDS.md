@@ -201,9 +201,9 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `native_metadata_value_limit` | 262144 | 16–16777216; cumulative strict JSON values and keys |
 | `native_metadata_header_limit_bytes` | 16384 | 128–1048576; Pi header only, through its newline |
 | `native_metadata_timeout_ms` | 2000 | 1–60000; cooperative native metadata deadline |
-| `native_metadata_process_limit` | 128 | 1–65536; cumulative Windows subtree and Linux OpenCode candidates including roots |
-| `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows snapshots or Linux OpenCode child PID entries |
-| `native_metadata_depth_limit` | 32 | 1–256; Windows subtree ancestry depth |
+| `native_metadata_process_limit` | 128 | 1–65536; cumulative foreground, ancestry, subtree and stability process checks including roots |
+| `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows snapshot rows or Linux process-directory and child PID entries |
+| `native_metadata_depth_limit` | 32 | 1–256; process ancestry depth on Linux and Windows |
 | `native_command_argument_limit_bytes` | 2048 | 1–65536; reviewed native command argument bytes, including `/cc` syntax |
 | `native_command_model_limit_bytes` | 128 | 1–4096; model ID bytes, also bounded by the argument limit |
 | `harness_probe_timeout_ms` | 2000 | 100–60000; local account-status and native command-version checks |
@@ -264,6 +264,17 @@ using the same worker limit, followed by endpoint queries and the external scan.
 Native registry entries and external process entries have separate saved limits.
 Linux counts every directory entry during its process scan; Windows counts
 snapshot rows and caps the number of candidate process identity queries.
+
+Native foreground discovery, session-ID recovery, checkpoint preparation and
+stability checks share one saved native identity metadata budget per operation.
+Linux argument, environment and process-stat reads and process-directory scans
+use the saved file, work, entry and process limits. Hook process verification and
+dashboard self-ancestry checks also use the saved policy. Resource exhaustion
+reports the setting to review; it cannot become a successful partial match or a
+context-only checkpoint fallback. Windows executable/owner/birth-time queries
+avoid process snapshots; callers needing parentage use bounded snapshots and
+retain incarnation and ownership checks. Owned Windows query startup and thread
+scans use the query's absolute timeout before resuming a child.
 
 The whole-refresh deadline and stage deadlines are cooperative. Owned subprocess
 queries are stopped when their remaining time expires. Native metadata RPCs use

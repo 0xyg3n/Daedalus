@@ -132,7 +132,7 @@ pub fn gateway(
         .and_then(|v| u32::try_from(v).ok())
         .ok_or("Missing Hermes gateway PID")?;
     let process =
-        platform::process_identity(pid).map_err(|_| "Hermes gateway process disappeared")?;
+        platform::process_metadata(pid).map_err(|_| "Hermes gateway process disappeared")?;
     if process.owner != platform::current_identity().map_err(|e| e.to_string())?
         || gateway_pid(&bytes, process.creation_time, guard)? != pid
     {
@@ -195,8 +195,9 @@ pub fn live(
     let owner = platform::current_identity().map_err(|e| e.to_string())?;
     let verify = |guard: &mut Guard<'_>| -> Result<()> {
         guard.entries(1)?;
+        guard.processes(1)?;
         let observed =
-            platform::process_identity(pid).map_err(|_| "Hermes foreground process disappeared")?;
+            platform::process_metadata(pid).map_err(|_| "Hermes foreground process disappeared")?;
         if observed.creation_time != started || observed.owner != owner {
             return Err("Hermes foreground process changed".into());
         }
@@ -204,14 +205,18 @@ pub fn live(
     };
     verify(guard)?;
     let mut processes = BTreeMap::new();
-    let mut descendants = platform::descendant_processes_budgeted(pid, guard)
-        .map_err(|e| format!("Cannot inspect Hermes subprocesses: {e}"))?;
-    descendants.push(platform::process_identity(pid).map_err(|_| "Hermes process disappeared")?);
-    for candidate in &descendants {
+    let mut descendants: Vec<_> = platform::descendant_processes_budgeted(pid, guard)
+        .map_err(|e| format!("Cannot inspect Hermes subprocesses: {e}"))?
+        .into_iter()
+        .map(|candidate| (candidate.pid, candidate.creation_time))
+        .collect();
+    descendants.push((pid, started));
+    for &(candidate_pid, candidate_start) in &descendants {
         guard.entries(1)?;
+        guard.processes(1)?;
         let current =
-            platform::process_identity(candidate.pid).map_err(|_| "Hermes subprocess changed")?;
-        if current.creation_time != candidate.creation_time || current.owner != owner {
+            platform::process_metadata(candidate_pid).map_err(|_| "Hermes subprocess changed")?;
+        if current.creation_time != candidate_start || current.owner != owner {
             return Err("Hermes subprocess identity changed".into());
         }
         let unix_ticks = current
@@ -238,11 +243,12 @@ pub fn live(
         }
     }
     verify(guard)?;
-    for candidate in descendants {
+    for (candidate_pid, candidate_start) in descendants {
         guard.entries(1)?;
-        let current = platform::process_identity(candidate.pid)
+        guard.processes(1)?;
+        let current = platform::process_metadata(candidate_pid)
             .map_err(|_| "Hermes subprocess disappeared")?;
-        if current.creation_time != candidate.creation_time || current.owner != owner {
+        if current.creation_time != candidate_start || current.owner != owner {
             return Err("Hermes subprocess changed during discovery".into());
         }
     }

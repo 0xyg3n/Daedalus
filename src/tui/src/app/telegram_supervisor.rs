@@ -354,7 +354,7 @@ fn verify(record: &Record, _: &Path) -> Result<()> {
 }
 #[cfg(windows)]
 fn verify_windows_executable(record: &Record, executable: &Path) -> Result<()> {
-    let process = crate::platform::process_identity(record.pid)
+    let process = crate::platform::process_metadata(record.pid)
         .map_err(|_| "Service process is unavailable")?;
     let owner =
         crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
@@ -386,7 +386,7 @@ fn held(directory: &Path) -> Result<bool> {
 }
 #[cfg(windows)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
-    let process = crate::platform::process_identity(std::process::id())
+    let process = crate::platform::process_metadata(std::process::id())
         .map_err(|_| "Cannot inspect service process")?;
     let owner = crate::platform::current_identity().map_err(|_| "Cannot verify service owner")?;
     if process.owner != owner {
@@ -526,7 +526,7 @@ fn live_service(directory: &Path) -> Result<Option<Record>> {
     if record.directory != directory || record.pid == 0 || record.pid == std::process::id() {
         return Ok(None);
     }
-    let process = match crate::platform::process_identity(record.pid) {
+    let process = match crate::platform::process_metadata(record.pid) {
         Ok(process) => process,
         Err(_) => return Ok(None),
     };
@@ -614,7 +614,7 @@ fn stop_one_for_install(directory: &Path, timeout: std::time::Duration) -> Resul
 }
 #[cfg(windows)]
 fn confirm_same_process(record: &Record) -> Result<()> {
-    let process = crate::platform::process_identity(record.pid)
+    let process = crate::platform::process_metadata(record.pid)
         .map_err(|_| "Service process is unavailable")?;
     let owner =
         crate::platform::current_identity().map_err(|_| "Cannot verify current identity")?;
@@ -640,7 +640,7 @@ pub fn stop_requested(directory: &Path) -> Result<bool> {
     };
     let request: StopRequest =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid private stop request")?;
-    let process = crate::platform::process_identity(std::process::id())
+    let process = crate::platform::process_metadata(std::process::id())
         .map_err(|_| "Cannot inspect service process")?;
     let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
     let matches = request.pid == process.pid

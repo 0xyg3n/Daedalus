@@ -1447,27 +1447,36 @@ impl NativeSource {
         &self,
         environment: &BTreeMap<String, String>,
         node: String,
-    ) -> super::session_actions::AttachContext {
+    ) -> Result<super::session_actions::AttachContext> {
+        let mut guard = self.terminals.metadata_guard()?;
         let mut ancestors = BTreeSet::new();
         let mut pid = std::process::id();
-        for _ in 0..128 {
+        for depth in 0..=guard.policy.depth {
+            guard.check()?;
+            if depth == guard.policy.depth {
+                return Err(
+                    "Native metadata ancestry limit reached; review native_metadata_depth_limit"
+                        .into(),
+                );
+            }
             if !ancestors.insert(pid.to_string()) {
-                break;
+                return Err("Process ancestry has cycles".into());
             }
             #[cfg(unix)]
             let parent = {
-                let Ok(stat) = std::fs::read_to_string(
-                    self.terminals.proc_root.join(pid.to_string()).join("stat"),
-                ) else {
+                guard.processes(1)?;
+                let result = guard.process_file_optional(
+                    &self.terminals.proc_root.join(pid.to_string()).join("stat"),
+                );
+                guard.check()?;
+                let Ok(Some(stat)) = result else { break };
+                let Some(end) = stat.iter().rposition(|byte| *byte == b')') else {
                     break;
                 };
-                let Some((_, tail)) = stat.rsplit_once(')') else {
-                    break;
-                };
-                let Some(parent) = tail
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|p| p.parse::<u32>().ok())
+                let Some(parent) = std::str::from_utf8(&stat[end + 1..])
+                    .ok()
+                    .and_then(|s| s.split_whitespace().nth(1))
+                    .and_then(|s| s.parse::<u32>().ok())
                 else {
                     break;
                 };
@@ -1475,12 +1484,16 @@ impl NativeSource {
             };
             #[cfg(windows)]
             let parent = {
-                let Ok(process) = crate::platform::process_identity(pid) else {
+                let result = crate::platform::process_identity_budgeted(pid, &mut guard);
+                guard.check()?;
+                let Ok(process) = result else { break };
+                if process.parent_pid == 0 {
                     break;
-                };
-                let Ok(parent) = crate::platform::process_identity(process.parent_pid) else {
-                    break;
-                };
+                }
+                guard.processes(1)?;
+                let result = crate::platform::process_metadata(process.parent_pid);
+                guard.check()?;
+                let Ok(parent) = result else { break };
                 if parent.owner != process.owner || parent.creation_time > process.creation_time {
                     break;
                 }
@@ -1491,7 +1504,8 @@ impl NativeSource {
             }
             pid = parent;
         }
-        super::session_actions::AttachContext {
+        guard.check()?;
+        Ok(super::session_actions::AttachContext {
             own_terminals: super::session_actions::own_terminals(
                 &self.last_snapshot,
                 environment,
@@ -1501,7 +1515,7 @@ impl NativeSource {
             holders: vec![],
             node,
             hostname: environment.get("HOSTNAME").cloned().unwrap_or_default(),
-        }
+        })
     }
 }
 impl Source for NativeSource {
@@ -1922,7 +1936,7 @@ impl Source for NativeSource {
             }
             #[cfg(windows)]
             {
-                let identity = crate::platform::process_identity(
+                let identity = crate::platform::process_metadata(
                     pid.parse().map_err(|_| "Invalid native process identity")?,
                 )
                 .map_err(|_| "Cannot verify running native process")?;
@@ -2373,7 +2387,7 @@ impl Source for NativeSource {
                     &self.directory,
                 )?)),
                 Request::Native(pane) => {
-                    let context = self.attach_context(&environment, String::new());
+                    let context = self.attach_context(&environment, String::new())?;
                     let command = super::workspace_actions::native_command(
                         &self.terminals,
                         &pane,
@@ -2498,7 +2512,7 @@ impl Source for NativeSource {
                     Ok(Answer::Receipt(store.apply(&self.terminals, prepared)?))
                 }
                 Request::Attach { pane, mode, node } => {
-                    let context = self.attach_context(&environment, node);
+                    let context = self.attach_context(&environment, node)?;
                     Ok(Answer::Frame(session_actions::prepare_attach(
                         &self.terminals,
                         &pane,
@@ -2512,7 +2526,7 @@ impl Source for NativeSource {
                     destination,
                     read_only,
                 } => {
-                    let context = self.attach_context(&environment, String::new());
+                    let context = self.attach_context(&environment, String::new())?;
                     let prepared = session_actions::prepare_duplicate_view(
                         &self.terminals,
                         &source,
@@ -2743,43 +2757,21 @@ impl Source for NativeSource {
         self.previews(std::slice::from_ref(pane), rows).remove(0)
     }
     fn previews(&mut self, targets: &[Value], rows: usize) -> Vec<Result<String>> {
-        let environment: BTreeMap<String, String> =
-            ["TMUX", "TMUX_PANE", "HERDR_SESSION", "HERDR_PANE_ID"]
-                .into_iter()
-                .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
-                .collect();
-        let mut ancestors = BTreeSet::new();
-        let mut pid = std::process::id();
-        for _ in 0..128 {
-            if !ancestors.insert(pid.to_string()) {
-                break;
-            }
-            let Ok(stat) = std::fs::read_to_string(
-                self.terminals.proc_root.join(pid.to_string()).join("stat"),
-            ) else {
-                break;
-            };
-            let Some((_, fields)) = stat.rsplit_once(')') else {
-                break;
-            };
-            let Some(parent) = fields
-                .split_whitespace()
-                .nth(1)
-                .and_then(|value| value.parse::<u32>().ok())
-            else {
-                break;
-            };
-            if parent == 0 {
-                break;
-            }
-            pid = parent;
-        }
-        let own = super::session_actions::own_terminals(
-            &self.last_snapshot,
-            &environment,
-            &ancestors,
-            &[],
-        );
+        let environment: BTreeMap<String, String> = [
+            "TMUX",
+            "TMUX_PANE",
+            "HERDR_SESSION",
+            "HERDR_PANE_ID",
+            "DAEDALUS_TERMINAL_ID",
+            "DAEDALUS_TERMINAL_GENERATION",
+        ]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
+        .collect();
+        let own = match self.attach_context(&environment, String::new()) {
+            Ok(context) => context.own_terminals,
+            Err(error) => return bounded_previews(targets, |_| Err(error.clone())),
+        };
         bounded_previews(targets, |pane| {
             let identity = terminals::identity(pane)?;
             if own.contains(&identity) {
@@ -3685,6 +3677,84 @@ mod tests {
         changed["configuration"]["bot_id"] = json!(999);
         assert!(native_route_observation(&directory, &changed).is_err());
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn self_context_and_preview_refuse_exhausted_saved_ancestry_limits() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut nonce = [0; 16];
+        crate::platform::random_bytes(&mut nonce).unwrap();
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("dd-self-metadata-{:x}", u128::from_le_bytes(nonce))),
+        );
+        let root = fixture.0.join("proc");
+        let pid = std::process::id();
+        for (child, parent) in [(pid, pid + 1), (pid + 1, 0)] {
+            let path = root.join(child.to_string());
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("stat"),
+                format!("{child} (owned synthetic process) S {parent}"),
+            )
+            .unwrap();
+        }
+        let pane = json!({"backend":"native","session":"fixture","pane_id":"fixture","terminal_id":"generation","pid":(pid+1).to_string()});
+        let mut source = NativeSource {
+            directory: fixture.0.clone(),
+            terminals: Terminals {
+                proc_root: root,
+                ..Default::default()
+            },
+            last_snapshot: json!({"panes":[pane.clone()]}),
+            usage_recorder: Default::default(),
+        };
+        let settings = super::super::runtime_settings::Settings {
+            native_metadata_process_limit: 1,
+            ..Default::default()
+        };
+        source.terminals.apply_settings(&settings).unwrap();
+        assert!(
+            source
+                .attach_context(&BTreeMap::new(), String::new())
+                .err()
+                .unwrap()
+                .contains("native_metadata_process_limit")
+        );
+        let result = source.previews(std::slice::from_ref(&pane), 10);
+        assert!(
+            result[0]
+                .as_ref()
+                .unwrap_err()
+                .contains("native_metadata_process_limit")
+        );
+        let settings = super::super::runtime_settings::Settings {
+            native_metadata_depth_limit: 1,
+            ..Default::default()
+        };
+        source.terminals.apply_settings(&settings).unwrap();
+        assert!(
+            source
+                .attach_context(&BTreeMap::new(), String::new())
+                .err()
+                .unwrap()
+                .contains("native_metadata_depth_limit")
+        );
+        source
+            .terminals
+            .apply_settings(&Default::default())
+            .unwrap();
+        let context = source
+            .attach_context(&BTreeMap::new(), String::new())
+            .unwrap();
+        assert!(
+            context
+                .own_terminals
+                .contains(&terminals::identity(&pane).unwrap())
+        );
     }
     #[test]
     fn finish_local_setup_enables_verified_attach_and_preserves_existing_settings() {
