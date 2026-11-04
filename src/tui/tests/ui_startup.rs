@@ -2239,6 +2239,53 @@ fn native_metadata_policy_is_reviewed_saved_and_reopened_in_the_real_ui() {
     ui.quit();
 }
 #[test]
+fn native_command_model_limit_is_reviewed_saved_and_reopened_in_the_real_ui() {
+    use daedalus_tui::app::{config::ControlConfig, runtime_settings::SETTINGS};
+    let mut ui = Ui::configured(false, true);
+    let path = ui.directory.join(".config/daedalus/control.json");
+    let before = fs::read(&path).unwrap();
+    let field = SETTINGS
+        .iter()
+        .position(|s| s.key == "native_command_model_limit_bytes")
+        .unwrap();
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.master
+        .write_all(b"\x10Terminals and discovery\r\r")
+        .unwrap();
+    ui.wait_text("Saved in this configuration");
+    for _ in 0..field {
+        ui.master.write_all(b"\x1b[B").unwrap();
+    }
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Saved value: 128");
+    ui.master.write_all(b"0\r").unwrap();
+    ui.wait_text("must be between 1 and 4096");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"256\r").unwrap();
+    ui.wait_text("Save native_command_model_limit_bytes:");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Configuration saved privately");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .runtime
+            .native_command_model_limit_bytes,
+        256
+    );
+    ui.quit();
+    ui.restart();
+    ui.wait_text("0 terminals");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .runtime
+            .native_command_model_limit_bytes,
+        256
+    );
+    ui.quit();
+}
+#[test]
 fn terminal_runtime_settings_are_validated_reviewed_saved_and_reopened() {
     let mut ui = Ui::configured(false, true);
     let path = ui.directory.join(".config/daedalus/control.json");

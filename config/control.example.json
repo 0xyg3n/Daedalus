@@ -126,6 +126,8 @@
     "native_metadata_timeout_ms": 2000,
     "native_metadata_process_limit": 128,
     "native_metadata_process_scan_limit": 65536,
-    "native_metadata_depth_limit": 32
+    "native_metadata_depth_limit": 32,
+    "native_command_argument_limit_bytes": 2048,
+    "native_command_model_limit_bytes": 128
   }
 }

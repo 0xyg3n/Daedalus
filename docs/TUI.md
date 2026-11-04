@@ -587,3 +587,5 @@ terminal; saved proportions return when there is room. This changes the Cube
 view; Herdr controllers follow its viewport, while tmux only follows it when
 Fit size is enabled. Unused space carries a circuit pattern with moving lights
 and brief glitch fragments. Reduced motion keeps the pattern stationary.
+
+Native command argument/model ID byte limits are editable in Configuration settings → Terminals and discovery → Native commands. These saved limits apply to command preparation before a native version probe; changing them does not bypass the audited version or command grammar. Native command confirmations put the observed version, verified conversation and potential model-work/context effects before the command preview.

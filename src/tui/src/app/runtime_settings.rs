@@ -49,6 +49,8 @@ pub struct Settings {
     pub native_metadata_process_limit: u64,
     pub native_metadata_process_scan_limit: u64,
     pub native_metadata_depth_limit: u64,
+    pub native_command_argument_limit_bytes: u64,
+    pub native_command_model_limit_bytes: u64,
     pub harness_probe_timeout_ms: u64,
     pub harness_probe_limit_bytes: u64,
     pub native_login_timeout_ms: u64,
@@ -81,6 +83,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         let metadata = crate::core::native_metadata::Policy::default();
+        let commands = crate::adapters::harness_commands::Limits::default();
         let snapshot = crate::adapters::sqlite::SnapshotOptions::default();
         let checkpoints = crate::core::checkpoint_budget::Policy::default();
         Self {
@@ -138,6 +141,8 @@ impl Default for Settings {
             native_metadata_process_limit: metadata.processes,
             native_metadata_process_scan_limit: metadata.snapshot_entries,
             native_metadata_depth_limit: metadata.depth,
+            native_command_argument_limit_bytes: commands.argument_bytes,
+            native_command_model_limit_bytes: commands.model_bytes,
             harness_probe_timeout_ms: 2000,
             harness_probe_limit_bytes: 16384,
             native_login_timeout_ms: 120000,
@@ -478,6 +483,22 @@ pub const SETTINGS: &[Setting] = &[
         256
     ),
     setting!(
+        native_command_argument_limit_bytes,
+        "Native command argument byte limit",
+        "Native commands",
+        "Maximum argument bytes for one reviewed native command, including /cc syntax. Character and command-contract checks remain required.",
+        1,
+        65536
+    ),
+    setting!(
+        native_command_model_limit_bytes,
+        "Native model ID byte limit",
+        "Native commands",
+        "Maximum native model ID bytes, also bounded by the command argument limit. Only the audited model-name character syntax is accepted.",
+        1,
+        4096
+    ),
+    setting!(
         harness_probe_timeout_ms,
         "Native command probe timeout (ms)",
         "Discovery",
@@ -743,6 +764,12 @@ pub const SETTINGS: &[Setting] = &[
     ),
 ];
 impl Settings {
+    pub fn native_command_limits(&self) -> crate::adapters::harness_commands::Limits {
+        crate::adapters::harness_commands::Limits {
+            argument_bytes: self.native_command_argument_limit_bytes,
+            model_bytes: self.native_command_model_limit_bytes,
+        }
+    }
     pub fn native_metadata_policy(&self) -> crate::core::native_metadata::Policy {
         crate::core::native_metadata::Policy {
             file_bytes: self.native_metadata_file_limit_bytes,
@@ -831,6 +858,10 @@ mod tests {
         let defaults = Settings::default();
         defaults.validate().unwrap();
         assert_eq!(
+            defaults.native_command_limits(),
+            crate::adapters::harness_commands::Limits::default()
+        );
+        assert_eq!(
             defaults.native_metadata_policy(),
             crate::core::native_metadata::Policy::default()
         );
@@ -869,6 +900,12 @@ mod tests {
             assert!(defaults.set(setting.key, &(max + 1).to_string()).is_err());
             assert!(defaults.set(setting.key, "private-account-value").is_err());
             for value in [min, max] {
+                defaults
+                    .set(setting.key, &value.to_string())
+                    .unwrap()
+                    .native_command_limits()
+                    .validate()
+                    .unwrap();
                 defaults
                     .set(setting.key, &value.to_string())
                     .unwrap()

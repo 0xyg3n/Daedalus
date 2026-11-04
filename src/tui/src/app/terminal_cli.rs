@@ -15,7 +15,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Write, path::PathBuf};
 pub type Result<T> = std::result::Result<T, String>;
-pub const HELP: &str = "daedalus terminal list --config-dir ABS\ndaedalus terminal capture --config-dir ABS --target ABS [--lines 80]\ndaedalus terminal send --config-dir ABS --target ABS --text TEXT [--apply]\ndaedalus terminal interrupt|close|focus|attach --config-dir ABS --target ABS [--apply]\ndaedalus terminal rename --config-dir ABS --target ABS --name NAME [--apply]\ndaedalus terminal launch --config-dir ABS --target ABS --harness ID [--placement split|window] [--name NAME] [--apply]\ndaedalus terminal wait --config-dir ABS --target ABS --registration ABS [--timeout-seconds 30]\nWait requires exact registered harness lifecycle evidence; unknown is never idle. Lifecycle observation may initialize private hook tables.\ndaedalus terminal command --config-dir ABS --target ABS --text /COMMAND [--apply]\ndaedalus terminal keys --config-dir ABS --target ABS --keys KEY_SEQUENCE [--apply]\ndaedalus terminal control --config-dir ABS --target ABS --registration ABS --command model|effort|plan [--arguments VALUE] [--apply --expect-sha PREVIEW_SHA]\nNative control previews verify the installed command contract; apply requires the unchanged review and idle lifecycle evidence.\nTargets are private JSON files containing exact inventory observations, never labels. Mutations preview by default. Attach uses the real terminal after --apply. Capture is read-only and may contain private terminal output.\n";
+pub const HELP: &str = "daedalus terminal list --config-dir ABS\ndaedalus terminal capture --config-dir ABS --target ABS [--lines 80]\ndaedalus terminal send --config-dir ABS --target ABS --text TEXT [--apply]\ndaedalus terminal interrupt|close|focus|attach --config-dir ABS --target ABS [--apply]\ndaedalus terminal rename --config-dir ABS --target ABS --name NAME [--apply]\ndaedalus terminal launch --config-dir ABS --target ABS --harness ID [--placement split|window] [--name NAME] [--apply]\ndaedalus terminal wait --config-dir ABS --target ABS --registration ABS [--timeout-seconds 30]\nWait requires exact registered harness lifecycle evidence; unknown is never idle. Lifecycle observation may initialize private hook tables.\ndaedalus terminal command --config-dir ABS --target ABS --text /COMMAND [--apply]\ndaedalus terminal keys --config-dir ABS --target ABS --keys KEY_SEQUENCE [--apply]\ndaedalus terminal control --config-dir ABS --target ABS --registration ABS --command COMMAND [--arguments VALUE] [--apply --expect-sha PREVIEW_SHA]\nNative control previews verify the installed command contract; apply requires the unchanged review and idle lifecycle evidence.\nTargets are private JSON files containing exact inventory observations, never labels. Mutations preview by default. Attach uses the real terminal after --apply. Capture is read-only and may contain private terminal output.\n";
 #[derive(Debug)]
 pub struct Command {
     verb: String,
@@ -124,9 +124,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>> {
         }
     }
     if verb == "control" {
-        crate::adapters::harness_commands::plan(
-            "claude",
-            crate::adapters::harness_commands::AUDITED_CLAUDE_VERSION,
+        crate::adapters::harness_commands::validate_request(
             &options["--command"],
             options.get("--arguments").map(String::as_str).unwrap_or(""),
         )

@@ -55,6 +55,7 @@ pub enum Command {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Action {
     NativeSlash { command: String, arguments: String },
+    NativeSlashReviewed(Box<super::harness_control::Reviewed>),
     Select,
     Pin(bool),
     Capture,
@@ -122,7 +123,7 @@ pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("compact", "Compact native conversation context"),
     ("context", "Inspect native context usage"),
     ("cost", "Inspect native costs"),
-    ("agents", "Open native agents"),
+    ("agents", "Show native agent configuration guidance"),
     ("mcp", "Open native MCP settings"),
     ("review", "Run native code review"),
     ("secreview", "Run native security review"),
@@ -251,10 +252,15 @@ pub fn parse(text: &str, username: &str) -> Result<Option<Command>> {
         }
         "/clear" | "/compact" | "/context" | "/cost" | "/agents" | "/mcp" | "/review"
         | "/secreview" | "/export" | "/config" | "/memory" | "/cc" | "/model" | "/effort"
-        | "/plan" | "/security-review" => {
-            let command = name.trim_start_matches('/');
+        | "/plan" | "/security-review" | "/usage" | "/stats" | "/code-review" | "/list-agents"
+        | "/list_agents" | "/peers" => {
+            let command = if name == "/list_agents" {
+                "list-agents"
+            } else {
+                name.trim_start_matches('/')
+            };
             // Syntax validation only. The exact running provider/version is checked at execution.
-            crate::adapters::harness_commands::plan("claude", "2.1.296", command, rest)
+            crate::adapters::harness_commands::validate_request(command, rest)
                 .map_err(|e| e.to_string())?;
             Command::Harness(Action::NativeSlash {
                 command: command.into(),
@@ -413,6 +419,14 @@ pub trait Operations {
     fn inventory(&mut self) -> Result<Vec<Terminal>>;
     /// Must revalidate the target again immediately before terminal/session effects.
     fn execute(&mut self, action: &Action, target: &Target) -> Result<String>;
+    fn prepare_native_slash(
+        &mut self,
+        _target: &Target,
+        _command: &str,
+        _arguments: &str,
+    ) -> Result<super::harness_control::Reviewed> {
+        Err("Verified native command review unavailable".into())
+    }
     fn prepare_stream(
         &mut self,
         _caller: &Caller,
@@ -922,10 +936,17 @@ impl Dispatcher {
                 (Target::from(terminal), action)
             }
         };
+        let action = match action {
+            Action::NativeSlash { command, arguments } => Action::NativeSlashReviewed(Box::new(
+                operations.prepare_native_slash(&target, &command, &arguments)?,
+            )),
+            action => action,
+        };
         if !action.mutates() {
             return operations.execute(&action, &target).map(Reply::text);
         }
         let description = match &action {
+            Action::NativeSlashReviewed(reviewed) => reviewed.description(),
             Action::New(reviewed) => reviewed.description()?,
             Action::StreamStart(plan) => plan.description(),
             Action::SessionRename(plan) => plan.description(),
@@ -935,16 +956,17 @@ impl Dispatcher {
             ),
             _ => serde_json::to_string(&action).map_err(|_| "Cannot describe confirmation")?,
         };
-        let mut description = description;
-        if let Action::NativeSlash { command, arguments } = &action {
-            let plan =
-                crate::adapters::harness_commands::plan("claude", "2.1.296", command, arguments)
-                    .map_err(|e| e.to_string())?;
-            description.push_str(&format!("\nRequires verified Claude Code 2.1.296. May invoke model work: {}. Changes context: {}. May need native interaction: {}. Submission does not verify completion or changed settings.", plan.may_invoke_model, plan.changes_context, plan.may_require_interaction));
-        }
+        let preview = bounded_text(&description, 1500);
+        let preview = if preview != description {
+            format!(
+                "{preview}\n[Command/action preview truncated; the review pins the full request.]"
+            )
+        } else {
+            preview
+        };
         let text = format!(
-            "Action: {}\nTerminal: {}\nConversation: {}\nRoute revision: {}\nConfirm once within five minutes.",
-            description.chars().take(1600).collect::<String>(),
+            "Action: {}\nTerminal: {}\nConversation: {}\nRoute revision: {}\nConfirm once before this review expires.",
+            preview,
             terminal_key(&target.terminal),
             target.conversation.as_deref().unwrap_or("not reported"),
             revision
@@ -1410,6 +1432,38 @@ impl Operations for NativeOperations {
             None => "Queue state: Unknown (no delivery journal).".into(),
         })
     }
+    fn prepare_native_slash(
+        &mut self,
+        target: &Target,
+        command: &str,
+        arguments: &str,
+    ) -> Result<super::harness_control::Reviewed> {
+        self.terminals.apply_settings(&self.config.runtime)?;
+        let pane = self.pane(target)?;
+        let registration = self.registration(target, false)?;
+        let plan = super::harness_control::prepare(
+            super::harness_control::Request {
+                directory: self.directory.clone(),
+                registration,
+                target: pane,
+                command: command.into(),
+                arguments: arguments.into(),
+            },
+            &self.config,
+            &self.terminals,
+            &self.environment,
+        )?;
+        let reviewed = plan.reviewed();
+        if !reviewed.matches_target(
+            &self.directory,
+            &self.instance,
+            &target.terminal,
+            target.conversation.as_deref(),
+        ) {
+            return Err("Native command review scope mismatch".into());
+        }
+        Ok(reviewed)
+    }
     fn inventory(&mut self) -> Result<Vec<Terminal>> {
         let snapshot = self.snapshot()?;
         let mut terminals = std::collections::BTreeMap::new();
@@ -1456,6 +1510,11 @@ impl NativeOperations {
             .collect())
     }
     fn execute_native(&mut self, action: &Action, target: &Target) -> Result<String> {
+        if matches!(action, Action::NativeSlash { .. }) {
+            return Err(
+                "Native confirmation predates a verified contract review; request it again".into(),
+            );
+        }
         self.terminals.apply_settings(&self.config.runtime)?;
         use super::session_actions::{LaunchRequest, SaveRequest, SessionStore};
         use crate::{
@@ -1495,9 +1554,10 @@ impl NativeOperations {
             }
 
             Action::New(reviewed) => super::telegram_launch::apply(reviewed,&pane,&self.config,&self.terminals,now).map(|receipt|format!("{}\nThe current route is unchanged. Telegram feeder enrollment and recipient binding require separate reviewed setup; readiness is not confirmed.",receipt.message)),
-            Action::NativeSlash {command,arguments} => {
-                let registration=self.registration(target,false)?;
-                super::harness_control::submit(super::harness_control::Request{directory:self.directory.clone(),registration,target:pane.clone(),command:command.clone(),arguments:arguments.clone()},&self.config,&self.terminals,&self.environment)
+            Action::NativeSlash {..} => Err("Native confirmation predates a verified contract review; request it again".into()),
+            Action::NativeSlashReviewed(reviewed) => {
+                if !reviewed.matches_target(&self.directory, &self.instance, &target.terminal, target.conversation.as_deref()) { return Err("Native command review scope mismatch".into()); }
+                super::harness_control::apply_reviewed(reviewed, &self.config, &self.terminals, &self.environment)
             }
             Action::Capture => self.terminals.capture(&pane, 60).map(|text| {
                 text.chars()
@@ -1720,6 +1780,35 @@ mod tests {
         fail: bool,
     }
     impl Operations for Mock {
+        fn prepare_native_slash(
+            &mut self,
+            target: &Target,
+            command: &str,
+            arguments: &str,
+        ) -> Result<super::super::harness_control::Reviewed> {
+            Ok(super::super::harness_control::Reviewed {
+                request: super::super::harness_control::Request {
+                    directory: crate::test_support::path("/fixture").into(),
+                    registration: crate::test_support::path("/fixture/hooks/control.json").into(),
+                    target: serde_json::json!({}),
+                    command: command.into(),
+                    arguments: arguments.into(),
+                },
+                instance: "example".into(),
+                fingerprint: "a".repeat(64),
+                version: "2.1.317".into(),
+                native: crate::adapters::harness_commands::plan_with_limits(
+                    "claude",
+                    "2.1.317",
+                    command,
+                    arguments,
+                    Default::default(),
+                )
+                .map_err(|e| e.to_string())?,
+                terminal: target.terminal.clone(),
+                conversation: target.conversation.clone().unwrap_or_default(),
+            })
+        }
         fn inventory(&mut self) -> Result<Vec<Terminal>> {
             Ok(self.rows.clone())
         }
@@ -2412,6 +2501,139 @@ mod tests {
             Some(Command::Checkpoint(Action::CheckpointResume(key)))
         );
         assert!(parse("/resume ambiguous-name", &caller.bot_username).is_err());
+    }
+    #[test]
+    fn native_confirmation_persists_the_reviewed_contract_and_failure_offers_no_button() {
+        let (mut dispatcher, caller, mut routes, mut operations) = fixture();
+        let command = parse("/effort max", &caller.bot_username).unwrap().unwrap();
+        let reply = dispatcher
+            .command(&caller, command, &mut routes, &mut operations, 1)
+            .unwrap();
+        assert!(reply.text.contains("Claude Code 2.1.317"));
+        assert!(reply.text.contains("Verified conversation: conversation"));
+        let encoded: String = dispatcher
+            .callbacks
+            .con
+            .query_row("SELECT claim FROM telegram_controls", [], |row| row.get(0))
+            .unwrap();
+        let claim: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(claim["action"]["kind"], "native_slash_reviewed");
+        assert_eq!(claim["action"]["value"]["version"], "2.1.317");
+        assert_eq!(claim["action"]["value"]["native"]["literal"], "/effort max");
+        assert_eq!(operations.effects, 0);
+        dispatcher
+            .callback(
+                &caller,
+                &reply.buttons[0][0].callback_data,
+                &mut routes,
+                &mut operations,
+                2,
+            )
+            .unwrap();
+        assert_eq!(operations.effects, 1);
+        assert!(
+            dispatcher
+                .callback(
+                    &caller,
+                    &reply.buttons[0][0].callback_data,
+                    &mut routes,
+                    &mut operations,
+                    3
+                )
+                .is_err()
+        );
+
+        struct NoReview(Vec<Terminal>);
+        impl Operations for NoReview {
+            fn inventory(&mut self) -> Result<Vec<Terminal>> {
+                Ok(self.0.clone())
+            }
+            fn execute(&mut self, _: &Action, _: &Target) -> Result<String> {
+                panic!("Unverified native command executed")
+            }
+        }
+        let (mut dispatcher, caller, mut routes, operations) = fixture();
+        let mut unsupported = NoReview(operations.rows);
+        assert!(
+            dispatcher
+                .command(
+                    &caller,
+                    parse("/model sonnet", &caller.bot_username)
+                        .unwrap()
+                        .unwrap(),
+                    &mut routes,
+                    &mut unsupported,
+                    1
+                )
+                .unwrap_err()
+                .contains("review unavailable")
+        );
+        assert_eq!(
+            dispatcher
+                .callbacks
+                .con
+                .query_row("SELECT count(*) FROM telegram_controls", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn native_operations_reject_legacy_unreviewed_confirmation_before_discovery() {
+        let directory = std::env::temp_dir().join(format!(
+            "daedalus-native-legacy-review-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::core::layouts::write_private(&directory.join("marker"), b"").unwrap();
+        let mut config = super::super::config::ControlConfig::fresh(&directory).unwrap();
+        config.discovery.automatic = false;
+        let (_, _, _, fixture) = fixture();
+        let target = Target::from(&fixture.rows[0]);
+        let mut operations = NativeOperations {
+            instance: "example".into(),
+            directory: directory.clone(),
+            config,
+            terminals: crate::adapters::terminals::Terminals {
+                tmux: directory.join("must-not-run"),
+                herdr: directory.join("must-not-run"),
+                ..Default::default()
+            },
+            environment: Default::default(),
+        };
+        let legacy = Action::NativeSlash {
+            command: "model".into(),
+            arguments: "sonnet".into(),
+        };
+        let refused = operations.execute_native(&legacy, &target);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            refused
+                .unwrap_err()
+                .contains("predates a verified contract review")
+        );
+    }
+    #[test]
+    fn native_slash_confirmation_keeps_model_work_visible_with_long_instructions() {
+        let (mut dispatcher, caller, mut routes, mut operations) = fixture();
+        let command = parse(
+            &format!("/compact {}", "x".repeat(1900)),
+            &caller.bot_username,
+        )
+        .unwrap()
+        .unwrap();
+        let reply = dispatcher
+            .command(&caller, command, &mut routes, &mut operations, 1)
+            .unwrap();
+        assert_eq!(operations.effects, 0);
+        assert!(
+            reply.text.contains("May invoke model work: true"),
+            "Native impact was clipped from the confirmation"
+        );
+        assert!(reply.text.contains("Changes context: true"));
     }
     #[test]
     fn native_slash_commands_require_confirmation_and_explain_effects() {

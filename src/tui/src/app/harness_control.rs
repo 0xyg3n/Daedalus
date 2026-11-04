@@ -13,6 +13,7 @@ use crate::{
     },
     core::layouts,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -22,7 +23,8 @@ use std::{
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request {
     pub directory: PathBuf,
     pub registration: PathBuf,
@@ -34,6 +36,7 @@ pub struct Plan {
     request: Request,
     registration: Registration,
     native: harness_commands::Plan,
+    version: String,
     digest: String,
     sequence: i64,
 }
@@ -41,10 +44,80 @@ impl Plan {
     pub fn fingerprint(&self) -> &str {
         &self.digest
     }
+    pub fn reviewed(&self) -> Reviewed {
+        Reviewed {
+            request: self.request.clone(),
+            fingerprint: self.digest.clone(),
+            version: self.version.clone(),
+            native: self.native.clone(),
+            terminal: self.registration.scope.terminal.clone(),
+            conversation: self.registration.scope.conversation.clone(),
+            instance: self.registration.scope.instance.clone(),
+        }
+    }
     pub fn review(&self) -> Value {
-        json!({"operation":"native_harness_control","command":self.native.literal(),"target":self.registration.scope.terminal,"conversation":self.registration.scope.conversation,"fingerprint":self.digest,"may_invoke_model":self.native.may_invoke_model,"changes_context":self.native.changes_context,"may_require_interaction":self.native.may_require_interaction,"notice":self.native.submission_notice()})
+        self.reviewed().review()
     }
 }
+/// A durable confirmation freezes the observed native contract and exact scope,
+/// not merely the requested command name. Apply rederives and compares all facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reviewed {
+    pub(crate) request: Request,
+    pub(crate) fingerprint: String,
+    pub(crate) version: String,
+    pub(crate) native: harness_commands::Plan,
+    pub(crate) terminal: crate::core::identity::TerminalId,
+    pub(crate) conversation: String,
+    pub(crate) instance: String,
+}
+impl Reviewed {
+    pub fn matches_target(
+        &self,
+        directory: &Path,
+        instance: &str,
+        terminal: &crate::core::identity::TerminalId,
+        conversation: Option<&str>,
+    ) -> bool {
+        self.request.directory == directory
+            && self.instance == instance
+            && &self.terminal == terminal
+            && conversation.is_none_or(|id| id == self.conversation)
+    }
+    pub fn review(&self) -> Value {
+        json!({"operation":"native_harness_control","instance":self.instance,"harness_version":self.version,"command":self.native.literal(),"target":self.terminal,"conversation":self.conversation,"fingerprint":self.fingerprint,"may_invoke_model":self.native.may_invoke_model,"changes_context":self.native.changes_context,"may_require_interaction":self.native.may_require_interaction,"notice":self.native.submission_notice()})
+    }
+    pub fn description(&self) -> String {
+        let context = if self.native.command == "clear" {
+            " Starts a new native conversation. External route bindings remain unchanged; review them after changing sessions."
+        } else if self.native.command == "model" {
+            " Native model validation may issue a model request; availability and resulting settings are not verified by this submission."
+        } else if self.native.command == "code-review" {
+            " Native review can reuse saved local/cloud review settings; inspect any native prompts."
+        } else if self.native.command == "agents" {
+            " Native /agents prints configuration guidance; it is not a live agent inventory."
+        } else {
+            ""
+        };
+        format!(
+            "Claude Code {}.\nMay invoke model work: {}. Changes context: {}. May need native interaction: {}.\nInstance: {}\nVerified conversation: {}\nReview: {}\n{}{}\nCommand: {}",
+            self.version
+                .strip_suffix(" (Claude Code)")
+                .unwrap_or(&self.version),
+            self.native.may_invoke_model,
+            self.native.changes_context,
+            self.native.may_require_interaction,
+            self.instance,
+            self.conversation,
+            self.fingerprint,
+            self.native.submission_notice(),
+            context,
+            self.native.literal()
+        )
+    }
+}
+
 fn same_target(registration: &Registration, target: &Value, directory: &Path) -> Result<()> {
     if registration.directory != directory
         || registration.scope.terminal != terminals::identity(target)?
@@ -109,8 +182,17 @@ pub fn prepare(
     if &current != config {
         return Err("Instance configuration changed; review again".into());
     }
+    harness_commands::validate_request_with_limits(
+        &request.command,
+        &request.arguments,
+        config.runtime.native_command_limits(),
+    )
+    .map_err(|e| e.to_string())?;
     let registration = hook_runtime::inspect(&request.registration).map_err(|e| e.to_string())?;
     same_target(&registration, &request.target, &request.directory)?;
+    if registration.scope.instance != config.agent_name {
+        return Err("Registration instance does not match the current configuration".into());
+    }
     if registration.scope.harness != Harness::Claude {
         return Err("This harness has no verified native command adapter".into());
     }
@@ -151,8 +233,14 @@ pub fn prepare(
     let version = std::str::from_utf8(&output.stdout)
         .map_err(|_| "Invalid native version")?
         .trim();
-    let native = harness_commands::plan("claude", version, &request.command, &request.arguments)
-        .map_err(|e| e.to_string())?;
+    let native = harness_commands::plan_with_limits(
+        "claude",
+        version,
+        &request.command,
+        &request.arguments,
+        config.runtime.native_command_limits(),
+    )
+    .map_err(|e| e.to_string())?;
     if executable_stamp(&executable)? != before {
         return Err("Harness executable changed".into());
     }
@@ -161,11 +249,12 @@ pub fn prepare(
     if ready.scope != registration.scope || ready.state != Readiness::Idle {
         return Err("Harness readiness is not verified idle".into());
     }
-    let digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"registration":registration,"path":request.registration,"command":native.literal(),"executable":before,"config":config,"environment":launch.environment,"readiness":ready})).map_err(|_|"Cannot encode control review")?));
+    let digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"registration":registration,"path":request.registration,"command":native,"version":version,"executable":before,"config":config,"environment":launch.environment,"readiness":ready})).map_err(|_|"Cannot encode control review")?));
     Ok(Plan {
         request,
         registration,
         native,
+        version: version.into(),
         digest,
         sequence: ready.sequence,
     })
@@ -220,14 +309,17 @@ fn dispatch(plan: Plan, terminals: &Terminals) -> Result<String> {
         plan.native.submission_notice()
     ))
 }
-pub fn submit(
-    request: Request,
+pub fn apply_reviewed(
+    reviewed: &Reviewed,
     config: &ControlConfig,
     terminals: &Terminals,
     environment: &BTreeMap<String, String>,
 ) -> Result<String> {
-    let plan = prepare(request, config, terminals, environment)?;
-    dispatch(plan, terminals)
+    let current = prepare(reviewed.request.clone(), config, terminals, environment)?;
+    if current.reviewed() != *reviewed {
+        return Err("Native control review changed; request a new confirmation".into());
+    }
+    dispatch(current, terminals)
 }
 #[cfg(all(test, unix))]
 mod tests {
@@ -308,8 +400,47 @@ mod tests {
             ),
             ("UNRELATED_SECRET".into(), "PRIVATE".into()),
         ]);
+        let probe_marker = dir.join("probe-ran");
+        let quoted_marker = format!(
+            "'{}'",
+            probe_marker.to_str().unwrap().replace('\'', "'\"'\"'")
+        );
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf ran > {quoted_marker}\nprintf '2.1.296\\n'\n"),
+        )
+        .unwrap();
+        for (arguments_limit, model_limit, expected) in
+            [(3, 128, "argument_limit"), (2048, 3, "model_limit")]
+        {
+            config.runtime.native_command_argument_limit_bytes = arguments_limit;
+            config.runtime.native_command_model_limit_bytes = model_limit;
+            layouts::write_private(
+                &dir.join("control.json"),
+                &serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                prepare(request.clone(), &config, &terminals, &env)
+                    .err()
+                    .unwrap()
+                    .contains(expected)
+            );
+            assert!(!probe_marker.exists());
+        }
+        config.runtime.native_command_argument_limit_bytes = 2048;
+        config.runtime.native_command_model_limit_bytes = 128;
+        let native_version = dir.join("native-version");
+        layouts::write_private(&native_version, b"2.1.296\n").unwrap();
+        let quoted_version = format!(
+            "'{}'",
+            native_version.to_str().unwrap().replace('\'', "'\"'\"'")
+        );
         // The real prepare path must honor the saved output and time policy.
-        let padded = format!("#!/bin/sh\nprintf '2.1.296\\n{}'\n", " ".repeat(6000));
+        let padded = format!(
+            "#!/bin/sh\ncat {quoted_version}\nprintf '{}'\n",
+            " ".repeat(6000)
+        );
         std::fs::write(&binary, &padded).unwrap();
         config.runtime.harness_probe_limit_bytes = 1024;
         layouts::write_private(
@@ -336,6 +467,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&binary, &padded).unwrap();
+        let bound = prepare(request.clone(), &config, &terminals, &env)
+            .unwrap()
+            .reviewed();
+        let roundtrip: Reviewed =
+            serde_json::from_slice(&serde_json::to_vec(&bound).unwrap()).unwrap();
+        assert_eq!(roundtrip, bound);
+        layouts::write_private(&native_version, b"2.1.317\n").unwrap();
+        assert!(apply_reviewed(&bound, &config, &terminals, &env).is_err());
+        assert!(!dir.join("sent").exists());
+        layouts::write_private(&native_version, b"2.1.296\n").unwrap();
         let plan = prepare(request.clone(), &config, &terminals, &env).unwrap();
         assert!(!plan.review().to_string().contains("PRIVATE"));
         assert!(!dir.join("sent").exists());
@@ -352,6 +493,22 @@ mod tests {
         let fresh = prepare(request.clone(), &config, &terminals, &env).unwrap();
         assert!(apply(fresh, &sha, &config, &terminals, &env).is_err());
         assert_eq!(std::fs::read(dir.join("sent")).unwrap(), before);
+        // The same native image can report a changed version via external
+        // state: approval must bind the observed contract as well as the inode.
+        layouts::write_private(&native_version, b"2.1.317\n").unwrap();
+        let current = prepare(request.clone(), &config, &terminals, &env)
+            .unwrap()
+            .reviewed();
+        assert_eq!(current.review()["harness_version"], "2.1.317");
+        let mut altered = current.clone();
+        altered.version = "2.1.296".into();
+        assert!(apply_reviewed(&altered, &config, &terminals, &env).is_err());
+        assert_eq!(std::fs::read(dir.join("sent")).unwrap(), before);
+        apply_reviewed(&current, &config, &terminals, &env).unwrap();
+        let after = std::fs::read(dir.join("sent")).unwrap();
+        assert!(after.len() > before.len());
+        assert!(apply_reviewed(&current, &config, &terminals, &env).is_err());
+        assert_eq!(std::fs::read(dir.join("sent")).unwrap(), after);
         let mut changed = config.clone();
         changed.agent_name = "changed".into();
         layouts::write_private(
@@ -359,7 +516,15 @@ mod tests {
             &serde_json::to_vec(&changed).unwrap(),
         )
         .unwrap();
-        assert!(prepare(request, &config, &terminals, &env).is_err());
+        assert!(prepare(request.clone(), &config, &terminals, &env).is_err());
+        hook_runtime::execute(br#"{"session_id":"session","hook_event_name":"Stop","last_assistant_message":"scope-ready"}"#.as_slice(), &registration, Some("scope-ready"), &mut Verified, &mut hook_runtime::SystemClock).unwrap();
+        let mismatched = prepare(request, &changed, &terminals, &env);
+        assert!(
+            mismatched
+                .err()
+                .is_some_and(|error| error.contains("instance")),
+            "A registration from another configured instance was admitted"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

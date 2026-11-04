@@ -194,6 +194,8 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `native_metadata_process_limit` | 128 | 1–65536; Windows subtree candidates including root |
 | `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows subtree snapshot entries |
 | `native_metadata_depth_limit` | 32 | 1–256; Windows subtree ancestry depth |
+| `native_command_argument_limit_bytes` | 2048 | 1–65536; reviewed native command argument bytes, including `/cc` syntax |
+| `native_command_model_limit_bytes` | 128 | 1–4096; model ID bytes, also bounded by the argument limit |
 | `harness_probe_timeout_ms` | 2000 | 100–60000; local account-status and native command-version checks |
 | `harness_probe_limit_bytes` | 16384 | 1024–1048576; output from local account-status and native command-version checks |
 | `native_login_timeout_ms` | 120000 | 100–900000 |
@@ -620,7 +622,7 @@ sender, chat and route.
 | `/checkpoint list\|save NAME\|remove KEY\|resume KEY\|fork KEY` | Checkpoints (`/checkpoints`, `/resume KEY` are aliases) |
 | `/session_rename NAME`, `/session_rename_status OP` | Rename the tmux session |
 | `/rename AGENT NEW_BASE`, `/rename_status ar:ID` | Optional Armonia rename |
-| `/model`, `/effort`, `/plan`, `/clear`, `/compact`, `/context`, `/cost`, `/agents`, `/mcp`, `/review`, `/security-review` (`/secreview`), `/export`, `/config`, `/memory`, `/cc` | Claude Code slash commands; require Claude Code 2.1.296 |
+| `/model`, `/effort`, `/plan`, `/clear`, `/compact`, `/context`, `/cost`, `/agents`, `/mcp`, `/review`, `/security-review` (`/secreview`), `/export`, `/config`, `/memory`, `/cc` | Claude Code slash commands; explicitly audited versions 2.1.296 and 2.1.317 |
 
 Command aliases remain accepted without duplicate menu entries: `/wins`, `/tmux`
 (list terminals), `/queue`, `/mute`, `/hush`, `/ping` (quiet), `/watch`, `/unmute`
@@ -678,3 +680,13 @@ width and `+` / `-` for height. While attached, prefix the resize key with
 `Ctrl+]`. Double-click an edge to reset it; proportions persist in local layouts.
 
 Native identity metadata uses one cumulative policy per Pi/Hermes operation, including stability rechecks. Duplicate JSON keys, ambiguous matches, exhausted budgets and expired observations are refused. Pi reads only its first header line. Windows subtree discovery and display labels use the saved process, snapshot and depth limits. These cooperative deadlines do not preempt blocking operating-system calls. Native slash-command verification uses the saved probe timeout and output limit; audited command-version support remains explicit.
+
+Native command confirmations show the observed audited version, verified conversation, impact flags and review fingerprint before the command preview. Telegram stores this exact review and rechecks native executable identity, version, configuration, scope and idle observation when the one-use button is pressed. Older native confirmations without that review are refused; request a new one. Submission remains distinct from completion.
+
+For Claude Code 2.1.317, `/cost` and `/stats` resolve to `/usage`, `/review` resolves to `/code-review`, and `/cc /list-agents` or `/cc /peers` request the native peer inventory where enabled. `/agents` prints native configuration guidance. The audited effort forms add `xhigh`, `max`, `status`, and `ultracode [on|off]`; native model/account policy may still reject a form. Review flags and task-starting plan arguments remain outside this adapter. Unknown versions remain unsupported. References: [native commands](https://code.claude.com/docs/en/commands).
+
+The saved native argument and model ID limits appear under Terminals and discovery → Native commands. A request over those limits is refused before launching a version probe. Changing a limit does not relax native command syntax or authorize another provider version. Clear starts a new native conversation; external route bindings retain their current scope and need review after a conversation change.
+
+Native model selection is shown as potentially billable: the audited validation path can issue a one-token model request when a model is not already validated. Preparing a Daedalus confirmation only queries the native version; it does not dispatch the model-selection command. Model IDs admit ASCII letters/digits and `._:-/@`, with a leading letter or digit; saved byte limits also apply.
+
+Native controls require the registration instance to match the selected configuration identity. A saved registration is not silently adopted after changing that identity. The verified instance is included in the review.

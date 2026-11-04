@@ -81,9 +81,11 @@ Grok 1.0.52+ in the 1.0 series can become ready through its native
 `Notification` / `idle_prompt` event, typically about a minute after settlement.
 This proves readiness for another prompt, not success or a final answer.
 
-Telegram and `terminal control` slash commands need Claude Code 2.1.296, the exact
-live process and an idle registration. They submit the command; they do not confirm
-that a setting changed.
+Telegram and `terminal control` slash commands support explicitly audited Claude
+Code 2.1.296 and 2.1.317 contracts, the exact live process and an idle registration.
+Confirmations bind the observed version, executable, scope, configuration and idle
+observation. Model selection is potentially billable because native validation can
+issue an inference request. Submission does not confirm a resulting setting.
 
 ## AGY
 
