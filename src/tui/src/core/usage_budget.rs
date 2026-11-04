@@ -75,6 +75,25 @@ struct SqlState {
     remaining: AtomicU64,
     deadline: Instant,
 }
+impl SqlState {
+    fn consume_instruction(&self) -> bool {
+        let mut left = self.remaining.load(Ordering::Relaxed);
+        loop {
+            if left == 0 {
+                return false;
+            }
+            match self.remaining.compare_exchange_weak(
+                left,
+                left - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => left = observed,
+            }
+        }
+    }
+}
 pub struct Guard {
     pub policy: Policy,
     state: Arc<SqlState>,
@@ -173,13 +192,7 @@ impl Guard {
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .ok();
                 }
-                if state
-                    .remaining
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                        left.checked_sub(1)
-                    })
-                    .is_err()
-                {
+                if !state.consume_instruction() {
                     state
                         .failure
                         .compare_exchange(0, 2, Ordering::Relaxed, Ordering::Relaxed)
