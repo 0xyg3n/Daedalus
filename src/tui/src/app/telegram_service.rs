@@ -1184,10 +1184,10 @@ impl Drop for ServiceSignals {
 pub(crate) fn global_directory() -> Result<std::path::PathBuf> {
     #[cfg(unix)]
     {
-        Ok(std::path::PathBuf::from(format!(
-            "/tmp/daedalus-service-{}",
-            unsafe { libc::geteuid() }
-        )))
+        // Resolve the platform temp root: macOS /tmp is a symlink to /private/tmp,
+        // and state-path checks reject symlinked components.
+        let root = std::fs::canonicalize("/tmp").unwrap_or_else(|_| "/tmp".into());
+        Ok(root.join(format!("daedalus-service-{}", unsafe { libc::geteuid() })))
     }
     #[cfg(windows)]
     {

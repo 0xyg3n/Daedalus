@@ -3,7 +3,9 @@
 use super::telegram_config::{self, ServiceConfig};
 use crate::core::layouts;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(windows, target_os = "linux"))]
+use serde_json::json;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{
@@ -210,139 +212,163 @@ pub(crate) fn inspect_at(directory: &Path, proc_root: &Path) -> Result<Observati
 /// Called by the service itself only while its Owner guards remain held.
 #[cfg(unix)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
-    let pid = std::process::id();
-    let proc_root = Path::new("/proc");
-    let (start_ticks, alive) = incarnation(proc_root, pid)?;
-    if !alive {
-        return Err("Service process is not live".into());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (directory, config, phase);
+        Err("Telegram service supervision is available on Linux only".into())
     }
-    let value = Record {
-        version: 1,
-        pid,
-        start_ticks,
-        boot_id: boot(proc_root)?,
-        executable: std::env::current_exe().map_err(|_| "Cannot inspect service executable")?,
-        directory: directory.into(),
-        instance: config.instance.clone(),
-        bot_id: config.bot_id,
-        phase,
-    };
-    layouts::write_private(
-        &directory.join(STATE),
-        &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
-    )
+    #[cfg(target_os = "linux")]
+    {
+        let pid = std::process::id();
+        let proc_root = Path::new("/proc");
+        let (start_ticks, alive) = incarnation(proc_root, pid)?;
+        if !alive {
+            return Err("Service process is not live".into());
+        }
+        let value = Record {
+            version: 1,
+            pid,
+            start_ticks,
+            boot_id: boot(proc_root)?,
+            executable: std::env::current_exe().map_err(|_| "Cannot inspect service executable")?,
+            directory: directory.into(),
+            instance: config.instance.clone(),
+            bot_id: config.bot_id,
+            phase,
+        };
+        layouts::write_private(
+            &directory.join(STATE),
+            &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
+        )
+    }
 }
 #[cfg(unix)]
 pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    if expected.directory != directory {
-        return Err("Stop request belongs to another instance".into());
-    }
-    let observed = inspect(directory)?;
-    if observed.process.as_ref() != Some(expected) {
-        return Err("Service changed; review the stop request again".into());
-    }
-    // Pin the kernel process before the final incarnation check: never signal a
-    // recycled PID. Unsupported kernels fail closed rather than using kill(pid).
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) };
-    if raw < 0 {
-        return Err("Cannot pin service process for stop".into());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
-    verify(expected, Path::new("/proc"))?;
-    if !held(directory)? {
-        return Err("Service already released ownership".into());
-    }
-    if unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            libc::SIGTERM,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    } < 0
+    #[cfg(not(target_os = "linux"))]
     {
-        return Err("Service stop was not accepted by the kernel".into());
+        let _ = (directory, expected);
+        Err("Telegram service supervision is available on Linux only".into())
     }
-    Ok(
-        json!({"state":"submitted","operation":"stop","message":"Stop requested. Running state remains observed until the process exits."}),
-    )
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        if expected.directory != directory {
+            return Err("Stop request belongs to another instance".into());
+        }
+        let observed = inspect(directory)?;
+        if observed.process.as_ref() != Some(expected) {
+            return Err("Service changed; review the stop request again".into());
+        }
+        // Pin the kernel process before the final incarnation check: never signal a
+        // recycled PID. Unsupported kernels fail closed rather than using kill(pid).
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) };
+        if raw < 0 {
+            return Err("Cannot pin service process for stop".into());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        verify(expected, Path::new("/proc"))?;
+        if !held(directory)? {
+            return Err("Service already released ownership".into());
+        }
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                libc::SIGTERM,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            return Err("Service stop was not accepted by the kernel".into());
+        }
+        Ok(
+            json!({"state":"submitted","operation":"stop","message":"Stop requested. Running state remains observed until the process exits."}),
+        )
+    }
 }
 #[cfg(unix)]
 pub fn start(directory: &Path) -> Result<Value> {
-    use std::os::unix::process::CommandExt;
-    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
-    config.read_token()?;
-    config.check_registrations()?;
-    super::cutover::activation_check(directory)?;
-    if inspect(directory)?.state != "stopped" {
-        return Err("Service already owns or may be starting for this instance".into());
-    }
-    let path = directory.join("telegram-service.log");
-    layouts::check_path(&path)?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|_| "Cannot open private service log")?;
-    let meta = log.metadata().map_err(|_| "Cannot inspect service log")?;
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-        || meta.nlink() != 1
+    #[cfg(not(target_os = "linux"))]
     {
-        return Err("Service log must be a private owned regular file".into());
+        let _ = directory;
+        Err("Telegram service supervision is available on Linux only".into())
     }
-    let mut command = std::process::Command::new(
-        std::env::current_exe().map_err(|_| "Cannot locate native service executable")?,
-    );
-    command
-        .args(["telegram", "serve", "--config-dir"])
-        .arg(directory)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
-        .stderr(log);
-    // Only generic tool-discovery/session environment is inherited. Bot tokens
-    // and account secrets are read from private files by their owning adapter.
-    command.env_clear();
-    for key in [
-        "HOME",
-        "PATH",
-        "USER",
-        "LANG",
-        "LC_ALL",
-        "XDG_RUNTIME_DIR",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "TMUX_TMPDIR",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+        config.read_token()?;
+        config.check_registrations()?;
+        super::cutover::activation_check(directory)?;
+        if inspect(directory)?.state != "stopped" {
+            return Err("Service already owns or may be starting for this instance".into());
         }
-    }
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+        let path = directory.join("telegram-service.log");
+        layouts::check_path(&path)?;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(|_| "Cannot open private service log")?;
+        let meta = log.metadata().map_err(|_| "Cannot inspect service log")?;
+        if !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+        {
+            return Err("Service log must be a private owned regular file".into());
+        }
+        let mut command = std::process::Command::new(
+            std::env::current_exe().map_err(|_| "Cannot locate native service executable")?,
+        );
+        command
+            .args(["telegram", "serve", "--config-dir"])
+            .arg(directory)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
+            .stderr(log);
+        // Only generic tool-discovery/session environment is inherited. Bot tokens
+        // and account secrets are read from private files by their owning adapter.
+        command.env_clear();
+        for key in [
+            "HOME",
+            "PATH",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "XDG_RUNTIME_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "TMUX_TMPDIR",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
             }
+        }
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|_| "Cannot start native Telegram service")?;
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let _ = child.wait();
         });
+        Ok(
+            json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested. Service ownership and transport identity are checked separately."}),
+        )
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Cannot start native Telegram service")?;
-    let pid = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(
-        json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested. Service ownership and transport identity are checked separately."}),
-    )
 }
 
 #[cfg(windows)]
@@ -874,7 +900,7 @@ mod windows_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

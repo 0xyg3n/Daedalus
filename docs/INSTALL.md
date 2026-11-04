@@ -1,9 +1,9 @@
 # Installation
 
-Daedalus runs on Linux and Windows as one native executable. It includes the TUI,
-CLI, Telegram service and hooks. The project is in active development; release
-packages target Linux x86-64 and Windows x64. Agent tools keep their own runtimes
-and accounts.
+Daedalus runs on Linux, Windows and macOS as one native executable. It includes
+the TUI, CLI, Telegram service and hooks. The project is in active development;
+release packages target Linux x86-64, Windows x64, and macOS arm64 or universal.
+Agent tools keep their own runtimes and accounts.
 
 ## Linux install
 
@@ -37,6 +37,34 @@ installer adds missing build tools with apt, dnf or pacman, and Rust with the
 official rustup script (it prints the script's SHA-256 first). It never replaces a
 `daedalus` command it did not install. A checksum proves integrity only if you got
 it from a source you trust. The Linux source installer also supports ARM64.
+
+## macOS install
+
+Release artifacts are `Daedalus-<version>-macos-arm64.dmg` (or a universal DMG).
+Open it, drag `Daedalus.app` to Applications, and start it. The app opens Terminal
+because Daedalus is a terminal interface.
+
+For a terminal-first install from a checkout:
+
+```bash
+git clone https://github.com/0xyg3n/Daedalus.git
+bash Daedalus/scripts/install-macos.sh --source "$PWD/Daedalus"
+export PATH="$HOME/.local/bin:$PATH"
+daedalus setup --cli
+```
+
+The installer builds for the host architecture with `rustup` when available
+(Rust 1.88+ and Xcode Command Line Tools are required), verifies the Mach-O
+architecture and SHA-256, and links `~/.local/bin/daedalus`. Use
+`--binary ABS --sha256 HEX` to install a prebuilt executable. `--prefix ABS`
+changes the destination; `--plan` reviews the action without writing anything.
+
+macOS is a preview. The TUI, CLI, configuration, routes, native PTY terminals,
+agent identity and fresh instance import work. tmux/Herdr process identity,
+Telegram service supervision, `/proc`-based hook process identity, Codex/Grok
+open-file evidence, legacy cutover process checks and automatic external process
+discovery remain Linux-only and fail explicitly. Setup installs dependencies
+with Homebrew and npm; it does not use Linux package managers.
 
 ## Native Windows install
 
@@ -132,10 +160,12 @@ Each tool signs in through its own login flow. Cancelling setup saves nothing.
 **Finish and explore terminals** saves the configuration without installing
 anything or signing in. Setup never starts the Telegram service.
 
-On Linux, missing tools are installed only after review:
+On Linux and macOS, missing tools are installed only after review:
 
-- tmux, Node.js and npm: the system package manager.
-- Claude Code, Codex, Pi and OpenCode: npm, into `~/.local`.
+- tmux, Node.js and npm: the Linux system package manager, or Homebrew on macOS
+  (`brew install tmux node`).
+- Claude Code, Codex, Pi and OpenCode: npm, into `~/.local`; when only `npx` is
+  available, setup uses `npx` to bootstrap npm.
 - Herdr, Cursor, Grok and Hermes: their official install scripts over HTTPS.
 
 Daedalus also finds OpenCode in `~/.opencode/bin`. Upstream installers are

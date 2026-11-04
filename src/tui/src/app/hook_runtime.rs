@@ -3024,6 +3024,8 @@ mod tests {
             assert!(output.is_empty());
         }
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn first_lifecycle_events_do_not_require_existing_assistant_transcript() {
         let mut f = Fixture::new();
@@ -3052,6 +3054,8 @@ mod tests {
             assert_eq!(first.event_id, repeated.event_id);
         }
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn stop_final_text_works_before_transcript_flush_without_old_row_identity() {
         let mut f = Fixture::new();
@@ -3141,6 +3145,8 @@ mod tests {
             .is_err()
         );
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn grok_native_passive_stop_is_not_send_readiness_or_goal_continuation() {
         let mut f = Fixture::new();
@@ -3183,6 +3189,8 @@ mod tests {
             .is_err()
         );
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn tool_policy_failure_emits_explicit_deny_but_stop_errors_emit_no_json() {
         let f = Fixture::new();

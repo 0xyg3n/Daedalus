@@ -224,10 +224,20 @@ fn stale_tmux_socket(path: &str) -> bool {
         {
             return false;
         }
-        matches!(
-            std::io::Error::last_os_error().kind(),
-            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-        )
+        let error = std::io::Error::last_os_error();
+        // macOS reports ECONNREFUSED both for a dropped listener and for a live
+        // listener whose backlog is full. Only a missing file is unambiguous.
+        #[cfg(target_os = "linux")]
+        {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            error.kind() == std::io::ErrorKind::NotFound
+        }
     }
 }
 
@@ -515,7 +525,10 @@ mod tests {
             "a failed scan must not claim complete discovery: {snapshot}"
         );
     }
-    #[cfg(unix)]
+    // Linux connect(2) keeps a saturated listener live; macOS reports
+    // ECONNREFUSED once the backlog fills, which is ambiguous with a stale
+    // socket file. macOS therefore treats both as an error, not stale.
+    #[cfg(target_os = "linux")]
     #[test]
     fn stale_socket_does_not_hide_live_query_failure_or_delete_endpoints() {
         use std::os::unix::net::UnixListener;
@@ -594,11 +607,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_optional_backend_rejection_is_still_an_error() {
-        // /bin/false is a local deterministic fixture, never a terminal query.
+        // A local deterministic fixture, never a terminal query. macOS has no
+        // /bin/false; /usr/bin/false exists on both platforms.
+        let unavailable = if cfg!(target_os = "macos") {
+            "/usr/bin/false"
+        } else {
+            "/bin/false"
+        };
         let root = std::env::temp_dir().join("daedalus-uninstalled-backend-fixture");
         let config = ControlConfig::fresh(&root).unwrap();
         let terminals = Terminals {
-            herdr: "/bin/false".into(),
+            herdr: unavailable.into(),
             ..Terminals::default()
         };
         let snapshot = collect_with_socket(&config, &terminals, &[], None, &[]);

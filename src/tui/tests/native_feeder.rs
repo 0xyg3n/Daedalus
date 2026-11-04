@@ -1,6 +1,7 @@
 //! Native PTY + hook lifecycle + feeder integration with a private shell fixture.
 //! This exercises no provider, Telegram bot, or user terminal.
-#![cfg(unix)]
+//! Hook process identity and ancestry are read from /proc on Linux.
+#![cfg(target_os = "linux")]
 use daedalus_tui::{
     adapters::{
         native, process,

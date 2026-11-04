@@ -944,24 +944,12 @@ mod tests {
     }
     #[test]
     fn tmux_generations_are_exact() {
-        let rows = parse_tmux(
-            &fixture(),
-            crate::test_support::path("/tmp/test.sock"),
-            |pid| Some(format!("{pid}0")),
-        )
-        .unwrap();
+        let socket = crate::test_support::path("/tmp/test.sock");
+        let rows = parse_tmux(&fixture(), socket, |pid| Some(format!("{pid}0"))).unwrap();
         assert_eq!(rows[0]["terminal_id"], "v2:11:110:22:220");
         assert_eq!(rows[0]["agent"], "cursor");
-        assert_eq!(rows[0]["server"], "tmux@%2Ftmp%2Ftest.sock");
-        assert!(
-            parse_tmux(
-                &fixture(),
-                crate::test_support::path("/tmp/test.sock"),
-                |_| None
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert_eq!(rows[0]["server"], format!("tmux@{}", encoded(socket)));
+        assert!(parse_tmux(&fixture(), socket, |_| None).unwrap().is_empty());
     }
     #[test]
     fn malformed_tmux_is_rejected() {

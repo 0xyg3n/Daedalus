@@ -390,6 +390,7 @@ pub fn preview_live(
 // enrollment supports one native local server directly owned by the selected UI.
 // The review pins both process incarnations and the executable's file identity.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn local_opencode_server(
     ui: &ProcessIdentity,
     proc_root: &Path,
@@ -535,6 +536,7 @@ const NO_LOCAL_SERVER: &str = "No directly owned OpenCode server was found. Open
 /// a previously reviewed emitter for this exact terminal generation, never an
 /// arbitrary process with the same executable name or the latest saved session.
 #[cfg(all(test, unix))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn reconnect_opencode_server(
     directory: &Path,
     terminal: &TerminalId,
@@ -1540,6 +1542,8 @@ mod tests {
         assert!(select_local_server(vec![server.clone(), server.clone()]).is_err());
         assert_eq!(select_local_server(vec![server.clone()]).unwrap(), server);
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn guided_opencode_server_pins_native_local_child_and_rejects_other_commands() {
         let f = Fixture::new();
@@ -2801,6 +2805,8 @@ esac
         rollback(&receipt).unwrap();
         assert_eq!(fs::read(&f.request.profile).unwrap(), original);
     }
+    // Hook process identity is derived from /proc on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn hermes_process_rebind_fences_readiness_and_preserves_uncertain_input() {
         let mut f = Fixture::new();

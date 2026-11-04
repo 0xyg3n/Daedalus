@@ -93,6 +93,23 @@ AGY (`agy`) shows up in the inventory and can be watched, attached, previewed an
 controlled in a native Daedalus, tmux or Herdr terminal. Start it with its own CLI.
 It has no Daedalus sign-in, hooks, readiness or resume/fork support.
 
+## macOS boundaries
+
+macOS uses POSIX PTYs and the native Daedalus terminals backend. Homebrew installs
+system tools, npm installs Node harnesses into `~/.local`, and `npx` bootstraps npm
+when only the runner is present. The TUI, CLI, configuration, routes, native PTYs,
+agent identity, and fresh instance import work.
+
+The following remain Linux-only and fail explicitly on macOS:
+
+- tmux and Herdr process incarnation and inventory rows.
+- Telegram service supervision, including process incarnation and pidfd stop.
+- Hook lifecycle process identity and ancestry through `/proc`.
+- Codex/Grok native open-file evidence and readiness.
+- Legacy cutover process checks.
+- Automatic external process discovery.
+- `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
+
 ## Native Windows boundaries
 
 Windows x64 uses built-in ConPTY terminals by default. Herdr is optional. Configure
@@ -110,8 +127,10 @@ Terminal controls and harness hooks have separate feature support:
 | Herdr duplicate attachment view | Unavailable; use read-only Watch |
 | Native session resume/fork | Available where the installed harness exposes the required session operation |
 
-Linux and Windows have automated tests and native terminal checks. See
-[installation](INSTALL.md#native-windows-install) for setup and
+Linux, Windows and macOS have automated tests and native terminal checks.
+macOS-specific tests are gated from Linux-only process supervision. See
+[installation](INSTALL.md#macos-install) for macOS setup,
+[Windows setup](INSTALL.md#native-windows-install) and
 [testing](ARCHITECTURE.md#testing) for the contributor workflow.
 
 OpenCode local-server enrollment and saved-binding reconnect share the native identity metadata policy in **Terminals and discovery**. Linux reads child lists, command arguments and process stability metadata through bounded streams; exhausted process, scan, entry, byte or time budgets refuse enrollment. Reconnect and Telegram registration lookup count ignored files and parse registration JSON within the cumulative budget. A partial or ambiguous scan cannot choose a server or conversation. Windows subtree process admission is cumulative across repeated scans.

@@ -1,10 +1,11 @@
 //! Display-only discovery of terminals not owned by an integrated backend.
 //! Process evidence cannot authorize terminal input, capture, adoption or killing.
-use serde_json::{Value, json};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use serde_json::Value;
+#[cfg(any(target_os = "linux", windows))]
+use serde_json::json;
+#[cfg(any(target_os = "linux", windows))]
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 #[cfg(test)]
 pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String> {
@@ -29,6 +30,7 @@ struct Process {
     state: char,
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn clean(value: &str) -> String {
     value
         .chars()
@@ -37,6 +39,7 @@ fn clean(value: &str) -> String {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn pid(value: &Value) -> Option<u32> {
     value
         .as_u64()
@@ -45,6 +48,7 @@ fn pid(value: &Value) -> Option<u32> {
         .filter(|p| *p > 0)
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn managed_pids(rows: &[Value]) -> BTreeSet<u32> {
     rows.iter()
         .flat_map(|row| {
@@ -59,6 +63,7 @@ fn managed_pids(rows: &[Value]) -> BTreeSet<u32> {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn excluded(mut current: u32, parents: &BTreeMap<u32, u32>, managed: &BTreeSet<u32>) -> bool {
     let mut visited = BTreeSet::new();
     for _ in 0..256 {
@@ -80,6 +85,7 @@ fn excluded(mut current: u32, parents: &BTreeMap<u32, u32>, managed: &BTreeSet<u
     true
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn is_shell(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().trim_end_matches(".exe"),

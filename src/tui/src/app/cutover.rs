@@ -872,13 +872,18 @@ fn reconcile_legacy_routes(
     )?;
     Ok((vec![], unresolved, vec![]))
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn rename_new(_: &Path, _: &Path) -> Result<()> {
+    Err("Atomic no-replace rename is currently supported on Linux and macOS".into())
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn rename_new(from: &Path, to: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let a =
         std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(|_| "Invalid rename path")?;
     let b = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(|_| "Invalid rename path")?;
-    if unsafe {
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
             a.as_ptr(),
@@ -886,8 +891,10 @@ fn rename_new(from: &Path, to: &Path) -> Result<()> {
             b.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
-    } != 0
-    {
+    };
+    #[cfg(target_os = "macos")]
+    let status = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
+    if status != 0 {
         return Err("Cannot publish cutover; retained transaction requires recovery".into());
     }
     Ok(())
