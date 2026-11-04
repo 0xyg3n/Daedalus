@@ -1340,6 +1340,7 @@ pub struct NativeSource {
     pub directory: PathBuf,
     pub terminals: Terminals,
     pub last_snapshot: Value,
+    pub usage_recorder: super::workspace_usage::Recorder,
 }
 fn hook_profile_path(harness: &str, observed: Option<&str>, configured: &str) -> Option<PathBuf> {
     let directory = observed
@@ -2636,17 +2637,32 @@ impl Source for NativeSource {
                     .push(json!({"backend":"views","error":error}));
             }
         }
-        budget.finish(&mut snapshot);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "System clock is before epoch")?
             .as_secs_f64();
         if self.directory.join("control.json").is_file() {
-            match super::workspace_usage::sample(&self.directory, &snapshot, now) {
-                Ok(usage) => snapshot["workspace_usage"] = usage,
-                Err(_) => errors.push("Local workspace usage is unavailable"),
+            match self.usage_recorder.sample(
+                &self.directory,
+                &snapshot,
+                now,
+                config.ui.workspace_usage_recording,
+                config.runtime.workspace_usage_policy(),
+                Some(budget.deadline),
+            ) {
+                Ok(Some(usage)) => {
+                    if budget.admit_value(&usage).is_ok() {
+                        snapshot["workspace_usage"] = usage;
+                    }
+                }
+                Ok(None) => (),
+                Err(error) => budget.error(
+                    &mut snapshot,
+                    json!({"backend":"workspace_usage","error":error}),
+                ),
             }
         }
+        budget.finish(&mut snapshot);
         self.last_snapshot = snapshot.clone();
         let (telegram, fallback_local, telegram_token_saved) =
             telegram_observation(&self.directory, config);
@@ -2814,6 +2830,7 @@ pub fn run_first_run(
         directory: config_dir.into(),
         terminals: Terminals::default(),
         last_snapshot: json!({}),
+        usage_recorder: Default::default(),
     };
     run_with(
         reader,
@@ -2831,6 +2848,7 @@ pub fn run(reader: &mut impl BufRead, writer: &mut impl Write, config_dir: &Path
         directory: config_dir.into(),
         terminals: Terminals::default(),
         last_snapshot: json!({}),
+        usage_recorder: Default::default(),
     };
     run_with(
         reader,
@@ -3691,6 +3709,7 @@ mod tests {
                 ..Terminals::default()
             },
             last_snapshot: json!({}),
+            usage_recorder: Default::default(),
         };
         let config = ControlConfig::fresh(&directory).unwrap();
         assert!(source.require_configuration().is_err());
@@ -3739,6 +3758,7 @@ mod tests {
             directory: directory.clone(),
             terminals: Terminals::default(),
             last_snapshot: json!({}),
+            usage_recorder: Default::default(),
         };
         source.save_layouts(&Layouts::default()).unwrap();
         let config =
@@ -3781,6 +3801,7 @@ mod tests {
             directory: directory.clone(),
             terminals: Terminals::default(),
             last_snapshot: json!({}),
+            usage_recorder: Default::default(),
         };
         source
             .session(

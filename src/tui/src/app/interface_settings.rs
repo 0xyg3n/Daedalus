@@ -57,6 +57,7 @@ pub struct InterfaceSettings {
     pub agent_activity: bool,
     pub agent_activity_rows: u64,
     pub harness_logos: String,
+    pub workspace_usage_recording: bool,
 }
 impl Default for InterfaceSettings {
     fn default() -> Self {
@@ -102,6 +103,7 @@ impl Default for InterfaceSettings {
             agent_activity: true,
             agent_activity_rows: 3,
             harness_logos: "auto".into(),
+            workspace_usage_recording: true,
         }
     }
 }
@@ -436,6 +438,13 @@ pub const SETTINGS: &[Setting] = &[
         "Workspace display",
         "Native app logos on supported terminals, with recognizable glyphs or distinct ASCII initials underneath. Glyphs disables images; Off retains status icons. Does not change agent state reporting.",
         Kind::Choice(&["auto", "glyphs", "off"])
+    ),
+    setting!(
+        workspace_usage_recording,
+        "Record workspace selection",
+        "Workspace usage",
+        "Record local Herdr selection counts and time during TUI refreshes. Off stops sampling without deleting existing aggregates. Re-enabling excludes the disabled interval. These observations are not model usage or human attention.",
+        Kind::Toggle
     ),
 ];
 

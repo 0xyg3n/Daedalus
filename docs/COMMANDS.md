@@ -185,6 +185,16 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `external_discovery_entry_limit` | 65536 | 1–1048576 |
 | `external_discovery_timeout_ms` | 2000 | 1–60000 |
 | `external_discovery_query_limit` | 512 | 1–65536 |
+| `workspace_usage_max_gap_ms` | 30000 | 1–86400000; maximum interval that accrues selected time |
+| `workspace_usage_lease_ms` | 30000 | 1–86400000; recorder ownership lease |
+| `workspace_usage_retention_days` | 0 | 0–36500; zero keeps history, positive expires old aggregate rows during recording |
+| `workspace_usage_entry_limit` | 16384 | 1–1048576; cumulative observations, leases and aggregate lookups |
+| `workspace_usage_work_limit_bytes` | 16777216 | 4096–1073741824; cumulative projected metadata and encoded bytes |
+| `workspace_usage_timeout_ms` | 2000 | 1–60000; cooperative aggregate-processing/SQL deadline |
+| `workspace_usage_sql_step_limit` | 1000000 | 1–100000000; cumulative SQLite VM instructions |
+| `workspace_usage_database_limit_bytes` | 67108864 | 4096–536870912; logical database and per-file limit |
+| `workspace_usage_output_limit_bytes` | 4194304 | 1024–67108864; captured inventory and complete response byte limits |
+| `workspace_usage_busy_wait_ms` | 25 | 0–5000; SQLite lock wait, also bounded by the deadline |
 | `native_metadata_file_limit_bytes` | 1048576 | 1024–67108864; maximum input bytes per native identity file |
 | `native_metadata_work_limit_bytes` | 16777216 | 1024–1073741824; cumulative metadata reads and stability checks |
 | `native_metadata_entry_limit` | 16384 | 1–1048576; cumulative directories, leases and process checks |
@@ -690,3 +700,5 @@ The saved native argument and model ID limits appear under Terminals and discove
 Native model selection is shown as potentially billable: the audited validation path can issue a one-token model request when a model is not already validated. Preparing a Daedalus confirmation only queries the native version; it does not dispatch the model-selection command. Model IDs admit ASCII letters/digits and `._:-/@`, with a leading letter or digit; saved byte limits also apply.
 
 Native controls require the registration instance to match the selected configuration identity. A saved registration is not silently adopted after changing that identity. The verified instance is included in the review.
+
+Workspace selection recording is controlled by `ui.workspace_usage_recording` (default `true`). Turning it off stops sampling without deleting existing aggregates; re-enabling starts a fresh interval. The read-only `workspace-usage` API can still read retained history and reports whether recording is enabled in the saved configuration. Native inventory uses the saved discovery policy; aggregate projection/SQL uses the Workspace usage policy. Retention defaults to zero (keep all); a positive number expires old aggregate rows during a successful sample and does not compact the database file or delete native session history. Budget exhaustion refuses the complete sample/projection; unfinished sampling writes are rolled back.

@@ -827,8 +827,17 @@ pub(crate) fn write_cooperative_stop(record: &super::telegram_supervisor::Record
 
 /// Open only an owned private database under an owned private directory.
 /// Call at service start, never from read-only configuration checks.
-#[cfg(unix)]
 pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
+    private_connection_with(path, |con| {
+        con.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "Cannot configure database".into())
+    })
+}
+#[cfg(unix)]
+pub(crate) fn private_connection_with(
+    path: &Path,
+    configure: impl FnOnce(&rusqlite::Connection) -> Result<()>,
+) -> Result<rusqlite::Connection> {
     valid_path(path)?;
     let parent = path.parent().ok_or("Missing database directory")?;
     fs::DirBuilder::new()
@@ -892,9 +901,7 @@ pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| "Cannot open database connection")?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "Cannot configure database")?;
+    configure(&connection)?;
     connection
         .execute_batch("PRAGMA synchronous=FULL;")
         .map_err(|_| "Cannot configure database")?;
@@ -940,7 +947,10 @@ pub(crate) fn configuration_lock(directory: &Path) -> Result<ConfigurationLock> 
     Ok(ConfigurationLock(lock))
 }
 #[cfg(windows)]
-pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
+pub(crate) fn private_connection_with(
+    path: &Path,
+    configure: impl FnOnce(&rusqlite::Connection) -> Result<()>,
+) -> Result<rusqlite::Connection> {
     valid_path(path)?;
     let parent = path.parent().ok_or("Missing database directory")?;
     crate::platform::ensure_private_dir(parent)
@@ -969,9 +979,7 @@ pub fn private_connection(path: &Path) -> Result<rusqlite::Connection> {
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| "Cannot open database connection")?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "Cannot configure database")?;
+    configure(&connection)?;
     connection
         .execute_batch("PRAGMA temp_store=MEMORY;")
         .map_err(|_| "Cannot configure private database temporary storage")?;

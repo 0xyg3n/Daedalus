@@ -698,6 +698,7 @@ pub(crate) mod configuration_fixture {
                 directory: self.root.clone(),
                 terminals,
                 last_snapshot: json!({}),
+                usage_recorder: Default::default(),
             }
         }
     }

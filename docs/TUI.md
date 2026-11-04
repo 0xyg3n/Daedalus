@@ -465,9 +465,11 @@ the agent. Use the existing attach control when you want to type.
 Herdr selection counts and sampled selected time appear in terminal Details and
 the switcher. These are **server selection observations**, not per-client viewing,
 human attention, AI tokens, billing or subscription limits. They accumulate only
-while the Daedalus backend refreshes. Gaps over 30 seconds, disconnected discovery,
+while the Daedalus backend refreshes. Gaps over the saved maximum (30 seconds by default), disconnected discovery,
 changed terminal generations and process restarts do not accrue time. Switching
 intervals are conservatively excluded because the exact switch time is unknown.
+
+**Interface settings → Record workspace selection** turns recording on or off. Off preserves existing aggregates and makes no sampling writes; re-enabling excludes the disabled interval. Existing history remains available through the read-only `workspace-usage` command. **Terminals and discovery → Workspace usage** controls the sample gap, recorder lease, optional retention and entry, byte, SQL-work, database, output, lock-wait and processing limits. Retention defaults to keeping all aggregates. Positive retention removes expired aggregate rows on successful recording; it does not compact files or delete native session history. An exhausted sample is rolled back, and diagnostics name the relevant saved limit.
 
 History is stored privately in `<config-dir>/workspace-usage.sqlite3`. It contains
 hashed terminal/server identities, counters and timestamps, with no pane text,

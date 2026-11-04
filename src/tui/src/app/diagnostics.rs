@@ -105,7 +105,7 @@ fn same_file(file: &File, path: &Path) -> bool {
     };
     b.is_file() && a.dev() == b.dev() && a.ino() == b.ino()
 }
-struct Database {
+pub(crate) struct Database {
     con: Connection,
     file: File,
     path: PathBuf,
@@ -113,6 +113,14 @@ struct Database {
     immutable: bool,
 }
 impl Database {
+    pub(crate) fn project<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let result = read(&self.con)?;
+        if !self.stable() {
+            return Err("Database changed during read".into());
+        }
+        Ok(result)
+    }
+
     fn stable(&self) -> bool {
         let Ok(after) = self.file.metadata() else {
             return false;
@@ -134,7 +142,29 @@ impl Database {
     }
 }
 fn open_database(path: &Path) -> Result<Option<Database>> {
-    let Some(file) = private_file(path, MAX_DATABASE)? else {
+    open_database_with(path, MAX_DATABASE, |con| {
+        con.busy_timeout(Duration::from_millis(100))
+            .map_err(|_| "Cannot bound database wait")?;
+        let started = Instant::now();
+        let mut steps = 0usize;
+        con.progress_handler(
+            1000,
+            Some(move || {
+                steps += 1;
+                steps > 20_000 || started.elapsed() > Duration::from_secs(2)
+            }),
+        )
+        .map_err(|_| "Cannot bound database execution")?;
+        Ok(())
+    })
+}
+pub(crate) fn open_database_with(
+    path: &Path,
+    limit: u64,
+    configure: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<Option<Database>> {
+    private_directory(path.parent().ok_or("Database path has no parent")?)?;
+    let Some(file) = private_file(path, limit)? else {
         return Ok(None);
     };
     // Pin and validate every possible SQLite companion before SQLite opens it.
@@ -145,7 +175,7 @@ fn open_database(path: &Path) -> Result<Option<Database>> {
             "{}-wal",
             path.file_name().unwrap().to_string_lossy()
         )),
-        MAX_DATABASE,
+        limit,
     )?;
     let shm = private_file(
         &path.with_file_name(format!(
@@ -159,7 +189,7 @@ fn open_database(path: &Path) -> Result<Option<Database>> {
             "{}-journal",
             path.file_name().unwrap().to_string_lossy()
         )),
-        MAX_DATABASE,
+        limit,
     )?;
     // A retained, truncated rollback journal is the native Windows policy.
     // Only a nonempty journal can require recovery; never recover during reads.
@@ -207,18 +237,7 @@ fn open_database(path: &Path) -> Result<Option<Database>> {
     if !same_file(&file, path) {
         return Err("Database identity changed".into());
     }
-    con.busy_timeout(Duration::from_millis(100))
-        .map_err(|_| "Cannot bound database wait")?;
-    let started = Instant::now();
-    let mut steps = 0usize;
-    con.progress_handler(
-        1000,
-        Some(move || {
-            steps += 1;
-            steps > 20_000 || started.elapsed() > Duration::from_secs(2)
-        }),
-    )
-    .map_err(|_| "Cannot bound database execution")?;
+    configure(&con)?;
     con.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF; BEGIN;")
         .map_err(|_| "Cannot start read-only diagnostics")?;
     Ok(Some(Database {
@@ -239,11 +258,7 @@ pub(crate) fn with_database<T>(
     let Some(database) = open_database(path)? else {
         return Ok(None);
     };
-    let result = read(&database.con)?;
-    if !database.stable() {
-        return Err("Database changed during read".into());
-    }
-    Ok(Some(result))
+    database.project(read).map(Some)
 }
 fn real_table(con: &Connection, name: &str) -> rusqlite::Result<bool> {
     con.query_row(

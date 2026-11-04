@@ -2987,3 +2987,94 @@ fn rapid_navigation_and_search_preserve_input_order() {
     ui.quit();
     assert_eq!(fs::read_dir(&ui.directory).unwrap().count(), 0);
 }
+
+#[test]
+fn workspace_usage_recording_switch_is_reviewed_saved_and_reopened() {
+    use daedalus_tui::app::{config::ControlConfig, interface_settings::SETTINGS};
+    let mut ui = Ui::configured(false, true);
+    let path = ui.directory.join(".config/daedalus/control.json");
+    let before = fs::read(&path).unwrap();
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.master.write_all(b"\x10Interface settings").unwrap();
+    ui.wait_text("Interface settings_");
+    ui.wait_presence("UPDATING", false);
+    ui.master.write_all(b"\r\r").unwrap();
+    ui.wait_text("Saved in this configuration");
+    let index = SETTINGS
+        .iter()
+        .position(|s| s.key == "workspace_usage_recording")
+        .unwrap();
+    for _ in 0..index {
+        ui.master.write_all(b"\x1b[B").unwrap();
+    }
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Saved value: On");
+    ui.master.write_all(b"\x1b[H\x1b[B\r").unwrap();
+    ui.wait_text("Save workspace_usage_recording:");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Configuration saved privately");
+    assert!(
+        !ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .workspace_usage_recording
+    );
+    ui.quit();
+    ui.restart();
+    ui.wait_text("0 terminals");
+    assert!(
+        !ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .workspace_usage_recording
+    );
+    ui.quit();
+}
+#[test]
+fn workspace_usage_gap_is_validated_reviewed_saved_and_reopened() {
+    use daedalus_tui::app::{config::ControlConfig, runtime_settings::SETTINGS};
+    let mut ui = Ui::configured(false, true);
+    let path = ui.directory.join(".config/daedalus/control.json");
+    let before = fs::read(&path).unwrap();
+    let index = SETTINGS
+        .iter()
+        .position(|s| s.key == "workspace_usage_max_gap_ms")
+        .unwrap();
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.master
+        .write_all(b"\x10Terminals and discovery\r\r")
+        .unwrap();
+    ui.wait_text("Saved in this configuration");
+    for _ in 0..index {
+        ui.master.write_all(b"\x1b[B").unwrap();
+    }
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Saved value: 30000");
+    ui.master.write_all(b"0\r").unwrap();
+    ui.wait_text("must be between 1 and 86400000");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"1234\r").unwrap();
+    ui.wait_text("Save workspace_usage_max_gap_ms:");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Configuration saved privately");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .runtime
+            .workspace_usage_max_gap_ms,
+        1234
+    );
+    ui.quit();
+    ui.restart();
+    ui.wait_text("0 terminals");
+    assert_eq!(
+        ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .runtime
+            .workspace_usage_max_gap_ms,
+        1234
+    );
+    ui.quit();
+}

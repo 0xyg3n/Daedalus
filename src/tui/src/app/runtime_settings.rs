@@ -79,6 +79,16 @@ pub struct Settings {
     pub session_fork_timeout_ms: u64,
     pub agent_activity_max_age_ms: u64,
     pub agent_activity_query_timeout_ms: u64,
+    pub workspace_usage_max_gap_ms: u64,
+    pub workspace_usage_lease_ms: u64,
+    pub workspace_usage_retention_days: u64,
+    pub workspace_usage_entry_limit: u64,
+    pub workspace_usage_work_limit_bytes: u64,
+    pub workspace_usage_timeout_ms: u64,
+    pub workspace_usage_sql_step_limit: u64,
+    pub workspace_usage_database_limit_bytes: u64,
+    pub workspace_usage_output_limit_bytes: u64,
+    pub workspace_usage_busy_wait_ms: u64,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -160,6 +170,16 @@ impl Default for Settings {
             instance_import_attachment_limit: 256,
             instance_import_attachment_limit_bytes: 134217728,
             instance_import_frame_limit_bytes: 262144,
+            workspace_usage_max_gap_ms: 30000,
+            workspace_usage_lease_ms: 30000,
+            workspace_usage_retention_days: 0,
+            workspace_usage_entry_limit: 16384,
+            workspace_usage_work_limit_bytes: 16777216,
+            workspace_usage_timeout_ms: 2000,
+            workspace_usage_sql_step_limit: 1000000,
+            workspace_usage_database_limit_bytes: 67108864,
+            workspace_usage_output_limit_bytes: 4194304,
+            workspace_usage_busy_wait_ms: 25,
         }
     }
 }
@@ -762,8 +782,102 @@ pub const SETTINGS: &[Setting] = &[
         1,
         5000
     ),
+    setting!(
+        workspace_usage_max_gap_ms,
+        "Maximum sample gap (ms)",
+        "Workspace usage",
+        "Maximum gap allowed to accrue selected time. Longer gaps accrue no time.",
+        1,
+        86400000
+    ),
+    setting!(
+        workspace_usage_lease_ms,
+        "Recorder lease (ms)",
+        "Workspace usage",
+        "How long another active TUI owns an endpoint before a new recorder can take over without double counting.",
+        1,
+        86400000
+    ),
+    setting!(
+        workspace_usage_retention_days,
+        "Aggregate retention days",
+        "Workspace usage",
+        "Zero preserves all aggregates. A positive value deletes aggregate rows older than this many days during successful recording. It does not compact the database file or delete native history.",
+        0,
+        36500
+    ),
+    setting!(
+        workspace_usage_entry_limit,
+        "Selection entry limit",
+        "Workspace usage",
+        "Combined pane/focus observations, previous lease rows and aggregate lookups per operation, including ignored entries. Incomplete scans are refused.",
+        1,
+        1048576
+    ),
+    setting!(
+        workspace_usage_work_limit_bytes,
+        "Selection byte-work limit",
+        "Workspace usage",
+        "Cumulative projected identity, lease, aggregate and encoded-output bytes per operation. Pane content is never serialized. This is logical work, not a RAM or physical I/O limit.",
+        4096,
+        1073741824
+    ),
+    setting!(
+        workspace_usage_timeout_ms,
+        "Selection processing deadline (ms)",
+        "Workspace usage",
+        "Cooperative deadline for recording or reading aggregates, including SQLite work. An earlier discovery deadline also applies; blocking OS calls are not preempted.",
+        1,
+        60000
+    ),
+    setting!(
+        workspace_usage_sql_step_limit,
+        "Selection SQL instruction limit",
+        "Workspace usage",
+        "Combined SQLite VM instruction allowance, including schema, triggers, pruning and reads. Refusal rolls back an unfinished sample.",
+        1,
+        100000000
+    ),
+    setting!(
+        workspace_usage_database_limit_bytes,
+        "Selection database byte limit",
+        "Workspace usage",
+        "Maximum logical database bytes and bytes per main/sidecar file. Refusal preserves aggregate rows; retention removes rows but does not compact files.",
+        4096,
+        536870912
+    ),
+    setting!(
+        workspace_usage_output_limit_bytes,
+        "Selection API output byte limit",
+        "Workspace usage",
+        "Maximum captured inventory and encoded response bytes for the read-only workspace-usage API. Over-limit responses are refused before writing output.",
+        1024,
+        67108864
+    ),
+    setting!(
+        workspace_usage_busy_wait_ms,
+        "Selection database busy wait (ms)",
+        "Workspace usage",
+        "Maximum SQLite lock wait, also limited by the remaining operation deadline. Zero refuses immediately.",
+        0,
+        5000
+    ),
 ];
 impl Settings {
+    pub fn workspace_usage_policy(&self) -> crate::core::usage_budget::Policy {
+        crate::core::usage_budget::Policy {
+            max_gap_ms: self.workspace_usage_max_gap_ms,
+            lease_ms: self.workspace_usage_lease_ms,
+            retention_days: self.workspace_usage_retention_days,
+            entries: self.workspace_usage_entry_limit,
+            work_bytes: self.workspace_usage_work_limit_bytes,
+            timeout_ms: self.workspace_usage_timeout_ms,
+            sql_steps: self.workspace_usage_sql_step_limit,
+            database_bytes: self.workspace_usage_database_limit_bytes,
+            output_bytes: self.workspace_usage_output_limit_bytes,
+            busy_ms: self.workspace_usage_busy_wait_ms,
+        }
+    }
     pub fn native_command_limits(&self) -> crate::adapters::harness_commands::Limits {
         crate::adapters::harness_commands::Limits {
             argument_bytes: self.native_command_argument_limit_bytes,
@@ -877,6 +991,10 @@ mod tests {
             defaults.snapshot_options(),
             crate::adapters::sqlite::SnapshotOptions::default()
         );
+        assert_eq!(
+            defaults.workspace_usage_policy(),
+            crate::core::usage_budget::Policy::default()
+        );
         let encoded = serde_json::to_value(&defaults).unwrap();
         let keys: std::collections::BTreeSet<_> = SETTINGS.iter().map(|s| s.key).collect();
         assert_eq!(keys.len(), SETTINGS.len());
@@ -900,6 +1018,12 @@ mod tests {
             assert!(defaults.set(setting.key, &(max + 1).to_string()).is_err());
             assert!(defaults.set(setting.key, "private-account-value").is_err());
             for value in [min, max] {
+                defaults
+                    .set(setting.key, &value.to_string())
+                    .unwrap()
+                    .workspace_usage_policy()
+                    .validate()
+                    .unwrap();
                 defaults
                     .set(setting.key, &value.to_string())
                     .unwrap()

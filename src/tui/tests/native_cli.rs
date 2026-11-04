@@ -1471,6 +1471,16 @@ fn discovery_settings_reach_real_cli_queries_and_partial_usage_stays_incomplete(
         );
     };
     for (key, value) in [
+        ("workspace_usage_max_gap_ms", "1000"),
+        ("workspace_usage_lease_ms", "2000"),
+        ("workspace_usage_retention_days", "3"),
+        ("workspace_usage_entry_limit", "256"),
+        ("workspace_usage_work_limit_bytes", "32768"),
+        ("workspace_usage_timeout_ms", "1000"),
+        ("workspace_usage_sql_step_limit", "200000"),
+        ("workspace_usage_database_limit_bytes", "1048576"),
+        ("workspace_usage_output_limit_bytes", "32768"),
+        ("workspace_usage_busy_wait_ms", "10"),
         ("native_command_argument_limit_bytes", "4096"),
         ("native_command_model_limit_bytes", "256"),
         ("native_metadata_file_limit_bytes", "2097152"),
@@ -1523,6 +1533,21 @@ fn discovery_settings_reach_real_cli_queries_and_partial_usage_stays_incomplete(
         set(key, value);
     }
     let mut config = ControlConfig::parse(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        config.runtime.workspace_usage_policy(),
+        daedalus_tui::core::usage_budget::Policy {
+            max_gap_ms: 1000,
+            lease_ms: 2000,
+            retention_days: 3,
+            entries: 256,
+            work_bytes: 32768,
+            timeout_ms: 1000,
+            sql_steps: 200000,
+            database_bytes: 1048576,
+            output_bytes: 32768,
+            busy_ms: 10
+        }
+    );
     assert_eq!(config.runtime.native_command_limits().argument_bytes, 4096);
     assert_eq!(config.runtime.native_command_limits().model_bytes, 256);
     assert_eq!(config.runtime.native_metadata_file_limit_bytes, 2097152);
@@ -3477,4 +3502,92 @@ fn native_job_retained_aliases_reject_missing_identity_without_python() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("retired"));
     }
+}
+
+#[test]
+fn workspace_usage_saved_switch_controls_real_backend_and_read_only_cli_respects_output_limit() {
+    use daedalus_tui::app::config::ControlConfig;
+    let panes:Vec<_>=(0..12).map(|i|json!({"pane_id":format!("p{i}"),"terminal_id":format!("generation-{i}"),"title":"owned fixture"})).collect();
+    let f = observation_backend_fixture(json!({"result":{"panes":panes,"focused_pane_id":"p0"}}));
+    let directory = f.0.join("state");
+    let state = directory.to_str().unwrap();
+    let path = directory.join("control.json");
+    let set = |key: &str, value: &str| {
+        let before = fs::read(&path).unwrap();
+        let args = [
+            "config",
+            "set",
+            "--config-dir",
+            state,
+            "--key",
+            key,
+            "--value",
+            value,
+        ];
+        assert!(f.run(&args).status.success());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(
+            f.run(&[args.as_slice(), &["--apply"]].concat())
+                .status
+                .success()
+        );
+    };
+    set("ui.workspace_usage_recording", "false");
+    assert!(
+        !ControlConfig::parse(&fs::read(&path).unwrap())
+            .unwrap()
+            .ui
+            .workspace_usage_recording
+    );
+    let refresh = || {
+        let mut child = observation_backend(&f).spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"{\"version\":2,\"op\":\"quit\"}\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    refresh();
+    let database = directory.join("workspace-usage.sqlite3");
+    assert!(!database.exists());
+    set("ui.workspace_usage_recording", "true");
+    refresh();
+    assert!(database.exists());
+    let before = fs::read(&database).unwrap();
+    let query = || {
+        Command::new(env!("CARGO_BIN_EXE_daedalus-tui"))
+            .env_clear()
+            .env("PATH", "/nonexistent")
+            .env("HOME", &f.0)
+            .env("DAEDALUS_HERDR_BIN", f.0.join("inert-herdr"))
+            .env("FIXTURE_PAYLOAD", f.0.join("payload"))
+            .env("FIXTURE_QUERIES", f.0.join("queries"))
+            .current_dir(&f.0)
+            .args(["workspace-usage", "--config-dir", state, "--json"])
+            .output()
+            .unwrap()
+    };
+    let result = query();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let data: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(data["recording_enabled"], true);
+    assert_eq!(data["terminals"].as_array().unwrap().len(), 12);
+    assert_eq!(fs::read(&database).unwrap(), before);
+    set("runtime.workspace_usage_output_limit_bytes", "1024");
+    let result = query();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("workspace_usage_output_limit_bytes"));
+    assert_eq!(fs::read(&database).unwrap(), before);
 }

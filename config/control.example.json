@@ -53,7 +53,8 @@
     "agent_session_ids": true,
     "agent_activity": true,
     "agent_activity_rows": 3,
-    "harness_logos": "auto"
+    "harness_logos": "auto",
+    "workspace_usage_recording": true
   },
   "runtime": {
     "native_launch_cols": 120,
@@ -128,6 +129,16 @@
     "native_metadata_process_scan_limit": 65536,
     "native_metadata_depth_limit": 32,
     "native_command_argument_limit_bytes": 2048,
-    "native_command_model_limit_bytes": 128
+    "native_command_model_limit_bytes": 128,
+    "workspace_usage_max_gap_ms": 30000,
+    "workspace_usage_lease_ms": 30000,
+    "workspace_usage_retention_days": 0,
+    "workspace_usage_entry_limit": 16384,
+    "workspace_usage_work_limit_bytes": 16777216,
+    "workspace_usage_timeout_ms": 2000,
+    "workspace_usage_sql_step_limit": 1000000,
+    "workspace_usage_database_limit_bytes": 67108864,
+    "workspace_usage_output_limit_bytes": 4194304,
+    "workspace_usage_busy_wait_ms": 25
   }
 }

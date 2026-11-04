@@ -145,6 +145,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<()> {
         directory: command.directory.clone(),
         terminals: Terminals::default(),
         last_snapshot: json!({}),
+        usage_recorder: Default::default(),
     };
     run_with(command, &mut source, out)
 }
