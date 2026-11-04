@@ -1,23 +1,24 @@
 //! Read Hermes native live-session leases, never conversation history or titles.
-use crate::core::checkpoints;
+use crate::core::{checkpoints, native_metadata::Guard};
 use serde_json::Value;
 use std::collections::BTreeMap;
 type Result<T> = std::result::Result<T, String>;
 
-fn selected(bytes: &[u8], processes: &BTreeMap<u32, f64>) -> Result<Option<String>> {
-    if bytes.len() > 1_048_576 {
-        return Err("Hermes active-session registry exceeds limit".into());
-    }
+fn selected(
+    bytes: &[u8],
+    processes: &BTreeMap<u32, f64>,
+    guard: &mut Guard<'_>,
+) -> Result<Option<String>> {
+    guard.json(bytes)?;
     let registry: Value =
         serde_json::from_slice(bytes).map_err(|_| "Invalid Hermes active-session registry")?;
     let entries = registry["entries"]
         .as_array()
         .ok_or("Missing Hermes active-session entries")?;
-    if entries.len() > 4096 {
-        return Err("Too many Hermes active-session leases".into());
-    }
+    guard.entries(entries.len())?;
     let mut matches = Vec::new();
     for entry in entries {
+        guard.check()?;
         let Some(expected) = entry["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
@@ -38,11 +39,12 @@ fn selected(bytes: &[u8], processes: &BTreeMap<u32, f64>) -> Result<Option<Strin
             .as_str()
             .ok_or("Missing Hermes session ID")?;
         let id = checkpoints::resolve_sid(&[], "hermes", id)?.ok_or("Invalid Hermes session ID")?;
+        if !matches.is_empty() {
+            return Err("Hermes has multiple live conversations in this terminal; select one native session before connecting Telegram".into());
+        }
         matches.push(id);
     }
-    if matches.len() > 1 {
-        return Err("Hermes has multiple live conversations in this terminal; select one native session before connecting Telegram".into());
-    }
+    guard.check()?;
     Ok(matches.pop())
 }
 
@@ -54,29 +56,28 @@ pub fn matches_registration(registration: &super::hook_runtime::Registration) ->
         .as_ref()
         .ok_or("Missing Hermes process binding")?;
     let environment = crate::platform::environment();
-    let profiles = layouts::read_private(&registration.directory.join("control.json"))?
+    let config = layouts::read_private(&registration.directory.join("control.json"))?
         .map(|bytes| super::config::ControlConfig::parse(&bytes))
         .transpose()?
-        .map(|config| config.profiles)
-        .unwrap_or_default();
+        .ok_or("Hermes instance configuration is missing")?;
+    let profiles = &config.profiles;
+    let mut guard = Guard::new(config.runtime.native_metadata_policy())?;
     let tool = harnesses::tool("hermes").ok_or("Missing Hermes adapter")?;
-    let root = harnesses::profile_directory(&tool, &environment, &profiles)?;
+    let root = harnesses::profile_directory(&tool, &environment, profiles)?;
     let fingerprint =
         serde_json::json!({"pid":process.pid.to_string(),"start":process.start_ticks.to_string()});
-    let Some((id, profile)) = live(&root, &fingerprint)? else {
+    let Some((id, profile)) = live(&root, &fingerprint, &mut guard)? else {
         return Ok(false);
     };
     if id != registration.scope.conversation {
         return Ok(false);
     }
-    let current = gateway(&profile, std::path::Path::new("unused"))?;
+    let current = gateway(&profile, std::path::Path::new("unused"), &mut guard)?;
     Ok(current == registration.server_emitter)
 }
 
-fn gateway_pid(bytes: &[u8], creation_time: u64) -> Result<u32> {
-    if bytes.len() > 1_048_576 {
-        return Err("Hermes gateway state exceeds limit".into());
-    }
+fn gateway_pid(bytes: &[u8], creation_time: u64, guard: &mut Guard<'_>) -> Result<u32> {
+    guard.json(bytes)?;
     let state: Value = serde_json::from_slice(bytes).map_err(|_| "Invalid Hermes gateway state")?;
     let pid = state["pid"]
         .as_u64()
@@ -102,15 +103,18 @@ fn gateway_pid(bytes: &[u8], creation_time: u64) -> Result<u32> {
 pub fn gateway(
     profile: &std::path::Path,
     proc_root: &std::path::Path,
+    guard: &mut Guard<'_>,
 ) -> Result<Option<super::hook_runtime::ServerEmitter>> {
     use crate::{
         app::{hook_install, hook_runtime},
         platform,
     };
     let path = profile.join("gateway_state.json");
-    let Some(bytes) = hook_install::read_profile(&path)? else {
+    let Some(bytes) = guard.read_with(&path, hook_install::read_profile_limit)? else {
         return Ok(None);
     };
+    guard.json(&bytes)?;
+    guard.entries(1)?;
     let state: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Invalid Hermes gateway state")?;
     let pid = state["pid"]
@@ -120,7 +124,7 @@ pub fn gateway(
     let process =
         platform::process_identity(pid).map_err(|_| "Hermes gateway process disappeared")?;
     if process.owner != platform::current_identity().map_err(|e| e.to_string())?
-        || gateway_pid(&bytes, process.creation_time)? != pid
+        || gateway_pid(&bytes, process.creation_time, guard)? != pid
     {
         return Err("Hermes gateway identity changed".into());
     }
@@ -133,17 +137,40 @@ pub fn gateway(
         proc_root,
     )
     .map_err(|e| e.to_string())?;
-    let again = hook_install::read_profile(&path)?.ok_or("Hermes gateway state disappeared")?;
-    if gateway_pid(&again, process.creation_time)? != pid {
+    let again = guard
+        .read_with(&path, hook_install::read_profile_limit)?
+        .ok_or("Hermes gateway state disappeared")?;
+    if gateway_pid(&again, process.creation_time, guard)? != pid {
         return Err("Hermes gateway changed during discovery".into());
     }
+    guard.check()?;
     Ok(Some(pin))
+}
+
+fn profiles(root: &std::path::Path, guard: &mut Guard<'_>) -> Result<Vec<std::path::PathBuf>> {
+    guard.check()?;
+    let mut profiles = vec![root.to_path_buf()];
+    let children = root.join("profiles");
+    if children.exists() {
+        for entry in
+            std::fs::read_dir(&children).map_err(|_| "Cannot read Hermes profile directories")?
+        {
+            guard.entries(1)?;
+            let entry = entry.map_err(|_| "Cannot inspect Hermes profile")?;
+            if !entry.file_name().to_string_lossy().starts_with('.') && entry.path().is_dir() {
+                profiles.push(entry.path());
+            }
+        }
+    }
+    guard.check()?;
+    Ok(profiles)
 }
 
 #[cfg(windows)]
 pub fn live(
     root: &std::path::Path,
     process: &Value,
+    guard: &mut Guard<'_>,
 ) -> Result<Option<(String, std::path::PathBuf)>> {
     use crate::{app::hook_install, platform};
     use std::path::PathBuf;
@@ -156,7 +183,8 @@ pub fn live(
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or("Hermes foreground process generation is unavailable")?;
     let owner = platform::current_identity().map_err(|e| e.to_string())?;
-    let verify = || -> Result<()> {
+    let verify = |guard: &mut Guard<'_>| -> Result<()> {
+        guard.entries(1)?;
         let observed =
             platform::process_identity(pid).map_err(|_| "Hermes foreground process disappeared")?;
         if observed.creation_time != started || observed.owner != owner {
@@ -164,15 +192,13 @@ pub fn live(
         }
         Ok(())
     };
-    verify()?;
+    verify(guard)?;
     let mut processes = BTreeMap::new();
-    let mut descendants =
-        platform::descendant_processes(pid).map_err(|_| "Cannot inspect Hermes subprocesses")?;
+    let mut descendants = platform::descendant_processes_budgeted(pid, guard)
+        .map_err(|e| format!("Cannot inspect Hermes subprocesses: {e}"))?;
     descendants.push(platform::process_identity(pid).map_err(|_| "Hermes process disappeared")?);
-    if descendants.len() > 256 {
-        return Err("Too many Hermes subprocesses".into());
-    }
     for candidate in &descendants {
+        guard.entries(1)?;
         let current =
             platform::process_identity(candidate.pid).map_err(|_| "Hermes subprocess changed")?;
         if current.creation_time != candidate.creation_time || current.owner != owner {
@@ -184,49 +210,93 @@ pub fn live(
             .ok_or("Invalid Hermes process creation time")?;
         processes.insert(current.pid, unix_ticks as f64 / 10_000_000.0);
     }
-    let mut profiles = vec![root.to_path_buf()];
-    let children = root.join("profiles");
-    if children.exists() {
-        for entry in
-            std::fs::read_dir(&children).map_err(|_| "Cannot read Hermes profile directories")?
-        {
-            if profiles.len() > 128 {
-                return Err("Too many Hermes profiles".into());
-            }
-            let entry = entry.map_err(|_| "Cannot inspect Hermes profile")?;
-            if !entry.file_name().to_string_lossy().starts_with('.') && entry.path().is_dir() {
-                profiles.push(entry.path());
-            }
-        }
-    }
+    let profiles = profiles(root, guard)?;
     let mut matches: Vec<(String, PathBuf)> = Vec::new();
     for profile in profiles {
+        guard.entries(1)?;
         let path = profile.join("runtime/active_sessions.json");
-        let Some(bytes) = hook_install::read_profile(&path)? else {
+        let Some(bytes) = guard.read_with(&path, hook_install::read_profile_limit)? else {
             continue;
         };
-        if let Some(id) = selected(&bytes, &processes)? {
+        if let Some(id) = selected(&bytes, &processes, guard)? {
+            if !matches.is_empty() {
+                return Err(
+                    "Hermes profile identity is ambiguous; no conversation was selected".into(),
+                );
+            }
             matches.push((id, profile));
         }
     }
-    verify()?;
+    verify(guard)?;
     for candidate in descendants {
+        guard.entries(1)?;
         let current = platform::process_identity(candidate.pid)
             .map_err(|_| "Hermes subprocess disappeared")?;
         if current.creation_time != candidate.creation_time || current.owner != owner {
             return Err("Hermes subprocess changed during discovery".into());
         }
     }
-    if matches.len() > 1 {
-        return Err("Hermes profile identity is ambiguous; no conversation was selected".into());
-    }
+    guard.check()?;
     Ok(matches.pop())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn guard() -> Guard<'static> {
+        Guard::new(crate::core::native_metadata::Policy::default()).unwrap()
+    }
+    fn selected(bytes: &[u8], processes: &BTreeMap<u32, f64>) -> Result<Option<String>> {
+        super::selected(bytes, processes, &mut guard())
+    }
+    fn gateway_pid(bytes: &[u8], creation_time: u64) -> Result<u32> {
+        super::gateway_pid(bytes, creation_time, &mut guard())
+    }
     use serde_json::json;
+    #[test]
+    fn profile_scan_counts_hidden_and_non_directory_entries_before_filtering() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-hermes-metadata-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let children = root.join("profiles");
+        crate::core::layouts::write_private(&children.join(".ignored"), b"").unwrap();
+        crate::core::layouts::write_private(&children.join("ordinary-file"), b"").unwrap();
+        crate::core::layouts::write_private(&children.join("named/marker"), b"").unwrap();
+        let mut budget = Guard::new(crate::core::native_metadata::Policy {
+            entries: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let refused = profiles(&root, &mut budget);
+        let all = profiles(&root, &mut guard()).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(refused.unwrap_err().contains("entry_limit"));
+        assert_eq!(all, vec![root, children.join("named")]);
+    }
+    #[test]
+    fn duplicate_native_identity_fields_and_cumulative_lease_work_are_refused() {
+        let ticks = 116_444_736_000_000_000 + 1_792_000_000 * 10_000_000;
+        assert!(gateway_pid(br#"{"pid":42,"kind":"hermes-gateway","gateway_state":"stopped","gateway_state":"running","start_time":179200000000}"#, ticks).is_err());
+        let processes = BTreeMap::from([(42, 1792000000.0)]);
+        assert!(selected(br#"{"entries":[{"pid":99,"pid":42,"process_start_time":1792000000,"surface":"cli","session_id":"20261016_120000_a1b2c3"}]}"#, &processes).is_err());
+        let raw = br#"{"entries":[{},{}]}"#;
+        let mut budget = Guard::new(crate::core::native_metadata::Policy {
+            entries: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(super::selected(raw, &processes, &mut budget).unwrap(), None);
+        assert!(
+            super::selected(raw, &processes, &mut budget)
+                .unwrap_err()
+                .contains("entry_limit")
+        );
+    }
     #[test]
     fn gateway_requires_native_kind_running_state_and_exact_process_birth() {
         let ticks = 116_444_736_000_000_000 + 1_792_000_000 * 10_000_000;

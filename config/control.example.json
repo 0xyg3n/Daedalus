@@ -117,6 +117,15 @@
     "session_fork_value_limit": 16777216,
     "session_fork_timeout_ms": 30000,
     "agent_activity_max_age_ms": 60000,
-    "agent_activity_query_timeout_ms": 250
+    "agent_activity_query_timeout_ms": 250,
+    "native_metadata_file_limit_bytes": 1048576,
+    "native_metadata_work_limit_bytes": 16777216,
+    "native_metadata_entry_limit": 16384,
+    "native_metadata_value_limit": 262144,
+    "native_metadata_header_limit_bytes": 16384,
+    "native_metadata_timeout_ms": 2000,
+    "native_metadata_process_limit": 128,
+    "native_metadata_process_scan_limit": 65536,
+    "native_metadata_depth_limit": 32
   }
 }

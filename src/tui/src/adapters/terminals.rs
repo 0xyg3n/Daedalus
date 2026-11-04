@@ -98,6 +98,8 @@ pub struct Terminals {
     pub timeout: Duration,
     pub output_limit: usize,
     pub discovery_budget: Option<std::sync::Arc<crate::app::discovery_budget::Budget>>,
+    #[cfg(windows)]
+    pub native_metadata_policy: crate::core::native_metadata::Policy,
     pub native_launch_cols: u16,
     pub native_launch_rows: u16,
     pub native_scrollback_rows: u64,
@@ -112,6 +114,8 @@ impl Default for Terminals {
             timeout: Duration::from_millis(settings.terminal_query_timeout_ms),
             output_limit: settings.terminal_query_limit_bytes as usize,
             discovery_budget: None,
+            #[cfg(windows)]
+            native_metadata_policy: settings.native_metadata_policy(),
             native_launch_cols: settings.native_launch_cols,
             native_launch_rows: settings.native_launch_rows,
             native_scrollback_rows: settings.native_scrollback_rows,
@@ -132,6 +136,10 @@ impl Terminals {
         settings.validate()?;
         self.timeout = Duration::from_millis(settings.terminal_query_timeout_ms);
         self.output_limit = settings.terminal_query_limit_bytes as usize;
+        #[cfg(windows)]
+        {
+            self.native_metadata_policy = settings.native_metadata_policy();
+        }
         self.native_launch_cols = settings.native_launch_cols;
         self.native_launch_rows = settings.native_launch_rows;
         self.native_scrollback_rows = settings.native_scrollback_rows;
@@ -201,7 +209,7 @@ impl Terminals {
         }
         let panes = parse_tmux(&output, socket, |pid| process_start(&self.proc_root, pid))?;
         #[cfg(windows)]
-        let panes = windows_harness_labels(panes);
+        let panes = windows_harness_labels(panes, self);
         let format = "#{client_name}\t#{client_pid}\t#{session_id}\t#{window_id}\t#{pane_id}\t#{client_tty}\t#{client_flags}";
         let output = self.query(&self.tmux, &["-S", socket, "list-clients", "-F", format])?;
         if let Some(budget) = &self.discovery_budget {
@@ -1087,7 +1095,22 @@ fn default_mux_binary() -> PathBuf {
 /// Display-only enrichment for native mux wrappers. Routing retains the exact
 /// pane/root incarnation; a friendly harness label never grants hook authority.
 #[cfg(windows)]
-fn windows_harness_labels(mut panes: Vec<Value>) -> Vec<Value> {
+fn windows_harness_labels(mut panes: Vec<Value>, adapter: &Terminals) -> Vec<Value> {
+    let progress = || {
+        adapter
+            .discovery_budget
+            .as_ref()
+            .map_or(Ok(()), |budget| budget.time_left().map(|_| ()))
+    };
+    let Ok(guard) = crate::core::native_metadata::Guard::new(adapter.native_metadata_policy) else {
+        return panes;
+    };
+    let mut guard = guard.with_progress(&progress).with_deadline(
+        adapter
+            .discovery_budget
+            .as_ref()
+            .map(|budget| budget.deadline),
+    );
     for pane in &mut panes {
         let coarse = pane["agent"].as_str().unwrap_or("").to_ascii_lowercase();
         if !["powershell", "pwsh", "cmd", "node", "bash", "sh"].contains(&coarse.as_str()) {
@@ -1096,7 +1119,7 @@ fn windows_harness_labels(mut panes: Vec<Value>) -> Vec<Value> {
         let Some(pid) = pane["pid"].as_str().and_then(|p| p.parse().ok()) else {
             continue;
         };
-        let Ok(children) = crate::platform::descendant_processes(pid) else {
+        let Ok(children) = crate::platform::descendant_processes_budgeted(pid, &mut guard) else {
             continue;
         };
         let candidates = children

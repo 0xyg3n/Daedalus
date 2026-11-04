@@ -2,7 +2,7 @@
 //! UUIDs and transcript paths stay distinct. History bodies are never read.
 use crate::{
     app::{hook_launch::Plan, hook_runtime::Registration, hooks::Harness},
-    core::{identity::TerminalId, layouts},
+    core::{identity::TerminalId, layouts, native_metadata::Guard},
 };
 use serde_json::Value;
 #[cfg(unix)]
@@ -11,7 +11,6 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
 type Result<T> = std::result::Result<T, String>;
@@ -28,11 +27,13 @@ pub struct Session {
     device: u64,
     inode: u64,
 }
-fn bytes(path: &Path) -> Result<Vec<u8>> {
-    super::super::app::telegram_config::read_private(path, 1024 * 1024)?
+fn bytes(path: &Path, guard: &mut Guard<'_>) -> Result<Vec<u8>> {
+    guard
+        .read(path)?
         .ok_or_else(|| "Pi launch evidence is missing".into())
 }
-fn header(path: &Path) -> Result<(Vec<u8>, u64, u64)> {
+fn header(path: &Path, guard: &mut Guard<'_>) -> Result<(Vec<u8>, u64, u64)> {
+    guard.check()?;
     layouts::check_path(path)?;
     #[cfg(unix)]
     let (file, device, inode) = {
@@ -61,13 +62,7 @@ fn header(path: &Path) -> Result<(Vec<u8>, u64, u64)> {
             crate::platform::file_identity(&file).map_err(|_| "Cannot identify Pi session")?;
         (file, device, inode)
     };
-    let mut line = Vec::new();
-    BufReader::new(file.take(16385))
-        .read_until(b'\n', &mut line)
-        .map_err(|_| "Cannot read Pi session header")?;
-    if line.len() > 16384 || !line.ends_with(b"\n") {
-        return Err("Pi session header is incomplete or oversized".into());
-    }
+    let line = guard.header(file)?;
     Ok((line, device, inode))
 }
 /// Metadata proof for an explicitly selected Pi fork file. No directory search,
@@ -80,15 +75,16 @@ pub struct Parent {
     inode: u64,
 }
 impl Parent {
-    pub fn verify(&self) -> Result<()> {
-        let (bytes, device, inode) = header(&self.path)?;
+    pub fn verify(&self, guard: &mut Guard<'_>) -> Result<()> {
+        let (bytes, device, inode) = header(&self.path, guard)?;
         if bytes != self.bytes || (device, inode) != (self.device, self.inode) {
             return Err("Pi fork parent header changed; refresh".into());
         }
         Ok(())
     }
 }
-pub fn fork_parent(argv: &[String], cwd: &Path) -> Result<Option<Parent>> {
+pub fn fork_parent(argv: &[String], cwd: &Path, guard: &mut Guard<'_>) -> Result<Option<Parent>> {
+    guard.check()?;
     let Some(selector) = crate::core::checkpoints::pi_fork_selector(argv)? else {
         return Ok(None);
     };
@@ -105,8 +101,8 @@ pub fn fork_parent(argv: &[String], cwd: &Path) -> Result<Option<Parent>> {
     {
         return Ok(None);
     }
-    let (bytes, device, inode) = header(&path)?;
-    crate::core::json_preflight::check(&bytes, || Ok(()))?;
+    let (bytes, device, inode) = header(&path, guard)?;
+    guard.json(&bytes)?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Malformed Pi fork parent header")?;
     if value["type"] != "session" || value["version"] != 3 {
@@ -132,7 +128,7 @@ struct Evidence {
     reg_path: PathBuf,
     reg_bytes: Vec<u8>,
 }
-fn planned(directory: &Path, id: &str) -> Result<Vec<Evidence>> {
+fn planned(directory: &Path, id: &str, guard: &mut Guard<'_>) -> Result<Vec<Evidence>> {
     let root = directory.join("hook-launch");
     layouts::check_path(&root)?;
     let entries = match fs::read_dir(&root) {
@@ -141,15 +137,14 @@ fn planned(directory: &Path, id: &str) -> Result<Vec<Evidence>> {
         Err(_) => return Err("Cannot inspect Pi launch plans".into()),
     };
     let mut found = Vec::new();
-    for (index, entry) in entries.enumerate() {
-        if index >= 1024 {
-            return Err("Pi launch discovery limit exceeded".into());
-        }
+    for entry in entries {
+        guard.entries(1)?;
         let path = entry.map_err(|_| "Cannot inspect launch entry")?.path();
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        let raw = bytes(&path)?;
+        let raw = bytes(&path, guard)?;
+        guard.json(&raw)?;
         let plan: Plan = serde_json::from_slice(&raw).map_err(|_| "Invalid saved launch plan")?;
         if plan.spec.registration.scope.harness != Harness::Pi
             || plan.spec.registration.scope.conversation != id
@@ -158,12 +153,13 @@ fn planned(directory: &Path, id: &str) -> Result<Vec<Evidence>> {
         }
         if plan.path() != path
             || plan.spec.registration.directory != directory
-            || bytes(&path.with_extension("claimed"))? != b"claimed\n"
+            || bytes(&path.with_extension("claimed"), guard)? != b"claimed\n"
         {
             return Err("Pi launch evidence is not activated or has moved".into());
         }
         let reg_path = plan.spec.registration.path();
-        let reg_bytes = bytes(&reg_path)?;
+        let reg_bytes = bytes(&reg_path, guard)?;
+        guard.json(&reg_bytes)?;
         let registration: Registration =
             serde_json::from_slice(&reg_bytes).map_err(|_| "Invalid Pi registration")?;
         registration
@@ -188,28 +184,27 @@ fn planned(directory: &Path, id: &str) -> Result<Vec<Evidence>> {
 }
 /// Resolve an exact UUID in its reviewed isolated directory, never by filename,
 /// newest timestamp, partial UUID, terminal title, or unrelated user sessions.
-pub fn saved(directory: &Path, id: &str) -> Result<Session> {
-    let mut matches = Vec::new();
+pub fn saved(directory: &Path, id: &str, guard: &mut Guard<'_>) -> Result<Session> {
+    let mut matched = None;
     for Evidence {
         plan_path,
         plan_bytes,
         plan,
         reg_path,
         reg_bytes,
-    } in planned(directory, id)?
+    } in planned(directory, id, guard)?
     {
         let root = plan.plugin().join("sessions");
         layouts::check_path(&root)?;
         let entries = fs::read_dir(&root).map_err(|_| "Pi session directory is unavailable")?;
-        for (index, entry) in entries.enumerate() {
-            if index >= 1024 {
-                return Err("Pi session discovery limit exceeded".into());
-            }
+        for entry in entries {
+            guard.entries(1)?;
             let path = entry.map_err(|_| "Cannot inspect Pi session entry")?.path();
             if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
                 continue;
             }
-            let (raw, device, inode) = header(&path)?;
+            let (raw, device, inode) = header(&path, guard)?;
+            guard.json(&raw)?;
             let value: Value =
                 serde_json::from_slice(&raw).map_err(|_| "Malformed Pi session header")?;
             if value["type"] != "session" || value["version"] != 3 || value["id"].as_str().is_none()
@@ -222,7 +217,10 @@ pub fn saved(directory: &Path, id: &str) -> Result<Session> {
             if value["cwd"].as_str() != plan.spec.working_directory.to_str() {
                 return Err("Pi session project differs from launch plan".into());
             }
-            matches.push(Session {
+            if matched.is_some() {
+                return Err("Pi session header is ambiguous".into());
+            }
+            matched = Some(Session {
                 id: id.into(),
                 path,
                 cwd: plan.spec.working_directory.clone(),
@@ -236,10 +234,10 @@ pub fn saved(directory: &Path, id: &str) -> Result<Session> {
             });
         }
     }
-    if matches.len() != 1 {
-        return Err("Pi session header is missing or ambiguous; wait for the provider to persist its session".into());
-    }
-    Ok(matches.remove(0))
+    guard.check()?;
+    matched.ok_or_else(|| {
+        "Pi session header is missing; wait for the provider to persist its session".into()
+    })
 }
 /// The caller supplies already verified foreground evidence and rechecks it
 /// after discovery. Registration PID/start and the complete launch argv must agree.
@@ -249,6 +247,7 @@ pub fn live(
     pid: &str,
     start: &str,
     argv: &[String],
+    guard: &mut Guard<'_>,
 ) -> Result<Option<Session>> {
     let ids = argv
         .windows(2)
@@ -261,7 +260,7 @@ pub fn live(
     if ids.len() != 1 {
         return Err("Ambiguous Pi session launch ID".into());
     }
-    let session = saved(directory, ids[0])?;
+    let session = saved(directory, ids[0], guard)?;
     let plan: Plan =
         serde_json::from_slice(&session.plan_bytes).map_err(|_| "Invalid launch plan")?;
     let registration: Registration =
@@ -278,17 +277,17 @@ pub fn live(
     {
         return Err("Pi foreground identity differs from its launch registration".into());
     }
-    session.verify()?;
+    session.verify(guard)?;
     Ok(Some(session))
 }
 impl Session {
-    pub fn verify(&self) -> Result<()> {
-        if bytes(&self.registration)? != self.registration_bytes
-            || bytes(&self.plan)? != self.plan_bytes
+    pub fn verify(&self, guard: &mut Guard<'_>) -> Result<()> {
+        if bytes(&self.registration, guard)? != self.registration_bytes
+            || bytes(&self.plan, guard)? != self.plan_bytes
         {
             return Err("Pi launch evidence changed; review again".into());
         }
-        let (header, device, inode) = header(&self.path)?;
+        let (header, device, inode) = header(&self.path, guard)?;
         if header != self.header || (device, inode) != (self.device, self.inode) {
             return Err("Pi session file changed; review again".into());
         }
@@ -308,6 +307,21 @@ mod tests {
     };
     use serde_json::json;
     use std::os::unix::fs::symlink;
+    fn guard() -> Guard<'static> {
+        Guard::new(crate::core::native_metadata::Policy::default()).unwrap()
+    }
+    fn saved(directory: &Path, id: &str) -> Result<Session> {
+        super::saved(directory, id, &mut guard())
+    }
+    fn live(
+        directory: &Path,
+        terminal: &TerminalId,
+        pid: &str,
+        start: &str,
+        argv: &[String],
+    ) -> Result<Option<Session>> {
+        super::live(directory, terminal, pid, start, argv, &mut guard())
+    }
     const SID: &str = "12345678-1234-1234-1234-123456789abc";
     struct Fixture {
         root: PathBuf,
@@ -397,6 +411,47 @@ mod tests {
         }
     }
     #[test]
+    fn saved_identity_shares_budget_with_rechecks_and_counts_ignored_files() {
+        let f = Fixture::new();
+        let original = fs::read(&f.file).unwrap();
+        let session = saved(&f.root, SID).unwrap();
+        let work = fs::metadata(f.plan.path()).unwrap().len()
+            + fs::metadata(f.registration.path()).unwrap().len()
+            + b"claimed\n".len() as u64
+            + session.header.len() as u64;
+        let mut budget = Guard::new(crate::core::native_metadata::Policy {
+            work_bytes: work,
+            ..Default::default()
+        })
+        .unwrap();
+        let observed = super::saved(&f.root, SID, &mut budget).unwrap();
+        assert!(
+            observed
+                .verify(&mut budget)
+                .unwrap_err()
+                .contains("work_limit")
+        );
+        fs::write(f.plan.path().with_extension("ignored"), b"").unwrap();
+        let mut budget = Guard::new(crate::core::native_metadata::Policy {
+            entries: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            super::saved(&f.root, SID, &mut budget)
+                .unwrap_err()
+                .contains("entry_limit")
+        );
+        assert_eq!(fs::read(&f.file).unwrap(), original);
+        layouts::write_private(
+            &f.file,
+            format!("{{\"type\":\"session\",\"version\":3,\"id\":\"other\",\"id\":\"{SID}\"}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(saved(&f.root, SID).unwrap_err().contains("ambiguous JSON"));
+    }
+    #[test]
     fn discovers_header_not_filename_and_requires_pinned_process() {
         let f = Fixture::new();
         let s = live(
@@ -433,7 +488,7 @@ mod tests {
         let s = saved(&f.root, SID).unwrap();
         let original = fs::read(&f.file).unwrap();
         layouts::write_private(&f.file, &original).unwrap();
-        assert!(s.verify().is_err());
+        assert!(s.verify(&mut guard()).is_err());
         let s = saved(&f.root, SID).unwrap();
         layouts::write_private(&f.file.with_file_name("duplicate.jsonl"), &original).unwrap();
         assert!(saved(&f.root, SID).is_err());
@@ -444,7 +499,7 @@ mod tests {
             &serde_json::to_vec(&registration).unwrap(),
         )
         .unwrap();
-        assert!(s.verify().is_err());
+        assert!(s.verify(&mut guard()).is_err());
     }
     #[test]
     fn missing_malformed_oversized_and_symlink_headers_fail_closed() {
@@ -464,6 +519,12 @@ mod tests {
 #[cfg(test)]
 mod parent_metadata_tests {
     use super::*;
+    fn guard() -> Guard<'static> {
+        Guard::new(crate::core::native_metadata::Policy::default()).unwrap()
+    }
+    fn fork_parent(argv: &[String], cwd: &Path) -> Result<Option<Parent>> {
+        super::fork_parent(argv, cwd, &mut guard())
+    }
     #[test]
     fn selected_parent_header_proves_child_identity_and_rechecks_replacement() {
         let root = std::env::temp_dir().join(format!(
@@ -489,7 +550,7 @@ mod parent_metadata_tests {
         let parent = fork_parent(&argv, &root).unwrap().unwrap();
         assert_eq!(parent.id, id);
         assert!(!String::from_utf8_lossy(&parent.bytes).contains("NOT_METADATA"));
-        parent.verify().unwrap();
+        parent.verify(&mut guard()).unwrap();
         assert_eq!(
             crate::core::checkpoints::resolve_sid_with_pi_parent(&argv, "pi", id, Some(&parent.id))
                 .unwrap(),
@@ -543,7 +604,7 @@ mod parent_metadata_tests {
             Some("ownedparent")
         );
         layouts::write_private(&file, raw.as_bytes()).unwrap();
-        assert!(parent.verify().is_err());
+        assert!(parent.verify(&mut guard()).is_err());
         layouts::write_private(
             &file,
             b"{\"type\":\"session\",\"version\":3,\"id\":\"one\",\"id\":\"two\"}\n",

@@ -7,5 +7,6 @@ pub mod identity;
 pub mod journal;
 pub(crate) mod json_preflight;
 pub mod layouts;
+pub mod native_metadata;
 pub mod routes;
 mod session_args;

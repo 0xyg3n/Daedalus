@@ -40,6 +40,15 @@ pub struct Settings {
     pub external_discovery_entry_limit: u64,
     pub external_discovery_timeout_ms: u64,
     pub external_discovery_query_limit: u64,
+    pub native_metadata_file_limit_bytes: u64,
+    pub native_metadata_work_limit_bytes: u64,
+    pub native_metadata_entry_limit: u64,
+    pub native_metadata_value_limit: u64,
+    pub native_metadata_header_limit_bytes: u64,
+    pub native_metadata_timeout_ms: u64,
+    pub native_metadata_process_limit: u64,
+    pub native_metadata_process_scan_limit: u64,
+    pub native_metadata_depth_limit: u64,
     pub harness_probe_timeout_ms: u64,
     pub harness_probe_limit_bytes: u64,
     pub native_login_timeout_ms: u64,
@@ -71,6 +80,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
+        let metadata = crate::core::native_metadata::Policy::default();
         let snapshot = crate::adapters::sqlite::SnapshotOptions::default();
         let checkpoints = crate::core::checkpoint_budget::Policy::default();
         Self {
@@ -119,6 +129,15 @@ impl Default for Settings {
             external_discovery_entry_limit: 65536,
             external_discovery_timeout_ms: 2000,
             external_discovery_query_limit: 512,
+            native_metadata_file_limit_bytes: metadata.file_bytes,
+            native_metadata_work_limit_bytes: metadata.work_bytes,
+            native_metadata_entry_limit: metadata.entries,
+            native_metadata_value_limit: metadata.values,
+            native_metadata_header_limit_bytes: metadata.header_bytes,
+            native_metadata_timeout_ms: metadata.timeout_ms,
+            native_metadata_process_limit: metadata.processes,
+            native_metadata_process_scan_limit: metadata.snapshot_entries,
+            native_metadata_depth_limit: metadata.depth,
             harness_probe_timeout_ms: 2000,
             harness_probe_limit_bytes: 16384,
             native_login_timeout_ms: 120000,
@@ -387,18 +406,90 @@ pub const SETTINGS: &[Setting] = &[
         65536
     ),
     setting!(
+        native_metadata_file_limit_bytes,
+        "File byte limit",
+        "Native identity metadata",
+        "Maximum bytes per native identity file.",
+        1024,
+        67108864
+    ),
+    setting!(
+        native_metadata_work_limit_bytes,
+        "Cumulative byte limit",
+        "Native identity metadata",
+        "Combined bytes read across native identity files and stability checks per operation. Exhaustion never selects a partial match.",
+        1024,
+        1073741824
+    ),
+    setting!(
+        native_metadata_entry_limit,
+        "Entry limit",
+        "Native identity metadata",
+        "Combined directory entries, registry rows and process checks per operation, including ignored entries.",
+        1,
+        1048576
+    ),
+    setting!(
+        native_metadata_value_limit,
+        "JSON value limit",
+        "Native identity metadata",
+        "Combined JSON values and object keys admitted before parsing native identity metadata. Duplicate keys are refused.",
+        16,
+        16777216
+    ),
+    setting!(
+        native_metadata_header_limit_bytes,
+        "Header byte limit",
+        "Native identity metadata",
+        "Maximum Pi header bytes, ending at the first newline. Conversation bodies are not read.",
+        128,
+        1048576
+    ),
+    setting!(
+        native_metadata_timeout_ms,
+        "Processing deadline (ms)",
+        "Native identity metadata",
+        "Cooperative elapsed deadline across native identity discovery and stability checks. An earlier discovery deadline also applies. Blocking OS calls are not preempted.",
+        1,
+        60000
+    ),
+    setting!(
+        native_metadata_process_limit,
+        "Windows subtree process limit",
+        "Native identity metadata",
+        "Maximum processes in a native identity subtree, including its root and exited candidates.",
+        1,
+        65536
+    ),
+    setting!(
+        native_metadata_process_scan_limit,
+        "Windows snapshot entry limit",
+        "Native identity metadata",
+        "Combined process snapshot entries across native identity scans in one operation.",
+        1,
+        1048576
+    ),
+    setting!(
+        native_metadata_depth_limit,
+        "Windows subtree depth limit",
+        "Native identity metadata",
+        "Maximum native identity process ancestry depth.",
+        1,
+        256
+    ),
+    setting!(
         harness_probe_timeout_ms,
-        "Account discovery timeout (ms)",
+        "Native command probe timeout (ms)",
         "Discovery",
-        "Deadline for each local account-status command. A failed or timed-out probe keeps sign-in unverified.",
+        "Deadline for each local account-status or native command-version check. A failed or timed-out probe keeps sign-in unverified.",
         100,
         60000
     ),
     setting!(
         harness_probe_limit_bytes,
-        "Account discovery output limit (bytes)",
+        "Native command probe output limit (bytes)",
         "Discovery",
-        "Maximum output accepted from each local account-status command. Raw status output and account identities are never displayed.",
+        "Maximum output accepted from each local account-status or native command-version check. Raw status output and account identities are never displayed.",
         1024,
         1048576
     ),
@@ -652,6 +743,19 @@ pub const SETTINGS: &[Setting] = &[
     ),
 ];
 impl Settings {
+    pub fn native_metadata_policy(&self) -> crate::core::native_metadata::Policy {
+        crate::core::native_metadata::Policy {
+            file_bytes: self.native_metadata_file_limit_bytes,
+            work_bytes: self.native_metadata_work_limit_bytes,
+            entries: self.native_metadata_entry_limit,
+            values: self.native_metadata_value_limit,
+            header_bytes: self.native_metadata_header_limit_bytes,
+            timeout_ms: self.native_metadata_timeout_ms,
+            processes: self.native_metadata_process_limit,
+            snapshot_entries: self.native_metadata_process_scan_limit,
+            depth: self.native_metadata_depth_limit,
+        }
+    }
     pub fn checkpoint_policy(&self) -> crate::core::checkpoint_budget::Policy {
         crate::core::checkpoint_budget::Policy {
             file_bytes: self.checkpoint_file_limit_bytes,
@@ -727,6 +831,10 @@ mod tests {
         let defaults = Settings::default();
         defaults.validate().unwrap();
         assert_eq!(
+            defaults.native_metadata_policy(),
+            crate::core::native_metadata::Policy::default()
+        );
+        assert_eq!(
             defaults.checkpoint_policy(),
             crate::core::checkpoint_budget::Policy::default()
         );
@@ -761,6 +869,12 @@ mod tests {
             assert!(defaults.set(setting.key, &(max + 1).to_string()).is_err());
             assert!(defaults.set(setting.key, "private-account-value").is_err());
             for value in [min, max] {
+                defaults
+                    .set(setting.key, &value.to_string())
+                    .unwrap()
+                    .native_metadata_policy()
+                    .validate()
+                    .unwrap();
                 defaults
                     .set(setting.key, &value.to_string())
                     .unwrap()

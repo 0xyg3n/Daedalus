@@ -138,10 +138,13 @@ pub fn prepare(
     )?;
     let output = process::run(
         launch.command().arg("--version"),
-        std::time::Duration::from_secs(5),
-        4096,
+        std::time::Duration::from_millis(config.runtime.harness_probe_timeout_ms),
+        config.runtime.harness_probe_limit_bytes as usize,
     )
-    .map_err(|_| "Cannot verify native command version")?;
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::TimedOut => "Native command version check timed out; review harness_probe_timeout_ms".to_owned(),
+        _ => "Cannot verify native command version; review the executable and harness_probe_limit_bytes".to_owned(),
+    })?;
     if !output.status.success() {
         return Err("Native version query failed".into());
     }
@@ -248,7 +251,7 @@ mod tests {
         ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let config = ControlConfig::fresh(&dir).unwrap();
+        let mut config = ControlConfig::fresh(&dir).unwrap();
         layouts::write_private(
             &dir.join("control.json"),
             &serde_json::to_vec(&config).unwrap(),
@@ -305,6 +308,34 @@ mod tests {
             ),
             ("UNRELATED_SECRET".into(), "PRIVATE".into()),
         ]);
+        // The real prepare path must honor the saved output and time policy.
+        let padded = format!("#!/bin/sh\nprintf '2.1.296\\n{}'\n", " ".repeat(6000));
+        std::fs::write(&binary, &padded).unwrap();
+        config.runtime.harness_probe_limit_bytes = 1024;
+        layouts::write_private(
+            &dir.join("control.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(prepare(request.clone(), &config, &terminals, &env).is_err());
+        assert!(!dir.join("sent").exists());
+        config.runtime.harness_probe_limit_bytes = 8192;
+        config.runtime.harness_probe_timeout_ms = 100;
+        layouts::write_private(
+            &dir.join("control.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&binary, "#!/bin/sh\nsleep 0.3\nprintf '2.1.296\\n'\n").unwrap();
+        assert!(prepare(request.clone(), &config, &terminals, &env).is_err());
+        assert!(!dir.join("sent").exists());
+        config.runtime.harness_probe_timeout_ms = 1000;
+        layouts::write_private(
+            &dir.join("control.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&binary, &padded).unwrap();
         let plan = prepare(request.clone(), &config, &terminals, &env).unwrap();
         assert!(!plan.review().to_string().contains("PRIVATE"));
         assert!(!dir.join("sent").exists());

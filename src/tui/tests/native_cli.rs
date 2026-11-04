@@ -1471,6 +1471,15 @@ fn discovery_settings_reach_real_cli_queries_and_partial_usage_stays_incomplete(
         );
     };
     for (key, value) in [
+        ("native_metadata_file_limit_bytes", "2097152"),
+        ("native_metadata_work_limit_bytes", "33554432"),
+        ("native_metadata_entry_limit", "1234"),
+        ("native_metadata_value_limit", "524288"),
+        ("native_metadata_header_limit_bytes", "32768"),
+        ("native_metadata_timeout_ms", "3000"),
+        ("native_metadata_process_limit", "256"),
+        ("native_metadata_process_scan_limit", "131072"),
+        ("native_metadata_depth_limit", "64"),
         ("discovery_workers", "1"),
         ("discovery_endpoint_limit", "2"),
         ("discovery_socket_scan_limit", "1"),
@@ -1512,6 +1521,15 @@ fn discovery_settings_reach_real_cli_queries_and_partial_usage_stays_incomplete(
         set(key, value);
     }
     let mut config = ControlConfig::parse(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(config.runtime.native_metadata_file_limit_bytes, 2097152);
+    assert_eq!(config.runtime.native_metadata_work_limit_bytes, 33554432);
+    assert_eq!(config.runtime.native_metadata_entry_limit, 1234);
+    assert_eq!(config.runtime.native_metadata_value_limit, 524288);
+    assert_eq!(config.runtime.native_metadata_header_limit_bytes, 32768);
+    assert_eq!(config.runtime.native_metadata_timeout_ms, 3000);
+    assert_eq!(config.runtime.native_metadata_process_limit, 256);
+    assert_eq!(config.runtime.native_metadata_process_scan_limit, 131072);
+    assert_eq!(config.runtime.native_metadata_depth_limit, 64);
     config.discovery.automatic = false;
     config.discovery.herdr_sessions = vec!["c".into(), "a".into(), "b".into()];
     // config init already created this private regular file.

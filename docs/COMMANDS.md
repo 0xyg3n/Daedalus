@@ -185,8 +185,17 @@ All 56 fields in `control.json.runtime` have defaults when omitted:
 | `external_discovery_entry_limit` | 65536 | 1–1048576 |
 | `external_discovery_timeout_ms` | 2000 | 1–60000 |
 | `external_discovery_query_limit` | 512 | 1–65536 |
-| `harness_probe_timeout_ms` | 2000 | 100–60000 |
-| `harness_probe_limit_bytes` | 16384 | 1024–1048576 |
+| `native_metadata_file_limit_bytes` | 1048576 | 1024–67108864; maximum input bytes per native identity file |
+| `native_metadata_work_limit_bytes` | 16777216 | 1024–1073741824; cumulative metadata reads and stability checks |
+| `native_metadata_entry_limit` | 16384 | 1–1048576; cumulative directories, leases and process checks |
+| `native_metadata_value_limit` | 262144 | 16–16777216; cumulative strict JSON values and keys |
+| `native_metadata_header_limit_bytes` | 16384 | 128–1048576; Pi header only, through its newline |
+| `native_metadata_timeout_ms` | 2000 | 1–60000; cooperative native metadata deadline |
+| `native_metadata_process_limit` | 128 | 1–65536; Windows subtree candidates including root |
+| `native_metadata_process_scan_limit` | 65536 | 1–1048576; cumulative Windows subtree snapshot entries |
+| `native_metadata_depth_limit` | 32 | 1–256; Windows subtree ancestry depth |
+| `harness_probe_timeout_ms` | 2000 | 100–60000; local account-status and native command-version checks |
+| `harness_probe_limit_bytes` | 16384 | 1024–1048576; output from local account-status and native command-version checks |
 | `native_login_timeout_ms` | 120000 | 100–900000 |
 | `native_login_output_limit_bytes` | 262144 | 1024–1048576 |
 | `database_snapshot_timeout_ms` | 10000 | 1–900000 |
@@ -667,3 +676,5 @@ never receives keyboard or paste input. **z** remains the explicit Focus action.
 Cube resizing: drag the front face's right/bottom edges, or use `<` / `>` for
 width and `+` / `-` for height. While attached, prefix the resize key with
 `Ctrl+]`. Double-click an edge to reset it; proportions persist in local layouts.
+
+Native identity metadata uses one cumulative policy per Pi/Hermes operation, including stability rechecks. Duplicate JSON keys, ambiguous matches, exhausted budgets and expired observations are refused. Pi reads only its first header line. Windows subtree discovery and display labels use the saved process, snapshot and depth limits. These cooperative deadlines do not preempt blocking operating-system calls. Native slash-command verification uses the saved probe timeout and output limit; audited command-version support remains explicit.

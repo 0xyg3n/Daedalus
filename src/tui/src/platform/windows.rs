@@ -647,14 +647,49 @@ pub fn terminal_processes(
 }
 /// Display-only descendant evidence, never terminal ownership authorization.
 /// One snapshot is queried; only the bounded subtree has tokens/images opened.
+#[cfg(test)]
 pub fn descendant_processes(root_pid: u32) -> io::Result<Vec<ProcessIdentity>> {
     descendant_processes_with(root_pid, process_identity_with_parent)
 }
+#[cfg(test)]
 fn descendant_processes_with(
     root_pid: u32,
+    observe: impl FnMut(u32, Option<u32>) -> io::Result<ProcessIdentity>,
+) -> io::Result<Vec<ProcessIdentity>> {
+    let mut guard =
+        crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy::default())
+            .map_err(io::Error::other)?;
+    descendant_processes_guarded(root_pid, &mut guard, observe)
+}
+pub fn descendant_processes_budgeted(
+    root_pid: u32,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> io::Result<Vec<ProcessIdentity>> {
+    descendant_processes_guarded(root_pid, guard, process_identity_with_parent)
+}
+fn descendant_processes_guarded(
+    root_pid: u32,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
     mut observe: impl FnMut(u32, Option<u32>) -> io::Result<ProcessIdentity>,
 ) -> io::Result<Vec<ProcessIdentity>> {
-    let parents = process_parents()?;
+    let (limit, deadline) = guard.snapshot_capacity().map_err(io::Error::other)?;
+    let snapshot = match process_snapshot_with(limit, Some(deadline)) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.to_string() == "Process snapshot exceeds bound" => {
+            return Err(io::Error::other(
+                guard.snapshot_entries(limit.saturating_add(1)).unwrap_err(),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    guard
+        .snapshot_entries(snapshot.len())
+        .map_err(io::Error::other)?;
+    let parents: std::collections::BTreeMap<_, _> = snapshot
+        .into_iter()
+        .map(|(pid, parent, _)| (pid, parent))
+        .collect();
+    guard.entries(1).map_err(io::Error::other)?;
     let root_parent = *parents
         .get(&root_pid)
         .ok_or_else(|| io::Error::other("Root process unavailable"))?;
@@ -672,9 +707,21 @@ fn descendant_processes_with(
     let mut seen = std::collections::BTreeSet::from([root_pid]);
     let mut result = Vec::new();
     while let Some((parent, depth)) = queue.pop_front() {
+        guard.check().map_err(io::Error::other)?;
         for &pid in children.get(&parent.pid).into_iter().flatten() {
-            if seen.len() >= 128 || depth >= 32 || !seen.insert(pid) {
-                return Err(io::Error::other("Process subtree exceeds bound or cycles"));
+            guard.entries(1).map_err(io::Error::other)?;
+            if seen.len() as u64 >= guard.policy.processes {
+                return Err(io::Error::other(
+                    "Native metadata subtree limit reached; review native_metadata_process_limit",
+                ));
+            }
+            if depth as u64 >= guard.policy.depth {
+                return Err(io::Error::other(
+                    "Native metadata ancestry limit reached; review native_metadata_depth_limit",
+                ));
+            }
+            if !seen.insert(pid) {
+                return Err(io::Error::other("Process subtree has cycles"));
             }
             let child = match observe(pid, Some(parent.pid)) {
                 Ok(child) => child,
@@ -693,6 +740,7 @@ fn descendant_processes_with(
             result.push(child);
         }
     }
+    guard.entries(1).map_err(io::Error::other)?;
     let current = observe(root_pid, Some(root_parent))?;
     if current.creation_time != root.creation_time
         || current.owner != root.owner
@@ -700,6 +748,7 @@ fn descendant_processes_with(
     {
         return Err(io::Error::other("Root process incarnation changed"));
     }
+    guard.check().map_err(io::Error::other)?;
     Ok(result)
 }
 fn require_running_process(handle: HANDLE) -> io::Result<()> {
@@ -1408,9 +1457,26 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
+        let mut limited =
+            crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
+                processes: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let rejected = descendant_processes_budgeted(std::process::id(), &mut limited);
+        let mut snapshot_limited =
+            crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
+                snapshot_entries: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let snapshot_rejected =
+            descendant_processes_budgeted(std::process::id(), &mut snapshot_limited);
         let found = descendant_processes(std::process::id());
         child.kill().unwrap();
         child.wait().unwrap();
+        assert!(rejected.is_err());
+        assert!(snapshot_rejected.is_err());
         let found = found.unwrap();
         let identity = found
             .iter()

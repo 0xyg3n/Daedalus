@@ -44,7 +44,7 @@ impl<'de> DeserializeSeed<'de> for Seed<'_, '_> {
 impl<'de> Visitor<'de> for Seed<'_, '_> {
     type Value = ();
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("bounded viewer history JSON")
+        f.write_str("bounded JSON")
     }
     fn visit_unit<E: de::Error>(self) -> std::result::Result<(), E> {
         Ok(())

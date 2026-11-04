@@ -922,6 +922,21 @@ impl SessionStore {
         pane: &Value,
         supplied_sid: &str,
     ) -> Result<Checkpoint> {
+        let metadata_progress = || {
+            adapter
+                .discovery_budget
+                .as_ref()
+                .map_or(Ok(()), |budget| budget.time_left().map(|_| ()))
+        };
+        let mut metadata =
+            crate::core::native_metadata::Guard::new(config.runtime.native_metadata_policy())?
+                .with_progress(&metadata_progress)
+                .with_deadline(
+                    adapter
+                        .discovery_budget
+                        .as_ref()
+                        .map(|budget| budget.deadline),
+                );
         let actual = self.verify_pane(adapter, pane)?;
         let observed_harness = harness_name(&actual);
         let mut harness = observed_harness.clone();
@@ -934,6 +949,7 @@ impl SessionStore {
                 &process.pid,
                 &process.start,
                 &process.argv,
+                &mut metadata,
             )?
             .ok_or("Terminal has no verified Pi session")?;
             harness = "pi".into();
@@ -952,6 +968,7 @@ impl SessionStore {
                         &process.pid,
                         &process.start,
                         &process.argv,
+                        &mut metadata,
                     )
                 })
                 .transpose()?
@@ -972,7 +989,7 @@ impl SessionStore {
             let process = windows_native_process(adapter, &actual, &harness)?;
             let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
             let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
-            super::hermes_sessions::live(&root, &process)?
+            super::hermes_sessions::live(&root, &process, &mut metadata)?
         } else {
             None
         };
@@ -984,7 +1001,9 @@ impl SessionStore {
         let pi_parent = if harness == "pi" {
             evidence
                 .as_ref()
-                .map(|process| pi_sessions::fork_parent(&process.argv, Path::new(&process.cwd)))
+                .map(|process| {
+                    pi_sessions::fork_parent(&process.argv, Path::new(&process.cwd), &mut metadata)
+                })
                 .transpose()?
                 .flatten()
         } else {
@@ -1072,17 +1091,19 @@ impl SessionStore {
         }
         check_process(adapter, &evidence, &harness)?;
         if let Some(parent) = &pi_parent {
-            parent.verify()?;
+            parent.verify(&mut metadata)?;
         }
         if let Some(session) = &discovered_pi {
-            session.verify()?;
+            session.verify(&mut metadata)?;
         }
         #[cfg(windows)]
         if let Some(session) = &discovered_hermes {
             let process = windows_native_process(adapter, &again, &harness)?;
             let tool = harnesses::tool("hermes").ok_or("Unknown Hermes adapter")?;
             let root = harnesses::profile_directory(&tool, environment, &config.profiles)?;
-            if super::hermes_sessions::live(&root, &process)?.as_ref() != Some(session) {
+            if super::hermes_sessions::live(&root, &process, &mut metadata)?.as_ref()
+                != Some(session)
+            {
                 return Err("Hermes conversation changed during discovery; refresh".into());
             }
         }
@@ -1249,6 +1270,22 @@ impl SessionStore {
         pane: &Value,
         mut checkpoint: Checkpoint,
     ) -> Result<Checkpoint> {
+        let metadata_progress = || {
+            adapter
+                .discovery_budget
+                .as_ref()
+                .map_or(Ok(()), |budget| budget.time_left().map(|_| ()))
+        };
+        let mut metadata = crate::core::native_metadata::Guard::new(
+            self.checkpoint_settings()?.native_metadata_policy(),
+        )?
+        .with_progress(&metadata_progress)
+        .with_deadline(
+            adapter
+                .discovery_budget
+                .as_ref()
+                .map(|budget| budget.deadline),
+        );
         let before = self.verify_pane(adapter, pane)?;
         let actual_reference = terminal_ref(&before)?;
         if checkpoint
@@ -1290,7 +1327,13 @@ impl SessionStore {
         let pi_parent = if harness == "pi" {
             process
                 .as_ref()
-                .map(|evidence| pi_sessions::fork_parent(&evidence.argv, Path::new(&evidence.cwd)))
+                .map(|evidence| {
+                    pi_sessions::fork_parent(
+                        &evidence.argv,
+                        Path::new(&evidence.cwd),
+                        &mut metadata,
+                    )
+                })
                 .transpose()?
                 .flatten()
         } else {
@@ -1320,7 +1363,7 @@ impl SessionStore {
         let after = self.verify_pane(adapter, pane)?;
         check_process(adapter, &process, &harness)?;
         if let Some(parent) = &pi_parent {
-            parent.verify()?;
+            parent.verify(&mut metadata)?;
         }
         if fingerprint != capture_fingerprint(adapter, &after, &harness, &process)? {
             return Err("Handoff foreground process changed during context capture".into());
@@ -1373,8 +1416,10 @@ impl SessionStore {
             target,
             &self.directory.join("checkpoints"),
         )?;
+        let mut metadata =
+            crate::core::native_metadata::Guard::new(config.runtime.native_metadata_policy())?;
         let pi_session = if checkpoint.harness == "pi" && operation != Operation::Handoff {
-            let session = pi_sessions::saved(&self.directory, &checkpoint.sid)?;
+            let session = pi_sessions::saved(&self.directory, &checkpoint.sid, &mut metadata)?;
             if session.cwd != launch.cwd {
                 return Err("Pi checkpoint project differs from saved native session".into());
             }
@@ -1449,8 +1494,10 @@ impl SessionStore {
         if terminals::identity(&prepared.parent)? != prepared.destination {
             return Err("Launch destination changed".into());
         }
+        let mut metadata =
+            crate::core::native_metadata::Guard::new(prepared.settings.native_metadata_policy())?;
         if let Some(session) = &prepared.pi_session {
-            session.verify()?;
+            session.verify(&mut metadata)?;
         }
         if let Some(choice) = &prepared.license {
             choice.verify(&prepared.settings)?;

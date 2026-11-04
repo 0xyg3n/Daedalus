@@ -335,7 +335,13 @@ pub fn preview_live(
     };
     let server_emitter = if harness == Harness::Opencode {
         Some(
-            match local_opencode_server(&process, &terminals.proc_root) {
+            match local_opencode_server_budgeted(
+                &process,
+                &terminals.proc_root,
+                &mut crate::core::native_metadata::Guard::new(
+                    config.runtime.native_metadata_policy(),
+                )?,
+            ) {
                 Ok(server) => server,
                 Err(error) if error == NO_LOCAL_SERVER => reconnect_opencode_server(
                     &request.directory,
@@ -352,6 +358,9 @@ pub fn preview_live(
             super::hermes_sessions::gateway(
                 &std::path::PathBuf::from(&checkpoint.profile),
                 &terminals.proc_root,
+                &mut crate::core::native_metadata::Guard::new(
+                    config.runtime.native_metadata_policy(),
+                )?,
             )?
         }
         #[cfg(not(windows))]
@@ -383,19 +392,46 @@ pub fn preview_live(
 // A shared/remote server cannot be inferred from a terminal label. Guided
 // enrollment supports one native local server directly owned by the selected UI.
 // The review pins both process incarnations and the executable's file identity.
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 fn local_opencode_server(
     ui: &ProcessIdentity,
     proc_root: &Path,
 ) -> Result<hook_runtime::ServerEmitter> {
+    local_opencode_server_budgeted(
+        ui,
+        proc_root,
+        &mut crate::core::native_metadata::Guard::new(
+            crate::core::native_metadata::Policy::default(),
+        )?,
+    )
+}
+#[cfg(unix)]
+fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    guard.check()?;
+    let result = local_opencode_server(ui, proc_root)?;
+    guard.check()?;
+    Ok(result)
+}
+#[cfg(windows)]
+fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    guard.entries(1)?;
     let root = crate::platform::process_identity(ui.pid).map_err(|_| "OpenCode UI disappeared")?;
     let executable = crate::platform::open_regular(&root.executable).map_err(|e| e.to_string())?;
     let identity = crate::platform::file_identity(&executable).map_err(|e| e.to_string())?;
-    let children = crate::platform::descendant_processes(ui.pid)
+    let children = crate::platform::descendant_processes_budgeted(ui.pid, guard)
         .map_err(|error| format!("Cannot verify the OpenCode server process: {error}"))?;
     let mut servers = Vec::new();
     for child in children.into_iter().filter(|p| p.parent_pid == ui.pid) {
+        guard.entries(1)?;
         let current = crate::platform::process_identity(child.pid)
             .map_err(|_| "OpenCode server changed during discovery")?;
         if current.parent_pid != ui.pid || current.creation_time != child.creation_time {
@@ -420,6 +456,7 @@ fn local_opencode_server(
         );
     }
     hook_runtime::verify_process(ui, proc_root).map_err(|e| e.to_string())?;
+    guard.check()?;
     select_local_server(servers)
 }
 
@@ -1273,12 +1310,15 @@ pub(crate) fn lock_profile(directory: &Path) -> Result<InstallationLock> {
         .map_err(|_| "Another hook installation is active")?;
     Ok(InstallationLock(file))
 }
-#[cfg(unix)]
 pub(crate) fn read_profile(path: &Path) -> Result<Option<Vec<u8>>> {
-    layouts::read_private(path)
+    read_profile_limit(path, 8 * 1024 * 1024)
+}
+#[cfg(unix)]
+pub(crate) fn read_profile_limit(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    layouts::read_private_limit(path, limit)
 }
 #[cfg(windows)]
-pub(crate) fn read_profile(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_profile_limit(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
     let file =
         match crate::platform::open_native_profile(path, false, false) {
@@ -1289,12 +1329,11 @@ pub(crate) fn read_profile(path: &Path) -> Result<Option<Vec<u8>>> {
                     .into(),
             ),
         };
-    const LIMIT: u64 = 8 * 1024 * 1024;
     let mut bytes = Vec::new();
-    file.take(LIMIT + 1)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "Cannot read native profile")?;
-    if bytes.len() as u64 > LIMIT {
+    if bytes.len() as u64 > limit {
         return Err("Native profile exceeds size limit".into());
     }
     Ok(Some(bytes))
