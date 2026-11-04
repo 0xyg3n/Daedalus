@@ -48,22 +48,32 @@ fn selected(
     Ok(matches.pop())
 }
 
+fn metadata_configuration(
+    directory: &std::path::Path,
+) -> Result<(
+    BTreeMap<String, String>,
+    crate::core::native_metadata::Policy,
+)> {
+    let config = crate::core::layouts::read_private(&directory.join("control.json"))?
+        .map(|bytes| super::config::ControlConfig::parse(&bytes))
+        .transpose()?;
+    Ok(config
+        .map(|config| (config.profiles, config.runtime.native_metadata_policy()))
+        .unwrap_or_default())
+}
+
 #[cfg(windows)]
 pub fn matches_registration(registration: &super::hook_runtime::Registration) -> Result<bool> {
-    use crate::{adapters::harnesses, core::layouts};
+    use crate::adapters::harnesses;
     let process = registration
         .harness_process
         .as_ref()
         .ok_or("Missing Hermes process binding")?;
     let environment = crate::platform::environment();
-    let config = layouts::read_private(&registration.directory.join("control.json"))?
-        .map(|bytes| super::config::ControlConfig::parse(&bytes))
-        .transpose()?
-        .ok_or("Hermes instance configuration is missing")?;
-    let profiles = &config.profiles;
-    let mut guard = Guard::new(config.runtime.native_metadata_policy())?;
+    let (profiles, policy) = metadata_configuration(&registration.directory)?;
+    let mut guard = Guard::new(policy)?;
     let tool = harnesses::tool("hermes").ok_or("Missing Hermes adapter")?;
-    let root = harnesses::profile_directory(&tool, &environment, profiles)?;
+    let root = harnesses::profile_directory(&tool, &environment, &profiles)?;
     let fingerprint =
         serde_json::json!({"pid":process.pid.to_string(),"start":process.start_ticks.to_string()});
     let Some((id, profile)) = live(&root, &fingerprint, &mut guard)? else {
@@ -253,6 +263,40 @@ mod tests {
         super::gateway_pid(bytes, creation_time, &mut guard())
     }
     use serde_json::json;
+    #[test]
+    fn standalone_registration_retains_defaults_and_saved_policy_is_not_ignored() {
+        let root = std::env::temp_dir().join(format!(
+            "daedalus-hermes-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::core::layouts::write_private(&root.join("marker"), b"").unwrap();
+        assert_eq!(
+            metadata_configuration(&root).unwrap(),
+            (
+                BTreeMap::new(),
+                crate::core::native_metadata::Policy::default()
+            )
+        );
+        let mut config = super::super::config::ControlConfig::fresh(&root).unwrap();
+        config.runtime.native_metadata_entry_limit = 9;
+        config.profiles.insert(
+            "hermes".into(),
+            root.join("native-profile").to_string_lossy().into_owned(),
+        );
+        let path = root.join("control.json");
+        crate::core::layouts::write_private(&path, &serde_json::to_vec(&config).unwrap()).unwrap();
+        let (profiles, policy) = metadata_configuration(&root).unwrap();
+        assert_eq!(profiles, config.profiles);
+        assert_eq!(policy.entries, 9);
+        crate::core::layouts::write_private(&path, b"{} {}").unwrap();
+        let invalid = metadata_configuration(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(invalid.is_err());
+    }
     #[test]
     fn profile_scan_counts_hidden_and_non_directory_entries_before_filtering() {
         let root = std::env::temp_dir().join(format!(
