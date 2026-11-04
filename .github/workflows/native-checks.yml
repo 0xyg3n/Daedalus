@@ -38,6 +38,34 @@ jobs:
             if (-not $compiler) { throw 'Install the Windows SDK resource compiler before building.' }
             $compiler.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           }
+      - name: Pinned Windows installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+          $downloaded = $false
+          foreach ($url in @('https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip', 'https://distfiles.macports.org/nsis/nsis-3.12.zip')) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $archive -TimeoutSec 30
+              $downloaded = $true
+              break
+            } catch {
+              Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+              Write-Warning "Installer compiler download failed from $url"
+            }
+          }
+          if (-not $downloaded) { throw 'NSIS download failed' }
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne '56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f') { throw 'NSIS archive checksum mismatch' }
+          $compilerRoot = Join-Path $env:RUNNER_TEMP 'daedalus-nsis'
+          Expand-Archive -LiteralPath $archive -DestinationPath $compilerRoot
+          $compiler = Join-Path $compilerRoot 'nsis-3.12/Bin/makensis.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'NSIS compiler is missing' }
+          $compilerVersion = & $compiler /VERSION
+          if ($LASTEXITCODE -ne 0 -or $compilerVersion -ne 'v3.12') { throw 'Unexpected NSIS compiler version' }
+          "NSISDIR=$(Join-Path $compilerRoot 'nsis-3.12')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DAEDALUS_NSIS=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Linux checks
         if: runner.os == 'Linux'
         shell: bash
@@ -62,11 +90,8 @@ jobs:
           $version = (Get-Content VERSION -Raw).Trim()
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item src/tui/target/release/daedalus-tui.exe "dist/daedalus-$version-x86_64-windows.exe"
-          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
-          if (-not (Test-Path $nsis)) {
-            choco install nsis --yes --no-progress
-            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
-          }
+          $nsis = $env:DAEDALUS_NSIS
+          if (-not $nsis -or -not (Test-Path -LiteralPath $nsis -PathType Leaf)) { throw 'Verified NSIS compiler is unavailable' }
           $binaryPath = (Resolve-Path -LiteralPath "dist/daedalus-$version-x86_64-windows.exe").ProviderPath
           $iconPath = (Resolve-Path -LiteralPath assets/daedalus.ico).ProviderPath
           $scriptPath = (Resolve-Path -LiteralPath scripts/windows-installer.nsi).ProviderPath
