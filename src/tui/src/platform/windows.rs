@@ -1446,17 +1446,85 @@ mod tests {
         drop(open_private(&path, false, false).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
+    // Keep ancestry assertions away from unrelated parallel fixtures, some of
+    // which deliberately create inaccessible or short-lived processes.
+    fn isolated_descendant_test(name: &str) -> bool {
+        if std::env::var("DAEDALUS_DESCENDANT_TEST").ok().as_deref() == Some(name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env("DAEDALUS_DESCENDANT_TEST", name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+    struct DescendantChild(std::process::Child);
+    impl DescendantChild {
+        fn ready() -> Self {
+            use std::io::BufRead;
+            let mut child = Self(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "platform::windows::tests::descendant_child_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    if line.is_ok_and(|line| line.ends_with("DAEDALUS_DESCENDANT_READY")) {
+                        let _ = sender.send(());
+                        break;
+                    }
+                }
+            });
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("controlled descendant startup");
+            assert!(child.0.try_wait().unwrap().is_none());
+            child
+        }
+    }
+    impl Drop for DescendantChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    #[test]
+    #[ignore = "Controlled child for isolated native ancestry assertions"]
+    fn descendant_child_fixture() {
+        use std::io::{Read, Write};
+        std::io::stdout()
+            .write_all(b"DAEDALUS_DESCENDANT_READY\n")
+            .unwrap();
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+    }
     #[test]
     fn bounded_descendants_include_only_live_owned_children() {
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("ping.exe")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
+        if isolated_descendant_test(
+            "platform::windows::tests::bounded_descendants_include_only_live_owned_children",
+        ) {
+            return;
+        }
+        let mut child = DescendantChild::ready();
+        let pid = child.0.id();
         let mut limited =
             crate::core::native_metadata::Guard::new(crate::core::native_metadata::Policy {
                 processes: 1,
@@ -1473,8 +1541,8 @@ mod tests {
         let snapshot_rejected =
             descendant_processes_budgeted(std::process::id(), &mut snapshot_limited);
         let found = descendant_processes(std::process::id());
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
         assert!(rejected.is_err());
         assert!(snapshot_rejected.is_err());
         let found = found.unwrap();
@@ -1485,13 +1553,8 @@ mod tests {
         assert_eq!(identity.parent_pid, std::process::id());
         assert_eq!(identity.owner, current_identity().unwrap());
         assert_eq!(
-            identity
-                .executable
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_ascii_lowercase(),
-            "ping.exe"
+            file_identity(&open_regular(&identity.executable).unwrap()).unwrap(),
+            file_identity(&open_regular(&std::env::current_exe().unwrap()).unwrap()).unwrap()
         );
         assert!(
             !descendant_processes(std::process::id())
@@ -1502,15 +1565,14 @@ mod tests {
     }
     #[test]
     fn descendant_scan_ignores_a_stale_parent_id_reused_by_a_newer_process() {
+        if isolated_descendant_test(
+            "platform::windows::tests::descendant_scan_ignores_a_stale_parent_id_reused_by_a_newer_process",
+        ) {
+            return;
+        }
         let root = process_identity(std::process::id()).unwrap();
-        let mut child = std::process::Command::new("ping.exe")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
+        let mut child = DescendantChild::ready();
+        let pid = child.0.id();
         let found = descendant_processes_with(root.pid, |candidate, parent| {
             let mut observed = process_identity_with_parent(candidate, parent)?;
             if candidate == pid {
@@ -1518,20 +1580,19 @@ mod tests {
             }
             Ok(observed)
         });
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
         assert!(!found.unwrap().iter().any(|process| process.pid == pid));
     }
     #[test]
     fn descendant_scan_skips_exited_children_and_retains_live_metadata_failures() {
-        let mut child = std::process::Command::new("ping.exe")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
+        if isolated_descendant_test(
+            "platform::windows::tests::descendant_scan_skips_exited_children_and_retains_live_metadata_failures",
+        ) {
+            return;
+        }
+        let mut child = DescendantChild::ready();
+        let pid = child.0.id();
         let gone = descendant_processes_with(std::process::id(), |candidate, parent| {
             if candidate == pid {
                 Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32))
@@ -1546,8 +1607,8 @@ mod tests {
                 process_identity_with_parent(candidate, parent)
             }
         });
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
         assert!(!gone.unwrap().iter().any(|process| process.pid == pid));
         assert_eq!(blocked.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
