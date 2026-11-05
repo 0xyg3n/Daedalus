@@ -1,13 +1,10 @@
-//! Linux Codex hook emitters and their independent Herdr terminal clients.
+//! Codex hook emitters (Linux `/proc`, macOS `libproc`) and their independent Herdr terminal clients.
 //! Only an already registered conversation may refresh its proved binding.
 use super::hook_runtime::{self, Error, ProcessIdentity, Registration, Result, ServerEmitter};
 use crate::{adapters::terminals::Terminals, core::identity::Backend};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
-    fs::{self, OpenOptions},
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
     time::{Duration, Instant},
 };
@@ -37,71 +34,20 @@ impl Process {
             && self.argv.iter().any(|arg| arg == "--managed-daemon")
     }
 }
-fn read(root: &Path, pid: u32, name: &str, limit: u64) -> Result<Vec<u8>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(root.join(pid.to_string()).join(name))
-        .map_err(|_| Error::Identity)?;
-    if !file.metadata().map_err(|_| Error::Identity)?.is_file() {
-        return Err(Error::Identity);
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Error::Identity)?;
-    if bytes.len() as u64 > limit {
-        return Err(Error::Identity);
-    }
-    Ok(bytes)
-}
 fn process(root: &Path, pid: u32) -> Result<Process> {
-    if pid == 0 {
+    let info = crate::platform::process_info(root, pid).ok_or(Error::Identity)?;
+    if matches!(info.state, 'Z' | 'X' | 'T' | 't') {
         return Err(Error::Identity);
     }
-    let bytes = read(root, pid, "stat", 8192)?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
-    let fields: Vec<_> = text
-        .rsplit_once(')')
-        .ok_or(Error::Identity)?
-        .1
-        .split_whitespace()
-        .collect();
-    if fields
-        .first()
-        .is_none_or(|state| matches!(*state, "Z" | "X" | "T" | "t"))
-    {
-        return Err(Error::Identity);
-    }
-    let number = |index: usize| {
-        fields
-            .get(index)
-            .ok_or(Error::Identity)?
-            .parse::<u64>()
-            .map_err(|_| Error::Identity)
-    };
-    let start_ticks = number(19)?;
-    if start_ticks == 0 {
-        return Err(Error::Identity);
-    }
-    let parent = u32::try_from(number(1)?).map_err(|_| Error::Identity)?;
-    let tty = fields
-        .get(4)
-        .ok_or(Error::Identity)?
-        .parse()
-        .map_err(|_| Error::Identity)?;
-    let argv = read(root, pid, "cmdline", 64 * 1024)?
-        .split(|byte| *byte == 0)
-        .filter(|arg| !arg.is_empty())
-        .map(|arg| String::from_utf8(arg.to_vec()).map_err(|_| Error::Identity))
-        .collect::<Result<Vec<_>>>()?;
+    let argv = crate::platform::process_argv(root, pid).ok_or(Error::Identity)?;
     Ok(Process {
-        identity: ProcessIdentity { pid, start_ticks },
-        parent,
-        tty,
-        uid: fs::metadata(root.join(pid.to_string()))
-            .map_err(|_| Error::Identity)?
-            .uid(),
+        identity: ProcessIdentity {
+            pid,
+            start_ticks: info.start,
+        },
+        parent: info.parent,
+        tty: info.tty,
+        uid: info.uid,
         argv,
     })
 }
@@ -129,8 +75,8 @@ fn pin(root: &Path, emitter: &Process) -> Result<ServerEmitter> {
     if !emitter.owned() || !emitter.codex() || !emitter.managed() {
         return Err(Error::Identity);
     }
-    let executable = fs::read_link(root.join(emitter.identity.pid.to_string()).join("exe"))
-        .map_err(|_| Error::Identity)?;
+    let executable =
+        crate::platform::process_executable(root, emitter.identity.pid).ok_or(Error::Identity)?;
     if executable.file_name().is_none_or(|name| name != "codex") {
         return Err(Error::Identity);
     }
@@ -284,6 +230,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::{
+        fs,
         os::unix::fs::{PermissionsExt, symlink},
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
@@ -346,7 +293,7 @@ mod tests {
             );
             f.write_process(300, 1, 70, &["bash"]);
             let executable = f.root.join("codex");
-            fs::copy("/bin/true", &executable).unwrap();
+            fs::write(&executable, crate::test_support::native_image(b"")).unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
             symlink(executable, f.terminals.proc_root.join("500/exe")).unwrap();
             f.pane(json!({"pane_id":"pane","terminal_id":"new","agent_session":{"kind":"id","value":"019a043e-1234-7000-8000-000000000001"}}));

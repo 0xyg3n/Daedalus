@@ -4,13 +4,14 @@ use super::telegram_config::{self, ServiceConfig};
 use crate::core::layouts;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use serde_json::json;
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::{fs, io::Read};
 #[cfg(unix)]
 use std::{
-    fs::{self, OpenOptions},
-    io::Read,
+    fs::OpenOptions,
     os::unix::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawFd,
@@ -54,7 +55,7 @@ pub struct Observation {
     pub state: &'static str,
     pub process: Option<Record>,
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -78,7 +79,17 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-#[cfg(unix)]
+/// Start time and liveness from libproc; `start_ticks` holds microseconds.
+#[cfg(target_os = "macos")]
+fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
+    let info = crate::platform::process_info(proc_root, pid)
+        .ok_or("Service process evidence unavailable")?;
+    if info.uid != unsafe { libc::geteuid() } {
+        return Err("Service process is owned by another user".into());
+    }
+    Ok((info.start, !matches!(info.state, 'Z' | 'X')))
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     if pid == 0 {
         return Err("Invalid service process".into());
@@ -99,7 +110,44 @@ fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     let alive = fields.first().is_some_and(|s| !matches!(*s, "Z" | "X"));
     Ok((ticks, alive))
 }
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn boot(proc_root: &Path) -> Result<String> {
+    let value = crate::platform::boot_id(proc_root).ok_or("Cannot read system boot identity")?;
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("Invalid system boot identity".into());
+    }
+    Ok(value)
+}
+/// The image this process runs, as the kernel reports it, so the recorded and
+/// verified executable come from the same source.
+#[cfg(target_os = "macos")]
+fn executable(proc_root: &Path, pid: u32) -> Result<PathBuf> {
+    crate::platform::process_executable(proc_root, pid)
+        .ok_or_else(|| "Cannot verify service executable".into())
+}
+#[cfg(target_os = "macos")]
+fn arguments(proc_root: &Path, pid: u32) -> Result<Vec<Vec<u8>>> {
+    Ok(crate::platform::process_argv(proc_root, pid)
+        .ok_or("Service process evidence unavailable")?
+        .into_iter()
+        .map(String::into_bytes)
+        .collect())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn executable(proc_root: &Path, pid: u32) -> Result<PathBuf> {
+    fs::read_link(proc_root.join(pid.to_string()).join("exe"))
+        .map_err(|_| "Cannot verify service executable".into())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn arguments(proc_root: &Path, pid: u32) -> Result<Vec<Vec<u8>>> {
+    let bytes = read_bounded(&proc_root.join(pid.to_string()).join("cmdline"))?;
+    Ok(bytes
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn boot(proc_root: &Path) -> Result<String> {
     // boot_id is kernel-owned rather than process-owned.
     let value = fs::read_to_string(proc_root.join("sys/kernel/random/boot_id"))
@@ -119,16 +167,10 @@ fn verify(record: &Record, proc_root: &Path) -> Result<()> {
     if ticks != record.start_ticks || !alive {
         return Err("Service process is no longer live".into());
     }
-    let actual = fs::read_link(proc_root.join(record.pid.to_string()).join("exe"))
-        .map_err(|_| "Cannot verify service executable")?;
-    if actual != record.executable {
+    if executable(proc_root, record.pid)? != record.executable {
         return Err("Service executable changed".into());
     }
-    let bytes = read_bounded(&proc_root.join(record.pid.to_string()).join("cmdline"))?;
-    let args = bytes
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
+    let args = arguments(proc_root, record.pid)?;
     use std::os::unix::ffi::OsStrExt;
     if args.len() != 5
         || args[1] != b"telegram"
@@ -212,12 +254,12 @@ pub(crate) fn inspect_at(directory: &Path, proc_root: &Path) -> Result<Observati
 /// Called by the service itself only while its Owner guards remain held.
 #[cfg(unix)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (directory, config, phase);
-        Err("Telegram service supervision is available on Linux only".into())
+        Err("Telegram service supervision is not available on this platform".into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let pid = std::process::id();
         let proc_root = Path::new("/proc");
@@ -230,7 +272,8 @@ pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<
             pid,
             start_ticks,
             boot_id: boot(proc_root)?,
-            executable: std::env::current_exe().map_err(|_| "Cannot inspect service executable")?,
+            executable: executable(proc_root, pid)
+                .map_err(|_| "Cannot inspect service executable")?,
             directory: directory.into(),
             instance: config.instance.clone(),
             bot_id: config.bot_id,
@@ -244,10 +287,27 @@ pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<
 }
 #[cfg(unix)]
 pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (directory, expected);
-        Err("Telegram service supervision is available on Linux only".into())
+        Err("Telegram service supervision is not available on this platform".into())
+    }
+    // macOS has no pidfd, and kill(pid) could reach a recycled PID. The service
+    // instead consumes a private request naming its exact incarnation.
+    #[cfg(target_os = "macos")]
+    {
+        if expected.directory != directory || inspect(directory)?.process.as_ref() != Some(expected)
+        {
+            return Err("Service changed; review the stop request again".into());
+        }
+        verify(expected, Path::new("/proc"))?;
+        if !held(directory)? {
+            return Err("Service already released ownership".into());
+        }
+        write_stop_request(directory, expected)?;
+        Ok(
+            json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Running state remains observed until the service exits."}),
+        )
     }
     #[cfg(target_os = "linux")]
     {
@@ -289,12 +349,12 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
 }
 #[cfg(unix)]
 pub fn start(directory: &Path) -> Result<Value> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = directory;
-        Err("Telegram service supervision is available on Linux only".into())
+        Err("Telegram service supervision is not available on this platform".into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::process::CommandExt;
         let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
@@ -434,7 +494,7 @@ pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<
         &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
     )
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StopRequest {
@@ -457,7 +517,7 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
         json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Ownership remains observed until shutdown finishes."}),
     )
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn write_stop_request(directory: &Path, expected: &Record) -> Result<()> {
     let request = StopRequest {
         pid: expected.pid,
@@ -654,9 +714,31 @@ fn confirm_same_process(record: &Record) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn stop_requested(_: &Path) -> Result<bool> {
     Ok(false)
+}
+/// Only a request naming this exact process incarnation and instance stops it.
+#[cfg(target_os = "macos")]
+pub fn stop_requested(directory: &Path) -> Result<bool> {
+    let path = directory.join("telegram-stop.json");
+    let Some(bytes) = telegram_config::read_private(&path, 8192)? else {
+        return Ok(false);
+    };
+    let request: StopRequest =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private stop request")?;
+    let pid = std::process::id();
+    let (start, _) = incarnation(Path::new("/proc"), pid)?;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    let matches = request.pid == pid
+        && request.start_ticks == start
+        && request.directory == directory
+        && request.instance == config.instance;
+    // Stale requests remain inert evidence. A subsequent reviewed stop replaces them.
+    if matches {
+        std::fs::remove_file(path).map_err(|_| "Cannot consume stop request")?;
+    }
+    Ok(matches)
 }
 #[cfg(windows)]
 pub fn stop_requested(directory: &Path) -> Result<bool> {
@@ -900,16 +982,19 @@ mod windows_tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::{fs, os::unix::fs::symlink};
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            // macOS clocks tick in microseconds; parallel tests need a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "daedalus-supervisor-{}-{}",
+                "daedalus-supervisor-{}-{}-{}",
                 std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -939,6 +1024,65 @@ mod tests {
         assert_eq!(inspect(&fixture.0).unwrap().state, "starting");
         drop(owner);
         assert_eq!(inspect(&fixture.0).unwrap().state, "stopped");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cooperative_stop_request_names_one_exact_incarnation() {
+        let fixture = Fixture::new();
+        let directory = &fixture.0;
+        let config = ServiceConfig {
+            runtime: Default::default(),
+            version: 1,
+            instance: "fixture".into(),
+            bot_id: 123,
+            token_file: directory.join("token"),
+            grants: vec![],
+            listen_chats: Default::default(),
+            registrations: vec![],
+            hook_bindings: vec![],
+        };
+        layouts::write_private(
+            &directory.join("telegram-service.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let pid = std::process::id();
+        let (start, alive) = incarnation(Path::new("/proc"), pid).unwrap();
+        assert!(alive);
+        let mut record = Record {
+            version: 1,
+            pid,
+            start_ticks: start + 1,
+            boot_id: boot(Path::new("/proc")).unwrap(),
+            executable: executable(Path::new("/proc"), pid).unwrap(),
+            directory: directory.clone(),
+            instance: "fixture".into(),
+            bot_id: 123,
+            phase: Phase::Running,
+        };
+        // Without a live owner nothing is stopped and no request is written.
+        assert!(stop(directory, &record).is_err());
+        assert!(!directory.join("telegram-stop.json").exists());
+        // A request for another incarnation is inert and kept as evidence.
+        write_stop_request(directory, &record).unwrap();
+        assert!(!stop_requested(directory).unwrap());
+        assert!(directory.join("telegram-stop.json").exists());
+        record.start_ticks = start;
+        write_stop_request(directory, &record).unwrap();
+        assert!(stop_requested(directory).unwrap());
+        assert!(!stop_requested(directory).unwrap());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recorded_executable_matches_the_verified_image() {
+        let pid = std::process::id();
+        let image = executable(Path::new("/proc"), pid).unwrap();
+        assert!(image.is_absolute());
+        assert_eq!(
+            fs::canonicalize(&image).unwrap(),
+            fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+        assert!(!arguments(Path::new("/proc"), pid).unwrap().is_empty());
     }
     #[test]
     fn process_evidence_rejects_reused_pid_and_wrong_command() {

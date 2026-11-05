@@ -1550,7 +1550,7 @@ mod tests {
         let f = Fixture::new();
         let proc = &f.terminals.proc_root;
         let executable = f.dir.join("opencode");
-        fs::write(&executable, b"\x7fELFfixture").unwrap();
+        fs::write(&executable, crate::test_support::native_image(b"fixture")).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(proc.join("42/task/42")).unwrap();
         fs::write(proc.join("42/task/42/children"), b"43").unwrap();
@@ -2175,7 +2175,11 @@ handlers.session_start({{}},{{sessionManager:{{getSessionId:()=> 'other'}}}});
         ];
         registration.transcript = None;
         let server_file = f.dir.join("opencode-server");
-        fs::write(&server_file, b"\x7fELF fixture only").unwrap();
+        fs::write(
+            &server_file,
+            crate::test_support::native_image(b" fixture only"),
+        )
+        .unwrap();
         fs::set_permissions(&server_file, fs::Permissions::from_mode(0o700)).unwrap();
         let server_dir = f.terminals.proc_root.join("333");
         fs::create_dir(&server_dir).unwrap();
@@ -2368,7 +2372,7 @@ if(disposed!==3)throw new Error('hook cleanup missing');
             "UI ancestry is not server authorization"
         );
         let other = f.dir.join("other-server");
-        fs::write(&other, b"\x7fELF other").unwrap();
+        fs::write(&other, crate::test_support::native_image(b" other")).unwrap();
         fs::remove_file(server_dir.join("exe")).unwrap();
         std::os::unix::fs::symlink(other, server_dir.join("exe")).unwrap();
         assert!(hook_runtime::verify_live_session(&registration, &f.terminals).is_err());
@@ -2392,7 +2396,11 @@ if(disposed!==3)throw new Error('hook cleanup missing');
                 .join(format!("{}.jsonl", registration.scope.conversation)),
         );
         let native = f.dir.join("native-provider");
-        fs::write(&native, b"\x7fELF isolated fixture, never executed").unwrap();
+        fs::write(
+            &native,
+            crate::test_support::native_image(b" isolated fixture, never executed"),
+        )
+        .unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
         let pid = std::process::id();
         let process_dir = f.terminals.proc_root.join(pid.to_string());
@@ -2766,7 +2774,11 @@ esac
         fs::write(&process, "malformed").unwrap();
         assert!(launch::activate(&path, &f.terminals, 1001).is_err());
         assert!(!path.with_extension("claimed").exists());
-        fs::write(&plan.spec.native_binary, b"\x7fELF changed native binary").unwrap();
+        fs::write(
+            &plan.spec.native_binary,
+            crate::test_support::native_image(b" changed native binary"),
+        )
+        .unwrap();
         assert!(launch::activate(&path, &f.terminals, 1001).is_err());
         assert!(!plan.spec.registration.path().exists());
         assert!(!plan.plugin().exists());

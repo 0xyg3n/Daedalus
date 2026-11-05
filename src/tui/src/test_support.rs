@@ -36,3 +36,15 @@ pub(crate) fn path(input: &'static str) -> &'static str {
         Box::leak(native.to_string_lossy().into_owned().into_boxed_str())
     }
 }
+
+/// Fixture bytes that pass the host's native-executable header check. They are
+/// never executed. The interface binary shares this module but not the fixtures.
+#[allow(dead_code)]
+pub(crate) fn native_image(rest: &[u8]) -> Vec<u8> {
+    let header: &[u8] = if cfg!(target_os = "macos") {
+        &[0xcf, 0xfa, 0xed, 0xfe]
+    } else {
+        b"\x7fELF"
+    };
+    [header, rest].concat()
+}

@@ -560,8 +560,10 @@ never inferred from a pane name. Installing a plugin and observing its first
 accepted event are separate steps. Load the plugin in the owning OpenCode server
 before testing delivery; reconnecting a UI alone does not load server plugins.
 
-On Linux, an existing Codex session with no recorded hook observations can establish
-initial readiness from the native rollout still held open by its registered process.
+On Linux and macOS, an existing Codex session with no recorded hook observations can
+establish initial readiness from the native rollout still held open by its registered
+process (macOS reads the descriptor table through `libproc`; it has fixture and
+current-process tests but no live Codex verification yet).
 The session ID must match and its latest relevant record must be a completed turn.
 New prompts, incomplete writes, ambiguous rollouts or a replaced process block input.
 This evidence is rechecked before reserving the queued message; normal hooks track

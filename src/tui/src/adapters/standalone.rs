@@ -316,12 +316,7 @@ pub(crate) fn collect_with(
         let Some(info) = process_info(proc_root, number).filter(|i| i.uid == uid) else {
             continue;
         };
-        // `e_tdev` is NODEV (all ones) when the process has no controlling terminal.
-        let tty = if info.tty == i64::from(u32::MAX) {
-            0
-        } else {
-            info.tty
-        };
+        let tty = info.tty;
         let name = info
             .executable
             .as_ref()
@@ -436,7 +431,7 @@ pub(crate) fn collect_with(
     _settings: &crate::app::runtime_settings::Settings,
     _budget: &crate::app::discovery_budget::Budget,
 ) -> Result<Vec<Value>, String> {
-    Err("External terminal process discovery is available on Linux and Windows".into())
+    Err("External terminal process discovery is available on Linux, macOS and Windows".into())
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -5,7 +5,7 @@ pub mod armonia_status;
 pub mod backend;
 pub mod cli;
 pub(crate) mod codex_fork;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod codex_hook_binding;
 pub mod codex_state;
 pub mod config;

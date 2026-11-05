@@ -161,8 +161,8 @@ fn executable(path: &Path, native: bool) -> Result<Executable> {
         let mut magic = [0; 4];
         file.read_exact(&mut magic)
             .map_err(|_| "Cannot read native executable")?;
-        if &magic != b"\x7fELF" {
-            return Err("First-launch registration requires a native ELF provider binary".into());
+        if !crate::platform::native_image(&magic) {
+            return Err("First-launch registration requires a native provider binary".into());
         }
     }
     Ok(Executable {

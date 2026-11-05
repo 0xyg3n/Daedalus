@@ -104,6 +104,85 @@ fn platform_list(_: &Path) -> Vec<u32> {
     Vec::new()
 }
 
+/// Full argument vector. Linux reads `/proc/PID/cmdline` (bounded); macOS
+/// uses `KERN_PROCARGS2`, which the kernel only returns for this user's
+/// processes. Arguments must be UTF-8.
+pub fn process_argv(root: &Path, pid: u32) -> Option<Vec<String>> {
+    if pid == 0 {
+        return None;
+    }
+    platform_argv(root, pid)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_argv(root: &Path, pid: u32) -> Option<Vec<String>> {
+    if synthetic(root, pid) {
+        linux_argv(root, pid)
+    } else {
+        macos_argv(pid)
+    }
+}
+#[cfg(target_os = "linux")]
+fn platform_argv(root: &Path, pid: u32) -> Option<Vec<String>> {
+    linux_argv(root, pid)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_argv(_: &Path, _: u32) -> Option<Vec<String>> {
+    None
+}
+
+/// A file a process holds open, identified by the kernel's device and inode.
+/// `path` is the kernel's last known name, display and matching evidence only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenFile {
+    pub device: u64,
+    pub inode: u64,
+    pub path: Option<PathBuf>,
+}
+
+/// Regular and other vnode-backed files a process holds open, at most `limit`.
+/// `None` when the descriptor table cannot be read or exceeds `limit`, so a
+/// caller never mistakes a truncated table for absence.
+pub fn open_files(root: &Path, pid: u32, limit: usize) -> Option<Vec<OpenFile>> {
+    if pid == 0 {
+        return None;
+    }
+    platform_open_files(root, pid, limit)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_files(root: &Path, pid: u32, limit: usize) -> Option<Vec<OpenFile>> {
+    if synthetic(root, pid) {
+        linux_open_files(root, pid, limit)
+    } else {
+        macos_open_files(pid, limit)
+    }
+}
+#[cfg(target_os = "linux")]
+fn platform_open_files(root: &Path, pid: u32, limit: usize) -> Option<Vec<OpenFile>> {
+    linux_open_files(root, pid, limit)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_open_files(_: &Path, _: u32, _: usize) -> Option<Vec<OpenFile>> {
+    None
+}
+
+/// A native executable header for this host: ELF on Linux; thin or universal
+/// Mach-O on macOS. Scripts and foreign images are not native harness binaries.
+pub fn native_image(magic: &[u8; 4]) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(
+            magic,
+            [0xcf, 0xfa, 0xed, 0xfe] | [0xce, 0xfa, 0xed, 0xfe] | [0xca, 0xfe, 0xba, 0xbe]
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        magic == b"\x7fELF"
+    }
+}
+
 /// Host boot identity. Linux uses the kernel boot UUID; macOS uses
 /// `kern.bootsessionuuid`, falling back to `kern.boottime`.
 pub fn boot_id(root: &Path) -> Option<String> {
@@ -204,6 +283,56 @@ fn linux_boot_id(root: &Path) -> Option<String> {
     (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_owned())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn linux_argv(root: &Path, pid: u32) -> Option<Vec<String>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(root.join(pid.to_string()).join("cmdline"))
+        .ok()?
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 64 * 1024 {
+        return None;
+    }
+    // An empty vector is a readable, empty command line (kernel threads).
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8(arg.to_vec()).ok())
+        .collect()
+}
+
+// Following /proc/PID/fd/N is intentional: the kernel holds that inode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn linux_open_files(root: &Path, pid: u32, limit: usize) -> Option<Vec<OpenFile>> {
+    use std::os::unix::fs::MetadataExt;
+    let entries = std::fs::read_dir(root.join(pid.to_string()).join("fd")).ok()?;
+    let mut files = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= limit {
+            return None;
+        }
+        let entry = entry.ok()?;
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        files.push(OpenFile {
+            device: meta.dev(),
+            inode: meta.ino(),
+            path: std::fs::read_link(entry.path()).ok(),
+        });
+    }
+    Some(files)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_info(pid: u32) -> Option<ProcessInfo> {
     let info = macos_bsd(pid)?;
@@ -222,7 +351,12 @@ fn macos_info(pid: u32) -> Option<ProcessInfo> {
         gid: info.pbi_gid,
         pgid: info.pbi_pgid,
         foreground: i64::from(info.e_tpgid),
-        tty: i64::from(info.e_tdev),
+        // NODEV (all ones) means no controlling terminal; Linux reports 0.
+        tty: if info.e_tdev == u32::MAX {
+            0
+        } else {
+            i64::from(info.e_tdev)
+        },
         state: match info.pbi_status {
             1 | 3 => 'S',
             2 => 'R',
@@ -408,6 +542,97 @@ fn macos_list() -> Vec<u32> {
     Vec::new()
 }
 
+// <sys/proc_info.h>: libc does not export these.
+#[cfg(target_os = "macos")]
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcFileInfo {
+    fi_openflags: u32,
+    fi_status: u32,
+    fi_offset: i64,
+    fi_type: i32,
+    fi_guardflags: u32,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct VnodeFdInfoWithPath {
+    pfi: ProcFileInfo,
+    pvip: libc::vnode_info_path,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_open_files(pid: u32, limit: usize) -> Option<Vec<OpenFile>> {
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    let capacity = limit.checked_add(1)?;
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        capacity
+    ];
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            (capacity * entry) as libc::c_int,
+        )
+    };
+    if bytes <= 0 {
+        return None;
+    }
+    let count = bytes as usize / entry;
+    // A full buffer may be a truncated table.
+    if count > limit {
+        return None;
+    }
+    fds.truncate(count);
+    let mut files = Vec::new();
+    for fd in fds {
+        if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+            continue;
+        }
+        let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidfdinfo(
+                pid as libc::c_int,
+                fd.proc_fd,
+                PROC_PIDFDVNODEPATHINFO,
+                (&mut info as *mut VnodeFdInfoWithPath).cast(),
+                size,
+            )
+        };
+        // The descriptor may have closed since the listing.
+        if read != size {
+            continue;
+        }
+        let stat = &info.pvip.vip_vi.vi_stat;
+        let name: Vec<u8> = info
+            .pvip
+            .vip_path
+            .iter()
+            .flatten()
+            .map(|c| *c as u8)
+            .take_while(|b| *b != 0)
+            .collect();
+        let path = String::from_utf8(name)
+            .ok()
+            .filter(|p| p.starts_with('/') && !p.chars().any(char::is_control))
+            .map(PathBuf::from);
+        files.push(OpenFile {
+            // std reports st_dev (a signed dev_t) sign-extended to u64.
+            device: stat.vst_dev as i32 as i64 as u64,
+            inode: stat.vst_ino,
+            path,
+        });
+    }
+    Some(files)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_boot_id() -> Option<String> {
     sysctl_string("kern.bootsessionuuid").or_else(|| {
@@ -502,6 +727,64 @@ mod tests {
         );
         assert!(process_name(pid).is_some_and(|name| !name.is_empty()));
         assert!(process_cwd(0).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fd_path_info_layout_matches_the_kernel() {
+        // sizeof(struct vnode_fdinfowithpath) in <sys/proc_info.h>.
+        assert_eq!(std::mem::size_of::<VnodeFdInfoWithPath>(), 1200);
+    }
+
+    #[test]
+    fn open_files_report_a_held_file_by_device_and_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("dd-open-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("held.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        let meta = file.metadata().unwrap();
+        let root = Path::new("/proc");
+        let files = open_files(root, std::process::id(), 4096).unwrap();
+        let held = files
+            .iter()
+            .find(|f| f.device == meta.dev() && f.inode == meta.ino())
+            .expect("held file");
+        assert_eq!(
+            held.path.as_ref().map(|p| p.canonicalize().unwrap()),
+            Some(path.canonicalize().unwrap())
+        );
+        // A table larger than the limit is unknown, never a partial answer.
+        assert!(open_files(root, std::process::id(), 1).is_none());
+        assert!(open_files(root, 0, 4096).is_none());
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn argv_is_complete_for_the_current_process() {
+        let argv = process_argv(Path::new("/proc"), std::process::id()).unwrap();
+        let expected: Vec<String> = std::env::args().collect();
+        assert_eq!(argv, expected);
+    }
+
+    #[test]
+    fn host_executables_are_native_images_and_scripts_are_not() {
+        use std::io::Read;
+        let mut magic = [0; 4];
+        std::fs::File::open(std::env::current_exe().unwrap())
+            .unwrap()
+            .read_exact(&mut magic)
+            .unwrap();
+        assert!(native_image(&magic));
+        assert!(!native_image(b"#!/b"));
+        let foreign: &[u8; 4] = if cfg!(target_os = "macos") {
+            b"\x7fELF"
+        } else {
+            &[0xcf, 0xfa, 0xed, 0xfe]
+        };
+        assert!(!native_image(foreign));
     }
 
     #[test]

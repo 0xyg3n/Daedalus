@@ -693,7 +693,7 @@ mod metadata_inspection_tests {
 }
 /// A proved Codex binding may refresh process incarnations and the generation
 /// of its already registered pane. It never retargets routes or copies grants.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn persist_codex_binding(
     expected: &Registration,
     next: &Registration,
@@ -881,7 +881,7 @@ fn process_metadata_error(guard: &crate::core::native_metadata::Guard<'_>) -> Er
 }
 #[cfg(unix)]
 impl Verifier for NativeVerifier {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prepare_codex(&mut self, registration: &Registration) -> Result<Option<Registration>> {
         super::codex_hook_binding::prepare(
             registration,
@@ -2706,7 +2706,7 @@ mod tests {
         invoke(&f.0, "Stop", "one", &mut FakeClock(1)).unwrap();
         assert_eq!(readiness(&p, 1, 1000).unwrap(), Readiness::Busy);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn codex_bootstrap_requires_open_completed_rollout_and_rechecks_before_reserving() {
         use std::os::unix::fs::symlink;
@@ -4705,10 +4705,15 @@ fn verify_server_image(server: &ServerEmitter, proc_root: &Path) -> Result<PathB
         .map_err(|_| Error::Identity)?;
     let meta = executable.metadata().map_err(|_| Error::Identity)?;
     let process_dir = proc_root.join(server.process.pid.to_string());
-    if fs::metadata(&process_dir)
+    #[cfg(not(target_os = "macos"))]
+    let owner = fs::metadata(&process_dir)
         .map_err(|_| Error::Identity)?
-        .uid()
-        != unsafe { libc::geteuid() }
+        .uid();
+    #[cfg(target_os = "macos")]
+    let owner = crate::platform::process_info(proc_root, server.process.pid)
+        .ok_or(Error::Identity)?
+        .uid;
+    if owner != unsafe { libc::geteuid() }
         || !meta.is_file()
         || meta.mode() & 0o022 != 0
         || meta.mode() & 0o111 == 0
@@ -4722,18 +4727,42 @@ fn verify_server_image(server: &ServerEmitter, proc_root: &Path) -> Result<PathB
     executable
         .read_exact(&mut magic)
         .map_err(|_| Error::Identity)?;
-    if &magic != b"\x7fELF" {
+    if !crate::platform::native_image(&magic) {
         return Err(Error::Invalid(
             "Hook server requires a pinned native executable",
         ));
     }
+    // Linux follows the kernel-held image; macOS asks libproc for the image's
+    // current path, so a replaced or renamed file fails the identity check.
+    #[cfg(not(target_os = "macos"))]
     let live = fs::metadata(process_dir.join("exe")).map_err(|_| Error::Identity)?;
+    #[cfg(target_os = "macos")]
+    let live = fs::metadata(
+        crate::platform::process_executable(proc_root, server.process.pid)
+            .ok_or(Error::Identity)?,
+    )
+    .map_err(|_| Error::Identity)?;
     if live.dev() != server.device || live.ino() != server.inode {
         return Err(Error::Identity);
     }
     Ok(process_dir)
 }
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    verify_server_image(server, proc_root)?;
+    verify_server_incarnation(server, proc_root)
+}
+/// The pinned server process is still the reviewed, live incarnation.
+#[cfg(target_os = "macos")]
+fn verify_server_incarnation(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    let info =
+        crate::platform::process_info(proc_root, server.process.pid).ok_or(Error::Identity)?;
+    if matches!(info.state, 'Z' | 'X' | 'T' | 't') || info.start != server.process.start_ticks {
+        return Err(Error::Identity);
+    }
+    Ok(())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
     let process_dir = verify_server_image(server, proc_root)?;
     let file = OpenOptions::new()
@@ -4750,7 +4779,7 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     }
     verify_server_stat(server, &bytes)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn verify_server_stat(server: &ServerEmitter, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
@@ -4776,8 +4805,16 @@ pub(crate) fn verify_server_metadata(
 ) -> std::result::Result<(), String> {
     guard.processes(1)?;
     let directory = verify_server_image(server, proc_root).map_err(|e| e.to_string())?;
-    let bytes = guard.process_file(&directory.join("stat"))?;
-    verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let bytes = guard.process_file(&directory.join("stat"))?;
+        verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = directory;
+        verify_server_incarnation(server, proc_root).map_err(|e| e.to_string())?;
+    }
     guard.check()
 }
 #[cfg(unix)]

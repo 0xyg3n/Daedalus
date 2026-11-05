@@ -99,17 +99,27 @@ macOS uses POSIX PTYs and the native Daedalus terminals backend. Homebrew instal
 system tools, npm installs Node harnesses into `~/.local`, and `npx` bootstraps npm
 when only the runner is present. The TUI, CLI, configuration, routes, native PTYs,
 agent identity, fresh instance import, tmux/Herdr process identity, and hook
-invocation/ancestry work through the macOS process backend.
+invocation/ancestry work through the macOS process backend (`libproc`/`sysctl`).
 
-The following remain Linux-only and fail explicitly on macOS:
+The same backend provides:
 
-- Codex profile-wide hook binding and native open-file readiness.
-- Grok native open-file readiness.
+- Read-only discovery of external terminals owned by the current user.
+- Native terminal foreground command and working directory.
+- Codex profile-wide hook binding and Codex/Grok open-file readiness, using the
+  descriptor table from `libproc` in place of `/proc/PID/fd`. These are covered
+  by fixture and current-process tests; live Codex and Grok sessions on macOS
+  have not been verified yet.
+- Telegram service start, status and stop. macOS has no `pidfd`, so stop never
+  signals a PID: it writes a private request naming the service's exact process
+  incarnation, which only that process consumes before shutting down. Like any
+  stop, it is submitted, not complete, until ownership is released.
+
+The following remain unavailable or incomplete on macOS:
+
 - OpenCode guided local-server enrollment.
-- Telegram service supervision, including safe process stop without `pidfd`.
 - Legacy cutover process checks.
-- Automatic external process discovery.
-- macOS update assets; `daedalus update check` has no macOS asset yet.
+- Native-terminal Telegram feeder end-to-end verification.
+- macOS update assets; `daedalus update check` reports that none are published.
 - `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
 
 ## Native Windows boundaries
@@ -130,7 +140,8 @@ Terminal controls and harness hooks have separate feature support:
 | Native session resume/fork | Available where the installed harness exposes the required session operation |
 
 Linux, Windows and macOS have automated tests and native terminal checks.
-macOS-specific tests are gated from Linux-only process supervision. See
+Tests that read Linux `/proc` fixtures directly stay Linux-only; macOS tests use the
+same fixtures through the process backend or the live current process. See
 [installation](INSTALL.md#macos-install) for macOS setup,
 [Windows setup](INSTALL.md#native-windows-install) and
 [testing](ARCHITECTURE.md#testing) for the contributor workflow.
