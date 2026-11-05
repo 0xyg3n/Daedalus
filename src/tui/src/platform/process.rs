@@ -209,19 +209,25 @@ fn platform_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
 fn platform_children(_: &Path, _: u32, _: usize) -> Option<Vec<u32>> {
     None
 }
+// `/proc/PID/task/TID/children` lists the children of one thread, so every
+// thread of the process is read.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn linux_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
-    let path = root
-        .join(pid.to_string())
-        .join("task")
-        .join(pid.to_string())
-        .join("children");
-    let text = std::fs::read_to_string(path).ok()?;
-    let pids = text
-        .split_whitespace()
-        .map(|word| word.parse::<u32>().ok().filter(|p| *p > 0))
-        .collect::<Option<Vec<_>>>()?;
-    (pids.len() <= limit).then_some(pids)
+    let tasks = std::fs::read_dir(root.join(pid.to_string()).join("task")).ok()?;
+    let mut pids = Vec::new();
+    for task in tasks {
+        let text = std::fs::read_to_string(task.ok()?.path().join("children")).ok()?;
+        for word in text.split_whitespace() {
+            let child = word.parse::<u32>().ok().filter(|p| *p > 0)?;
+            if !pids.contains(&child) {
+                pids.push(child);
+            }
+            if pids.len() > limit {
+                return None;
+            }
+        }
+    }
+    Some(pids)
 }
 
 /// A file a process holds open, identified by the kernel's device and inode.
@@ -917,6 +923,25 @@ mod tests {
         );
         assert!(!environment.iter().any(|v| v.starts_with(&key)));
         assert!(process_environment(Path::new("/proc"), 0).is_none());
+    }
+
+    #[test]
+    fn procfs_children_cover_every_thread() {
+        let root = std::env::temp_dir().join(format!(
+            "dd-children-{}-{}",
+            std::process::id(),
+            crate::test_support::unique_nanos()
+        ));
+        for (task, children) in [("42", "43"), ("50", "44 43")] {
+            let directory = root.join("42/task").join(task);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("children"), children).unwrap();
+        }
+        let mut children = child_pids(&root, 42, 8).unwrap();
+        children.sort();
+        assert_eq!(children, [43, 44]);
+        assert!(child_pids(&root, 42, 1).is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

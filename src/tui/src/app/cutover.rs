@@ -1423,27 +1423,22 @@ mod macos_tests {
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&other).unwrap();
         // macOS hides the environment of Apple platform binaries, so the scoped
-        // cases use an ad-hoc signed copy; /bin/sleep shows the hidden case.
-        let image = root.join("sleep-copy");
-        fs::copy("/bin/sleep", &image).unwrap();
-        for args in [&["--remove-signature"][..], &["-s", "-"][..]] {
-            assert!(
-                std::process::Command::new("/usr/bin/codesign")
-                    .args(args)
-                    .arg(&image)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        // cases run this test binary as the helper; /bin/sleep shows the hidden case.
+        let image = std::env::current_exe().unwrap();
         let program = root.join("tg_feeder");
         std::os::unix::fs::symlink(&image, &program).unwrap();
         let platform = root.join("platform").join("tg_feeder");
         fs::create_dir_all(platform.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink("/bin/sleep", &platform).unwrap();
         let run = |program: &Path, scope: Option<&Path>| {
-            let mut command = std::process::Command::new(program);
-            command.arg("30").env_remove("CONFIG_DIR");
+            let mut command = if program == platform.as_path() {
+                let mut command = std::process::Command::new(program);
+                command.arg("30");
+                command
+            } else {
+                crate::test_support::idle_process(program)
+            };
+            command.env_remove("CONFIG_DIR");
             if let Some(scope) = scope {
                 command.env("CONFIG_DIR", scope);
             }

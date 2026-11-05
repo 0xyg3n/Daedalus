@@ -62,3 +62,38 @@ pub(crate) fn unique_nanos() -> u128 {
     *last = now.max(*last + 1);
     *last
 }
+
+/// Run this test binary as an idle helper process named by `program` (a
+/// symlink to the test binary). Live process tests use it instead of copying
+/// Apple binaries, which recent macOS refuses to run once re-signed (arm64e).
+#[allow(dead_code)]
+pub(crate) fn idle_process(program: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .args([
+            "--ignored",
+            "--exact",
+            "test_support::idle::idle_helper",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env("DAEDALUS_TEST_IDLE_SECONDS", "30")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+#[cfg(test)]
+mod idle {
+    /// Not a test: the body of `idle_process`. It only sleeps when asked to.
+    #[test]
+    #[ignore = "helper process for live process tests"]
+    fn idle_helper() {
+        if let Some(seconds) = std::env::var("DAEDALUS_TEST_IDLE_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+        }
+    }
+}
