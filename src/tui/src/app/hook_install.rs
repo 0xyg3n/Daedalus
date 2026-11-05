@@ -1542,7 +1542,8 @@ mod tests {
         assert!(select_local_server(vec![server.clone(), server.clone()]).is_err());
         assert_eq!(select_local_server(vec![server.clone()]).unwrap(), server);
     }
-    // Hook process identity is derived from /proc on Linux.
+    // This fixture asserts Linux /proc entry/file budget accounting; macOS uses
+    // libproc for the same identity checks and does not consume those file reads.
     #[cfg(target_os = "linux")]
     #[test]
     fn guided_opencode_server_pins_native_local_child_and_rejects_other_commands() {
@@ -2805,8 +2806,6 @@ esac
         rollback(&receipt).unwrap();
         assert_eq!(fs::read(&f.request.profile).unwrap(), original);
     }
-    // Hook process identity is derived from /proc on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn hermes_process_rebind_fences_readiness_and_preserves_uncertain_input() {
         let mut f = Fixture::new();

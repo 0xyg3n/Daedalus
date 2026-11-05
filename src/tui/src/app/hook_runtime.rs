@@ -1405,16 +1405,13 @@ fn event_key(
 /// Stop always requires a stable assistant boundary or explicit provider ID.
 #[cfg(unix)]
 fn invocation_id() -> Result<String> {
-    let stat = fs::read_to_string("/proc/self/stat").map_err(|_| Error::EventIdentity)?;
-    let start = stat
-        .rsplit_once(')')
-        .and_then(|(_, s)| s.split_whitespace().nth(19))
-        .ok_or(Error::EventIdentity)?;
-    let boot =
-        fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|_| Error::EventIdentity)?;
+    let pid = std::process::id();
+    let start =
+        crate::platform::process_start(Path::new("/proc"), pid).ok_or(Error::EventIdentity)?;
+    let boot = crate::platform::boot_id(Path::new("/proc")).ok_or(Error::EventIdentity)?;
     Ok(format!(
         "invocation-{:x}",
-        Sha256::digest(format!("{}:{}:{}", boot.trim(), std::process::id(), start))
+        Sha256::digest(format!("{}:{}:{}", boot, pid, start))
     ))
 }
 #[cfg(windows)]
@@ -1927,14 +1924,7 @@ fn is_ancestor(pid: u32) -> bool {
 }
 #[cfg(unix)]
 fn parent_pid(pid: u32) -> Option<u32> {
-    let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("PPid:") else {
-            continue;
-        };
-        return rest.trim().parse().ok();
-    }
-    None
+    crate::platform::parent_pid(Path::new("/proc"), pid)
 }
 #[cfg(not(unix))]
 fn is_ancestor(_pid: u32) -> bool {
@@ -1958,16 +1948,12 @@ fn ancestor_harness(harness: Harness) -> Option<ProcessIdentity> {
         if pid <= 1 {
             return None;
         }
-        let cmd = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let first = cmd.split(|byte| *byte == 0).next().unwrap_or_default();
-        let first = String::from_utf8_lossy(first);
-        let name = Path::new(first.as_ref()).file_name()?.to_str()?;
+        let command = crate::platform::process_command(Path::new("/proc"), pid)?;
+        let name = Path::new(&command).file_name()?.to_str()?;
         if name != needle {
             continue;
         }
-        let ticks =
-            crate::adapters::terminals::process_start(Path::new("/proc"), &pid.to_string())?;
-        let start_ticks = ticks.parse().ok()?;
+        let start_ticks = crate::platform::process_start(Path::new("/proc"), pid)?;
         return Some(ProcessIdentity { pid, start_ticks });
     }
     None
@@ -3024,8 +3010,6 @@ mod tests {
             assert!(output.is_empty());
         }
     }
-    // Hook process identity is derived from /proc on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn first_lifecycle_events_do_not_require_existing_assistant_transcript() {
         let mut f = Fixture::new();
@@ -3054,8 +3038,6 @@ mod tests {
             assert_eq!(first.event_id, repeated.event_id);
         }
     }
-    // Hook process identity is derived from /proc on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn stop_final_text_works_before_transcript_flush_without_old_row_identity() {
         let mut f = Fixture::new();
@@ -3145,8 +3127,6 @@ mod tests {
             .is_err()
         );
     }
-    // Hook process identity is derived from /proc on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn grok_native_passive_stop_is_not_send_readiness_or_goal_continuation() {
         let mut f = Fixture::new();
@@ -3189,8 +3169,6 @@ mod tests {
             .is_err()
         );
     }
-    // Hook process identity is derived from /proc on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn tool_policy_failure_emits_explicit_deny_but_stop_errors_emit_no_json() {
         let f = Fixture::new();
@@ -4848,7 +4826,7 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     verify_process(&server.process, proc_root)
 }
 /// Linux process incarnation, supplied by trusted setup after launch/discovery.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
     if process.pid == 0 || process.start_ticks == 0 {
         return Err(Error::Identity);
@@ -4867,7 +4845,7 @@ pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()>
     }
     verify_process_stat(process, &bytes)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn verify_process_stat(process: &ProcessIdentity, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
@@ -4891,7 +4869,7 @@ fn verify_process_stat(process: &ProcessIdentity, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn verify_process_metadata(
     process: &ProcessIdentity,
     proc_root: &Path,
@@ -4903,6 +4881,45 @@ pub(crate) fn verify_process_metadata(
     }
     let bytes = guard.process_file(&proc_root.join(process.pid.to_string()).join("stat"))?;
     verify_process_stat(process, &bytes).map_err(|e| e.to_string())?;
+    guard.check()
+}
+/// macOS process incarnation through libproc.
+#[cfg(target_os = "macos")]
+pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
+    if process.pid == 0 || process.start_ticks == 0 {
+        return Err(Error::Identity);
+    }
+    let info = crate::platform::process_info(proc_root, process.pid).ok_or(Error::Identity)?;
+    if info.start != process.start_ticks
+        || info.uid != unsafe { libc::geteuid() }
+        || matches!(info.state, 'Z' | 'T')
+        || info.pgid == 0
+        || info.foreground != i64::from(info.pgid)
+    {
+        return Err(Error::Identity);
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn verify_process_metadata(
+    process: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<(), String> {
+    guard.processes(1)?;
+    if process.pid == 0 || process.start_ticks == 0 {
+        return Err(Error::Identity.to_string());
+    }
+    let info = crate::platform::process_info(proc_root, process.pid)
+        .ok_or_else(|| Error::Identity.to_string())?;
+    if info.start != process.start_ticks
+        || info.uid != unsafe { libc::geteuid() }
+        || matches!(info.state, 'Z' | 'T')
+        || info.pgid == 0
+        || info.foreground != i64::from(info.pgid)
+    {
+        return Err(Error::Identity.to_string());
+    }
     guard.check()
 }
 #[cfg(windows)]
@@ -5436,7 +5453,7 @@ fn verify_live_session_guarded(
     metadata.check().map_err(Error::Metadata)?;
     Ok(actual)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn process_tty(
     pid: u32,
     proc_root: &Path,
@@ -5451,6 +5468,17 @@ fn process_tty(
         .and_then(|s| s.rsplit_once(')'))
         .and_then(|(_, s)| s.split_whitespace().nth(4))
         .and_then(|s| s.parse().ok())
+        .ok_or(Error::Identity)
+}
+#[cfg(target_os = "macos")]
+fn process_tty(
+    pid: u32,
+    proc_root: &Path,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<i64> {
+    metadata.processes(1).map_err(Error::Metadata)?;
+    crate::platform::process_info(proc_root, pid)
+        .map(|info| info.tty)
         .ok_or(Error::Identity)
 }
 

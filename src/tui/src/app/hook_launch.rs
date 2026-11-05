@@ -513,24 +513,9 @@ impl Cleanup {
 }
 #[cfg(unix)]
 fn process_start(root: &Path, pid: u32) -> Result<u64> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(root.join(pid.to_string()).join("stat"))
-        .map_err(|_| "Process evidence is unavailable")?;
-    let mut bytes = Vec::new();
-    file.take(8193)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read process evidence")?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| "Invalid process evidence")?;
-    if bytes.len() > 8192 || text.split_whitespace().next() != Some(pid.to_string().as_str()) {
-        return Err("Invalid process evidence".into());
-    }
-    text.rsplit_once(')')
-        .and_then(|(_, s)| s.split_whitespace().nth(19))
-        .and_then(|v| v.parse().ok())
-        .filter(|v| *v > 0)
-        .ok_or("Invalid process generation".into())
+    crate::platform::process_start(root, pid)
+        .filter(|start| *start > 0)
+        .ok_or_else(|| "Invalid process generation".into())
 }
 #[cfg(not(unix))]
 #[allow(unused_variables)]
@@ -544,28 +529,43 @@ fn require_exited(root: &Path, process: &ProcessIdentity) -> Result<()> {
     // A missing PID is evidence only in a readable process tree with our own
     // process present. Missing stat in an existing PID directory is ambiguous.
     process_start(root, std::process::id())?;
-    let mut found = false;
-    for entry in fs::read_dir(root).map_err(|_| "Process tree is unavailable")? {
-        let entry = entry.map_err(|_| "Cannot inspect process tree")?;
-        if entry.file_name() == process.pid.to_string().as_str() {
-            found = true;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut found = false;
+        for entry in fs::read_dir(root).map_err(|_| "Process tree is unavailable")? {
+            let entry = entry.map_err(|_| "Cannot inspect process tree")?;
+            if entry.file_name() == process.pid.to_string().as_str() {
+                found = true;
+            }
+        }
+        if !found {
+            return if root
+                .join(process.pid.to_string())
+                .try_exists()
+                .map_err(|_| "Cannot recheck process")?
+            {
+                Err("Process changed during cleanup review".into())
+            } else {
+                Ok(())
+            };
         }
     }
-    if !found {
-        return if root
-            .join(process.pid.to_string())
-            .try_exists()
-            .map_err(|_| "Cannot recheck process")?
-        {
-            Err("Process changed during cleanup review".into())
-        } else {
-            Ok(())
-        };
+    #[cfg(target_os = "macos")]
+    {
+        match crate::platform::process_info(root, process.pid) {
+            Some(info) if info.start == process.start_ticks => {
+                Err("Original harness process is still present".into())
+            }
+            _ => Ok(()),
+        }
     }
-    if process_start(root, process.pid)? == process.start_ticks {
-        return Err("Original harness process is still present".into());
+    #[cfg(not(target_os = "macos"))]
+    {
+        if process_start(root, process.pid)? == process.start_ticks {
+            return Err("Original harness process is still present".into());
+        }
+        Ok(())
     }
-    Ok(())
 }
 /// Preview is read-only. Retained private launch and registration records must
 /// match the exact generated file, regardless of the original launch expiry.

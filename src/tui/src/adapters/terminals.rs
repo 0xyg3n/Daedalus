@@ -403,13 +403,8 @@ pub fn identity(row: &Value) -> Result<TerminalId> {
 }
 #[cfg(unix)]
 pub fn process_start(proc_root: &Path, pid: &str) -> Option<String> {
-    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let value = fs::read_to_string(proc_root.join(pid).join("stat")).ok()?;
-    let (_, fields) = value.rsplit_once(')')?;
-    let start = fields.split_whitespace().nth(19)?;
-    (!start.is_empty() && start.bytes().all(|b| b.is_ascii_digit())).then(|| start.to_owned())
+    let pid = pid.parse::<u32>().ok()?;
+    crate::platform::process_start(proc_root, pid).map(|start| start.to_string())
 }
 /// Shared saved reference producer; display aliases never replace endpoints.
 pub fn reference(row: &Value) -> Result<crate::core::layouts::TerminalRef> {

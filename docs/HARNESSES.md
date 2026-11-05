@@ -98,16 +98,18 @@ It has no Daedalus sign-in, hooks, readiness or resume/fork support.
 macOS uses POSIX PTYs and the native Daedalus terminals backend. Homebrew installs
 system tools, npm installs Node harnesses into `~/.local`, and `npx` bootstraps npm
 when only the runner is present. The TUI, CLI, configuration, routes, native PTYs,
-agent identity, and fresh instance import work.
+agent identity, fresh instance import, tmux/Herdr process identity, and hook
+invocation/ancestry work through the macOS process backend.
 
 The following remain Linux-only and fail explicitly on macOS:
 
-- tmux and Herdr process incarnation and inventory rows.
-- Telegram service supervision, including process incarnation and pidfd stop.
-- Hook lifecycle process identity and ancestry through `/proc`.
-- Codex/Grok native open-file evidence and readiness.
+- Codex profile-wide hook binding and native open-file readiness.
+- Grok native open-file readiness.
+- OpenCode guided local-server enrollment.
+- Telegram service supervision, including safe process stop without `pidfd`.
 - Legacy cutover process checks.
 - Automatic external process discovery.
+- macOS update assets; `daedalus update check` has no macOS asset yet.
 - `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
 
 ## Native Windows boundaries

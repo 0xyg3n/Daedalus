@@ -60,11 +60,12 @@ architecture and SHA-256, and links `~/.local/bin/daedalus`. Use
 changes the destination; `--plan` reviews the action without writing anything.
 
 macOS is a preview. The TUI, CLI, configuration, routes, native PTY terminals,
-agent identity and fresh instance import work. tmux/Herdr process identity,
-Telegram service supervision, `/proc`-based hook process identity, Codex/Grok
-open-file evidence, legacy cutover process checks and automatic external process
-discovery remain Linux-only and fail explicitly. Setup installs dependencies
-with Homebrew and npm; it does not use Linux package managers.
+agent identity, fresh instance import, tmux/Herdr process identity and hook
+invocation/ancestry work. Codex profile-wide hook binding, Grok open-file
+evidence, OpenCode guided server enrollment, Telegram service supervision,
+legacy cutover process checks, automatic external process discovery and macOS
+update assets remain Linux-only or incomplete. Setup installs dependencies with
+Homebrew and npm; it does not use Linux package managers.
 
 ## Native Windows install
 
