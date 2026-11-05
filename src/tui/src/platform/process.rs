@@ -216,7 +216,18 @@ fn linux_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
     let tasks = std::fs::read_dir(root.join(pid.to_string()).join("task")).ok()?;
     let mut pids = Vec::new();
     for task in tasks {
-        let text = std::fs::read_to_string(task.ok()?.path().join("children")).ok()?;
+        let text = match std::fs::read_to_string(task.ok()?.path().join("children")) {
+            Ok(text) => text,
+            // A thread that exited after the listing has no children of its
+            // own; Linux re-parents them within the process.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            Err(_) => return None,
+        };
         for word in text.split_whitespace() {
             let child = word.parse::<u32>().ok().filter(|p| *p > 0)?;
             if !pids.contains(&child) {
@@ -937,6 +948,8 @@ mod tests {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join("children"), children).unwrap();
         }
+        // A thread that exited after the listing has no children file.
+        std::fs::create_dir_all(root.join("42/task/51")).unwrap();
         let mut children = child_pids(&root, 42, 8).unwrap();
         children.sort();
         assert_eq!(children, [43, 44]);
