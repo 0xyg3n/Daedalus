@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/daedalus.png" alt="Daedalus" width="440"></p>
 <p align="center"><b>Daedalus</b> is a terminal workspace for shells and AI coding agents, with Telegram control and a local agent API.</p>
 <p align="center">
-<img src="assets/badges/platform.svg" alt="Linux and Windows">
+<img src="assets/badges/platform.svg" alt="Linux, macOS and Windows">
 <img src="assets/badges/interface.svg" alt="Rust · Ratatui">
 <a href="LICENSE"><img src="assets/badges/license.svg" alt="Apache-2.0"></a>
 </p>
@@ -75,14 +75,30 @@ bash Daedalus/install.sh --source "$PWD/Daedalus"
 ~/.local/bin/daedalus setup
 ```
 
-The installer detects architecture and reviews missing build dependencies. Setup
+**macOS (preview):** the DMG installs `Daedalus.app`; start it from Applications.
+For a terminal-first CLI install from a checkout:
+
+```bash
+git clone https://github.com/0xyg3n/Daedalus.git
+bash Daedalus/scripts/install-macos.sh --source "$PWD/Daedalus"
+export PATH="$HOME/.local/bin:$PATH"
+daedalus setup --cli
+```
+
+The macOS installer verifies the Mach-O architecture and SHA-256, then links
+`~/.local/bin/daedalus`. Setup uses Homebrew for system tools and npm into
+`~/.local` for Node harnesses; `npx` bootstraps npm when it is the only runner
+available. See the [installation guide](docs/INSTALL.md) for details.
+
+The installers detect architecture and review missing build dependencies. Setup
 finds installed harnesses and lets you choose optional components. Native terminals
 are the default; tmux and Herdr are optional. See the [installation guide](docs/INSTALL.md)
 for checksums, Windows setup, configuration import, updates and removal.
 
-Daedalus supports Linux and Windows and is in active development. Release packages
-target x86-64. See [harness and platform support](docs/HARNESSES.md) for the
-features available on each platform.
+Daedalus supports Linux, Windows and macOS (preview) and is in active development.
+Release packages target Linux x86-64, Windows x64, and macOS arm64 or universal.
+See [harness and platform support](docs/HARNESSES.md) for the features available
+on each platform.
 
 ## Built-in terminals
 
@@ -92,9 +108,12 @@ daedalus shell --workspace my-project --name agent -- claude
 ```
 
 Run any installed shell or harness using its normal arguments. Native terminals
-use Linux PTYs or Windows ConPTY and are discoverable across launch directories.
+use POSIX PTYs (Linux and macOS) or Windows ConPTY and are discoverable across
+launch directories.
 Existing [tmux](https://github.com/tmux/tmux) and [Herdr](https://herdr.dev/) sessions
-can also be managed, including Herdr sessions inside tmux.
+can also be managed on Linux and Windows, including Herdr sessions inside tmux.
+macOS uses the same inventory path through libproc and runs the same isolated
+tests in CI; live macOS tmux/Herdr sessions have not been verified yet.
 
 **Ctrl+] then D** detaches while leaving the process running. One view controls
 input and size; additional views can watch. Sessions survive closing the UI, not

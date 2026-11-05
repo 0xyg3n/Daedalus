@@ -9,6 +9,8 @@ use crate::core::{identity::TerminalId, layouts, routes::Terminal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     collections::BTreeSet,
     fs::{self, File},
@@ -18,7 +20,6 @@ use std::{
 use std::{
     fs::OpenOptions,
     os::unix::{
-        ffi::OsStrExt,
         fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
         io::AsRawFd,
     },
@@ -681,29 +682,117 @@ fn source_token(source: &Path, legacy: bool, bot: i64) -> Result<String> {
         .ok_or("Legacy token missing")?;
     super::telegram_config::validate_token(bot, token.as_bytes())
 }
+/// Legacy feeder and hook program stems, or `<prefix>_<stem>`.
 #[cfg(unix)]
+const LEGACY_PROGRAMS: &[&str] = &[
+    "tg_feeder",
+    "outbound_flusher",
+    "tg_stream",
+    "tg_live",
+    "tg_status",
+    "frame_verify",
+    "pre_tool_use",
+    "turnstate",
+    "tg_autosend",
+    "tg_verbose",
+    "session_identity",
+    "notify",
+    "memory_recall",
+    "memory_persist",
+    "harness_memory",
+    "record_task",
+    "praxis_mode",
+    "goal_loop",
+];
+#[cfg(unix)]
+fn legacy_program(arg: &std::ffi::OsStr) -> bool {
+    Path::new(arg).file_stem().is_some_and(|name| {
+        LEGACY_PROGRAMS.iter().any(|candidate| {
+            name == *candidate || name.to_string_lossy().ends_with(&format!("_{candidate}"))
+        })
+    })
+}
+/// macOS reads the same evidence through libproc and KERN_PROCARGS2. An owned,
+/// live process whose command or scope cannot be read fails closed.
+#[cfg(target_os = "macos")]
 fn legacy_processes_absent(source: &Path, proc_root: &Path) -> Result<()> {
+    use crate::platform::{
+        process_argv, process_environment, process_info, process_list, process_owner,
+    };
+    // Isolated fixtures keep their procfs layout and semantics.
+    if proc_root != Path::new("/proc") {
+        return legacy_processes_absent_procfs(source, proc_root);
+    }
+    let pids = process_list(proc_root);
+    if pids.is_empty() {
+        return Err("Cannot verify legacy process quiescence".into());
+    }
+    if pids.len() > 100_000 {
+        return Err("Process inventory exceeds verification limit".into());
+    }
+    let uid = unsafe { libc::geteuid() };
+    // Other users' processes are out of scope, as on Linux. A process of this
+    // user that libproc cannot describe has an unknown scope: fail closed.
+    let exists = |pid: u32| unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    let live = |pid: u32| -> Result<bool> {
+        match process_info(proc_root, pid) {
+            Some(info) => Ok(info.uid == uid && !matches!(info.state, 'Z')),
+            None => match process_owner(pid) {
+                Some(owner) if owner != uid => Ok(false),
+                Some(_) => Err("Cannot verify legacy process identity".into()),
+                None if exists(pid) => Err("Cannot verify legacy process identity".into()),
+                None => Ok(false),
+            },
+        }
+    };
+    for pid in pids {
+        if !live(pid)? {
+            continue;
+        }
+        let Some(argv) = process_argv(proc_root, pid) else {
+            if live(pid)? {
+                return Err("Cannot verify legacy process command".into());
+            }
+            continue;
+        };
+        if !argv
+            .iter()
+            .take(5)
+            .any(|arg| legacy_program(std::ffi::OsStr::new(arg)))
+        {
+            continue;
+        }
+        let Some(environment) = process_environment(proc_root, pid) else {
+            if live(pid)? {
+                return Err("Cannot verify legacy process scope".into());
+            }
+            continue;
+        };
+        let scope = environment
+            .iter()
+            .find_map(|value| value.strip_prefix("CONFIG_DIR="))
+            .map(PathBuf::from);
+        let scoped = scope
+            .as_deref()
+            .map(fs::canonicalize)
+            .transpose()
+            .map_err(|_| "Cannot resolve legacy process configuration scope")?;
+        if scoped.as_deref().is_none_or(|path| path == source) {
+            return Err(
+                "A legacy feeder or hook process still needs shutdown by its original supervisor"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn legacy_processes_absent(source: &Path, proc_root: &Path) -> Result<()> {
+    legacy_processes_absent_procfs(source, proc_root)
+}
+#[cfg(unix)]
+fn legacy_processes_absent_procfs(source: &Path, proc_root: &Path) -> Result<()> {
     let entries = fs::read_dir(proc_root).map_err(|_| "Cannot verify legacy process quiescence")?;
-    let known = [
-        "tg_feeder",
-        "outbound_flusher",
-        "tg_stream",
-        "tg_live",
-        "tg_status",
-        "frame_verify",
-        "pre_tool_use",
-        "turnstate",
-        "tg_autosend",
-        "tg_verbose",
-        "session_identity",
-        "notify",
-        "memory_recall",
-        "memory_persist",
-        "harness_memory",
-        "record_task",
-        "praxis_mode",
-        "goal_loop",
-    ];
     for (count, entry) in entries.enumerate() {
         if count > 100_000 {
             return Err("Process inventory exceeds verification limit".into());
@@ -731,14 +820,10 @@ fn legacy_processes_absent(source: &Path, proc_root: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err("Cannot verify legacy process command".into()),
         };
-        let relevant = command.split(|b| *b == 0).take(5).any(|arg| {
-            let path = Path::new(std::ffi::OsStr::from_bytes(arg));
-            path.file_stem().is_some_and(|name| {
-                known.iter().any(|candidate| {
-                    name == *candidate || name.to_string_lossy().ends_with(&format!("_{candidate}"))
-                })
-            })
-        });
+        let relevant = command
+            .split(|b| *b == 0)
+            .take(5)
+            .any(|arg| legacy_program(std::ffi::OsStr::from_bytes(arg)));
         if !relevant {
             continue;
         }
@@ -872,13 +957,18 @@ fn reconcile_legacy_routes(
     )?;
     Ok((vec![], unresolved, vec![]))
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn rename_new(_: &Path, _: &Path) -> Result<()> {
+    Err("Atomic no-replace rename is currently supported on Linux and macOS".into())
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn rename_new(from: &Path, to: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let a =
         std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(|_| "Invalid rename path")?;
     let b = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(|_| "Invalid rename path")?;
-    if unsafe {
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
             a.as_ptr(),
@@ -886,8 +976,10 @@ fn rename_new(from: &Path, to: &Path) -> Result<()> {
             b.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
-    } != 0
-    {
+    };
+    #[cfg(target_os = "macos")]
+    let status = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
+    if status != 0 {
         return Err("Cannot publish cutover; retained transaction requires recovery".into());
     }
     Ok(())
@@ -1325,6 +1417,85 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    /// A real process named like a legacy hook blocks cutover of its own scope
+    /// (or with no scope) and is ignored for another instance.
+    #[test]
+    fn live_legacy_process_is_found_through_libproc() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "daedalus-legacy-live-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let other = root.join("other");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        // macOS hides the environment of Apple platform binaries, so the scoped
+        // cases run this test binary as the helper; /bin/sleep shows the hidden case.
+        let image = std::env::current_exe().unwrap();
+        let program = root.join("tg_feeder");
+        std::os::unix::fs::symlink(&image, &program).unwrap();
+        let platform = root.join("platform").join("tg_feeder");
+        fs::create_dir_all(platform.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/bin/sleep", &platform).unwrap();
+        let run = |program: &Path, scope: Option<&Path>| {
+            let mut command = if program == platform.as_path() {
+                let mut command = std::process::Command::new(program);
+                command.arg("30");
+                command
+            } else {
+                crate::test_support::idle_process(program)
+            };
+            command.env_remove("CONFIG_DIR");
+            if let Some(scope) = scope {
+                command.env("CONFIG_DIR", scope);
+            }
+            let mut child = command.spawn().unwrap();
+            // Wait until the kernel reports the new image's arguments.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !crate::platform::process_argv(Path::new("/proc"), child.id())
+                .is_some_and(|argv| argv.first().is_some_and(|a| a.ends_with("tg_feeder")))
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let result = legacy_processes_absent(&source, Path::new("/proc"));
+            // Whether macOS exposed the scope; some releases hide it for Apple binaries.
+            let scope_visible =
+                crate::platform::process_environment(Path::new("/proc"), child.id())
+                    .is_some_and(|env| env.iter().any(|v| v.starts_with("CONFIG_DIR=")));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            (result, scope_visible)
+        };
+        assert!(
+            run(&program, Some(&source))
+                .0
+                .unwrap_err()
+                .contains("original supervisor")
+        );
+        assert!(
+            run(&program, None)
+                .0
+                .unwrap_err()
+                .contains("original supervisor")
+        );
+        run(&program, Some(&other)).0.unwrap();
+        // An Apple platform binary's environment may be hidden. Hidden is no
+        // evidence of another scope: fail closed; a visible scope is honored.
+        match run(&platform, Some(&other)) {
+            (result, true) => result.unwrap(),
+            (result, false) => assert!(result.unwrap_err().contains("original supervisor")),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1350,12 +1521,14 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("daedalus-cutover-{}-{nonce}", std::process::id()));
+            // macOS clocks tick in microseconds; parallel tests need a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let nonce = crate::test_support::unique_nanos();
+            let count = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "daedalus-cutover-{}-{count}-{nonce}",
+                std::process::id()
+            ));
             fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
             let source = root.join("source");
             let destination = root.join("destination");

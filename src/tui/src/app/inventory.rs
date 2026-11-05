@@ -46,12 +46,22 @@ pub fn run(args: &[String], output: &mut impl std::io::Write) -> Result<(), Stri
 }
 
 pub fn socket_roots() -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from("/tmp")];
-    for key in ["TMUX_TMPDIR", "XDG_RUNTIME_DIR"] {
-        if let Some(root) = std::env::var_os(key).map(PathBuf::from)
-            && root.is_absolute()
-            && !roots.contains(&root)
-        {
+    let candidates = std::iter::once(PathBuf::from("/tmp")).chain(
+        ["TMUX_TMPDIR", "XDG_RUNTIME_DIR"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(PathBuf::from)),
+    );
+    canonical_roots(candidates)
+}
+
+/// tmux reports its socket through the resolved directory (macOS `/tmp` is
+/// `/private/tmp`). Scanning the same resolved path keeps one server one
+/// endpoint, so the dashboard's own tmux terminal is still recognized.
+fn canonical_roots(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in candidates.into_iter().filter(|root| root.is_absolute()) {
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !roots.contains(&root) {
             roots.push(root);
         }
     }
@@ -224,10 +234,20 @@ fn stale_tmux_socket(path: &str) -> bool {
         {
             return false;
         }
-        matches!(
-            std::io::Error::last_os_error().kind(),
-            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-        )
+        let error = std::io::Error::last_os_error();
+        // macOS reports ECONNREFUSED both for a dropped listener and for a live
+        // listener whose backlog is full. Only a missing file is unambiguous.
+        #[cfg(target_os = "linux")]
+        {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            error.kind() == std::io::ErrorKind::NotFound
+        }
     }
 }
 
@@ -409,6 +429,23 @@ fn collect_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn socket_roots_resolve_symlinks_and_deduplicate() {
+        let base = std::env::temp_dir().join(format!("dd-socket-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(
+            canonical_roots([base.join("link"), real.clone(), "relative".into()]),
+            vec![real]
+        );
+        let missing = base.join("missing");
+        assert_eq!(canonical_roots([missing.clone()]), vec![missing]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn workers_advance_past_a_slow_endpoint_join_every_job_and_keep_result_order() {
         use std::sync::{
@@ -484,10 +521,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "dd-inventory-scan-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         struct Cleanup(PathBuf);
         impl Drop for Cleanup {
@@ -515,14 +549,14 @@ mod tests {
             "a failed scan must not claim complete discovery: {snapshot}"
         );
     }
-    #[cfg(unix)]
+    // Linux connect(2) keeps a saturated listener live; macOS reports
+    // ECONNREFUSED once the backlog fills, which is ambiguous with a stale
+    // socket file. macOS therefore treats both as an error, not stale.
+    #[cfg(target_os = "linux")]
     #[test]
     fn stale_socket_does_not_hide_live_query_failure_or_delete_endpoints() {
         use std::os::unix::net::UnixListener;
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let unique = crate::test_support::unique_nanos();
         let root =
             std::env::temp_dir().join(format!("dd-inventory-{}-{unique}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
@@ -594,11 +628,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_optional_backend_rejection_is_still_an_error() {
-        // /bin/false is a local deterministic fixture, never a terminal query.
+        // A local deterministic fixture, never a terminal query. macOS has no
+        // /bin/false; /usr/bin/false exists on both platforms.
+        let unavailable = if cfg!(target_os = "macos") {
+            "/usr/bin/false"
+        } else {
+            "/bin/false"
+        };
         let root = std::env::temp_dir().join("daedalus-uninstalled-backend-fixture");
         let config = ControlConfig::fresh(&root).unwrap();
         let terminals = Terminals {
-            herdr: "/bin/false".into(),
+            herdr: unavailable.into(),
             ..Terminals::default()
         };
         let snapshot = collect_with_socket(&config, &terminals, &[], None, &[]);

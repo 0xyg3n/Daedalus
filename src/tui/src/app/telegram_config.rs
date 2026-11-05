@@ -1005,10 +1005,7 @@ mod windows_tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-config-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&directory).unwrap();
         {
@@ -1052,10 +1049,7 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let nonce = crate::test_support::unique_nanos();
             let path = std::env::temp_dir()
                 .join(format!("daedalus-service-{}-{nonce}", std::process::id()));
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();

@@ -735,10 +735,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-xdg-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let legacy = root.join(".config/daedalus");
         let xdg = root.join("xdg/daedalus");

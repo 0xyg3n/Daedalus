@@ -19,8 +19,10 @@ use std::{
     time::Duration,
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+use std::os::unix::fs::DirBuilderExt;
 type Result<T> = std::result::Result<T, String>;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const RECEIPT: &str = "migration.json";
@@ -1094,13 +1096,14 @@ pub(crate) fn telegram_env(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     Ok(values)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn install_directory(source: &Path, destination: &Path) -> Result<()> {
     let source = std::ffi::CString::new(source.as_os_str().as_bytes())
         .map_err(|_| "Invalid staging path")?;
     let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())
         .map_err(|_| "Invalid destination path")?;
-    if unsafe {
+    #[cfg(target_os = "linux")]
+    let status = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
             source.as_ptr(),
@@ -1108,15 +1111,18 @@ fn install_directory(source: &Path, destination: &Path) -> Result<()> {
             destination.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
-    } != 0
-    {
+    };
+    #[cfg(target_os = "macos")]
+    let status =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if status != 0 {
         return Err("Cannot install import atomically; destination may already exist".into());
     }
     Ok(())
 }
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn install_directory(_: &Path, _: &Path) -> Result<()> {
-    Err("Atomic instance import is currently supported on Linux".into())
+    Err("Atomic instance import is currently supported on Linux and macOS".into())
 }
 
 #[cfg(windows)]
@@ -1149,10 +1155,7 @@ mod windows_tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-import-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&root).unwrap();
         let source = root.join("source");

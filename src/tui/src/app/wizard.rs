@@ -720,10 +720,7 @@ mod windows_tests {
         let home: PathBuf = std::env::temp_dir().join(format!(
             "daedalus-wizard-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&home).unwrap();
         let source = home.join("fresh");

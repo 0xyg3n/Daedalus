@@ -3,19 +3,18 @@
 use super::{config::ControlConfig, dashboard, telegram_config, telegram_supervisor};
 use crate::core::layouts;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::{
     fs::OpenOptions,
     io::Read,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
 };
 type Result<T> = std::result::Result<T, String>;
 
@@ -81,7 +80,7 @@ pub fn remembered(preference_directory: &Path) -> Result<Option<PathBuf>> {
     let path = PathBuf::from(path);
     Ok(configuration(&path).is_ok().then_some(path))
 }
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn process_candidate(process: &Path, argv_limit: u64) -> Result<Option<PathBuf>> {
     let meta = fs::symlink_metadata(process).map_err(|_| "Process unavailable")?;
     if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
@@ -199,7 +198,9 @@ pub fn discover(
             }
         }
     }
-    #[cfg(unix)]
+    // Process candidates exist only to find running Telegram service owners.
+    // Service supervision is Linux-only, so other Unix hosts have none to find.
+    #[cfg(target_os = "linux")]
     if settings.scan_processes {
         let mut process_candidates = Vec::new();
         if let Ok(entries) = fs::read_dir(proc_root) {
@@ -299,10 +300,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!(
                 "daedalus-instances-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&root.join("marker"), b"fixture").unwrap();
             fs::create_dir(root.join("proc")).unwrap();
@@ -319,6 +317,7 @@ mod tests {
             .unwrap();
             path
         }
+        #[cfg(target_os = "linux")]
         fn service(&self, directory: &Path) -> super::super::telegram_service::Owner {
             let config = telegram_config::ServiceConfig {
                 runtime: Default::default(),
@@ -378,6 +377,7 @@ mod tests {
             .unwrap();
             owner
         }
+        #[cfg(target_os = "linux")]
         fn stat(&self, ticks: u64) {
             let mut fields = vec!["0".to_owned(); 20];
             fields[0] = "S".into();
@@ -416,6 +416,8 @@ mod tests {
         assert!(!report.to_string().contains("must-never-leak"));
         assert!(!current.join("dashboard.json").exists());
     }
+    // Process-owned candidates use the Linux /proc service scan.
+    #[cfg(target_os = "linux")]
     #[test]
     fn external_service_discovery_requires_owner_and_exact_process_incarnation() {
         let f = Fixture::new();
@@ -480,6 +482,8 @@ mod tests {
         assert!(remember(&base, &other).is_err());
         assert_eq!(fs::read(base.join("dashboard.json")).unwrap(), before);
     }
+    // Process-owned candidates use the Linux /proc service scan.
+    #[cfg(target_os = "linux")]
     #[test]
     fn configured_root_entry_process_and_candidate_limits_report_partial_discovery() {
         let f = Fixture::new();
@@ -547,6 +551,8 @@ mod tests {
                 .contains("Process discovery limit")
         );
     }
+    // Process-owned candidates use the Linux /proc service scan.
+    #[cfg(target_os = "linux")]
     #[test]
     fn configured_sources_and_budgets_change_discovery_without_inventing_owners() {
         let f = Fixture::new();

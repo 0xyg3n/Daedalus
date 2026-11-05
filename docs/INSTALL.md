@@ -1,9 +1,9 @@
 # Installation
 
-Daedalus runs on Linux and Windows as one native executable. It includes the TUI,
-CLI, Telegram service and hooks. The project is in active development; release
-packages target Linux x86-64 and Windows x64. Agent tools keep their own runtimes
-and accounts.
+Daedalus runs on Linux, Windows and macOS as one native executable. It includes
+the TUI, CLI, Telegram service and hooks. The project is in active development;
+release packages target Linux x86-64, Windows x64, and macOS arm64 or universal.
+Agent tools keep their own runtimes and accounts.
 
 ## Linux install
 
@@ -37,6 +37,41 @@ installer adds missing build tools with apt, dnf or pacman, and Rust with the
 official rustup script (it prints the script's SHA-256 first). It never replaces a
 `daedalus` command it did not install. A checksum proves integrity only if you got
 it from a source you trust. The Linux source installer also supports ARM64.
+
+## macOS install
+
+Release artifacts are `Daedalus-<version>-macos-universal.dmg` (Apple silicon and
+Intel) and thin `daedalus-<version>-aarch64-macos` / `-x86_64-macos` command-line
+executables, each with a `.sha256` file. Open the DMG, drag `Daedalus.app` to
+Applications, and start it. The app opens Terminal because Daedalus is a terminal
+interface. A build that is not notarized needs right-click → Open the first time.
+
+Maintainers can generate a Homebrew cask from the published DMG with
+`./scripts/homebrew-cask.sh`; it installs the app and links its CLI as `daedalus`.
+No public tap is published yet.
+
+For a terminal-first install from a checkout:
+
+```bash
+git clone https://github.com/0xyg3n/Daedalus.git
+bash Daedalus/scripts/install-macos.sh --source "$PWD/Daedalus"
+export PATH="$HOME/.local/bin:$PATH"
+daedalus setup --cli
+```
+
+The installer builds for the host architecture with `rustup` when available
+(Rust 1.88+ and Xcode Command Line Tools are required), verifies the Mach-O
+architecture and SHA-256, and links `~/.local/bin/daedalus`. Use
+`--binary ABS --sha256 HEX` to install a prebuilt executable. `--prefix ABS`
+changes the destination; `--plan` reviews the action without writing anything.
+
+macOS is a preview. The TUI, CLI, configuration, routes, native PTY terminals,
+agent identity, fresh instance import, tmux/Herdr process identity, hook
+invocation/ancestry, external terminal discovery, Codex/Grok readiness evidence,
+OpenCode guided server enrollment, Telegram service supervision and legacy
+cutover process checks use the macOS process backend. Codex, Grok and OpenCode
+have not been verified against live sessions on macOS. Setup installs
+dependencies with Homebrew and npm; it does not use Linux package managers.
 
 ## Native Windows install
 
@@ -132,10 +167,12 @@ Each tool signs in through its own login flow. Cancelling setup saves nothing.
 **Finish and explore terminals** saves the configuration without installing
 anything or signing in. Setup never starts the Telegram service.
 
-On Linux, missing tools are installed only after review:
+On Linux and macOS, missing tools are installed only after review:
 
-- tmux, Node.js and npm: the system package manager.
-- Claude Code, Codex, Pi and OpenCode: npm, into `~/.local`.
+- tmux, Node.js and npm: the Linux system package manager, or Homebrew on macOS
+  (`brew install tmux node`).
+- Claude Code, Codex, Pi and OpenCode: npm, into `~/.local`; when only `npx` is
+  available, setup uses `npx` to bootstrap npm.
 - Herdr, Cursor, Grok and Hermes: their official install scripts over HTTPS.
 
 Daedalus also finds OpenCode in `~/.opencode/bin`. Upstream installers are
@@ -240,6 +277,11 @@ daedalus update install --version VERSION --approve APPROVAL_SHA256
 The installer rechecks the release and approval against the running binary,
 verifies SHA-256 and native architecture, and preserves the previous executable.
 Linux activation is atomic; the running session continues until you restart it.
+On macOS, command-line installs from `scripts/install-macos.sh` update the same
+way from the thin `daedalus-<version>-<arch>-macos` asset, which must be a Mach-O
+executable for the running CPU. `Daedalus.app` is not modified in place, because
+that would break its signature: `update check` reports that the app updates by
+installing a newer DMG.
 After installation, a confirmation shows the installed version and restart
 instructions, even if you closed the dialog while it was downloading. A status
 notice remains visible until restart. Failed checks and installations also show

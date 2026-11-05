@@ -1190,6 +1190,18 @@ impl Dialog {
             icons: serde_json::from_value(value["icons"].clone()).unwrap_or_default(),
             ..Self::default()
         }
+        .focused(value["focus"].as_str())
+    }
+    /// Opt-in initial choice, so a re-sent toggle list keeps the user's place.
+    /// Unknown ids keep the first option.
+    fn focused(mut self, focus: Option<&str>) -> Self {
+        let index = focus
+            .filter(|_| self.mode == "choose")
+            .and_then(|id| self.options.iter().position(|o| o.0 == id));
+        if let Some(index) = index {
+            self.selected = index;
+        }
+        self
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2596,6 +2608,26 @@ pub mod tests {
                     .is_empty()
             );
         }
+    }
+    #[test]
+    fn choose_focus_is_opt_in_and_ignores_unknown_ids() {
+        use serde_json::json;
+        let options = json!([["a", "A", ""], ["b", "B", ""], ["c", "C", ""]]);
+        let dialog = |extra: serde_json::Value| {
+            let mut frame = json!({"mode":"choose","options":options});
+            frame
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            Dialog::from(frame).selected
+        };
+        assert_eq!(dialog(json!({})), 0);
+        assert_eq!(dialog(json!({"focus":"c"})), 2);
+        assert_eq!(dialog(json!({"focus":"missing"})), 0);
+        assert_eq!(
+            Dialog::from(json!({"mode":"input","focus":"c","options":options})).selected,
+            0
+        );
     }
     fn fixture() -> Ui {
         let mut ui = Ui {

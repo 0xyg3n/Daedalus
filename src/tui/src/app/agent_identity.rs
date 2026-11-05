@@ -86,6 +86,68 @@ pub struct Native<'a> {
 #[cfg(unix)]
 static REQUEST: AtomicU64 = AtomicU64::new(0);
 #[cfg(unix)]
+fn open_unix_socket() -> libc::c_int {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    }
+    // Darwin has no SOCK_CLOEXEC/SOCK_NONBLOCK. Apply both descriptor flags
+    // before the socket can be inherited or used.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    unsafe {
+        let raw = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if raw < 0 {
+            return raw;
+        }
+        if libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+            || libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) < 0
+        {
+            libc::close(raw);
+            return -1;
+        }
+        raw
+    }
+}
+#[cfg(unix)]
+fn peer_is_owner(raw: libc::c_int) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        let mut peer: libc::ucred = std::mem::zeroed();
+        let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        libc::getsockopt(
+            raw,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut peer as *mut libc::ucred).cast(),
+            &mut size,
+        ) == 0
+            && peer.uid == libc::geteuid()
+    }
+    // Darwin reports the peer's effective uid through LOCAL_PEERCRED.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut peer: libc::xucred = std::mem::zeroed();
+        let mut size = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+        libc::getsockopt(
+            raw,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERCRED,
+            (&mut peer as *mut libc::xucred).cast(),
+            &mut size,
+        ) == 0
+            && peer.cr_uid == libc::geteuid()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = raw;
+        false
+    }
+}
+#[cfg(unix)]
 fn connect_socket(path: &Path) -> Result<UnixStream> {
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -96,13 +158,7 @@ fn connect_socket(path: &Path) -> Result<UnixStream> {
     for (to, from) in address.sun_path.iter_mut().zip(bytes) {
         *to = *from as libc::c_char;
     }
-    let raw = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            0,
-        )
-    };
+    let raw = open_unix_socket();
     if raw < 0 {
         return Err("Cannot open Herdr socket".into());
     }
@@ -138,19 +194,7 @@ fn connect_socket(path: &Path) -> Result<UnixStream> {
             return Err("Herdr socket connection unconfirmed".into());
         }
     }
-    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    if unsafe {
-        libc::getsockopt(
-            raw,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut peer as *mut libc::ucred).cast(),
-            &mut size,
-        )
-    } != 0
-        || peer.uid != unsafe { libc::geteuid() }
-    {
+    if !peer_is_owner(raw) {
         return Err("Herdr socket peer ownership unverified".into());
     }
     let stream = UnixStream::from(fd);

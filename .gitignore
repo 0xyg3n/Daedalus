@@ -33,3 +33,6 @@ node_modules/
 *.bak
 *.bak-*
 *.bak.*
+
+# Release artifacts
+dist/

@@ -26,6 +26,13 @@ impl Environment {
     pub fn detect(home: &Path, search: Vec<PathBuf>) -> Result<Self> {
         valid_path(home)?;
         let mut search: Vec<_> = search.into_iter().filter(|p| p.is_absolute()).collect();
+        #[cfg(target_os = "macos")]
+        for extra in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let path = PathBuf::from(extra);
+            if !search.contains(&path) {
+                search.push(path);
+            }
+        }
         for extra in [
             ".local/bin",
             ".grok/bin",
@@ -39,8 +46,8 @@ impl Environment {
             }
         }
         let mut names: BTreeSet<&str> = [
-            "tmux", "herdr", "node", "npm", "apt-get", "dnf", "pacman", "sudo", "bash", "sh",
-            "curl", "git", "tar", "gzip", "unzip",
+            "tmux", "herdr", "node", "npm", "npx", "brew", "apt-get", "dnf", "pacman", "sudo",
+            "bash", "sh", "curl", "git", "tar", "gzip", "unzip",
         ]
         .into_iter()
         .collect();
@@ -81,10 +88,12 @@ impl Environment {
         })
     }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.os.as_str(), "linux" | "windows")
+        if !matches!(self.os.as_str(), "linux" | "macos" | "windows")
             || !["x86_64", "aarch64"].contains(&self.architecture.as_str())
         {
-            return Err("Native installation supports Linux and Windows x86_64 and aarch64".into());
+            return Err(
+                "Native installation supports Linux, macOS and Windows x86_64 and aarch64".into(),
+            );
         }
         valid_path(&self.home)?;
         for path in self.search.iter().chain(self.binaries.values()) {
@@ -164,6 +173,10 @@ impl Plan {
             }
         }
         let mut review = Review { environment, selection, installed: vec![], operations: vec![], blockers: vec![], notices: vec!["Account sign-in remains with each harness; Daedalus does not inspect credentials or launch agents. Publisher installers may access existing native profiles.".into(), "Package installation can execute publisher package scripts. Completed installs are not rolled back if a later step fails. Script digests bind the bootstrap script only; publisher downloads and package versions follow the official current distribution.".into(), "The CLI asks sudo to authenticate through its terminal only after approval; noninteractive callers must prepare sudo credentials separately.".into(), "Daedalus is a standalone binary; selected third-party harnesses have their own runtime requirements.".into()] };
+        if review.environment.os == "macos" {
+            review.notices.retain(|notice| !notice.contains("sudo"));
+            review.notices.push("macOS system tools install with Homebrew; Node harnesses install through npm into ~/.local, using npx to bootstrap npm when it is absent.".into());
+        }
         if review.environment.os == "windows" {
             review.notices.retain(|notice| !notice.contains("sudo"));
             let mut selected = review.selection.harnesses.clone();
@@ -264,25 +277,51 @@ impl Plan {
                 script_requests.push((id.clone(), tool.executables[0], url, args));
                 continue;
             };
-            let npm = review
-                .environment
-                .binaries
-                .get("npm")
-                .cloned()
-                .unwrap_or_else(|| PathBuf::from("/usr/bin/npm"));
-            if !review.environment.binaries.contains_key("npm") {
+            let npm = review.environment.binaries.get("npm").cloned();
+            let npx = review.environment.binaries.get("npx").cloned();
+            let brew = review.environment.binaries.get("brew").cloned();
+            let macos = review.environment.os == "macos";
+            let (executable, mut arguments) = if let Some(npm) = npm {
+                if !review.environment.binaries.contains_key("node") && !macos {
+                    packages.push("nodejs".into());
+                }
+                (npm, Vec::new())
+            } else if macos && brew.is_some() {
+                // Homebrew's node formula provides npm and npx.
+                packages.push("node".into());
+                let bin = brew
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .ok_or("Homebrew path has no binary directory")?;
+                (bin.join("npm"), Vec::new())
+            } else if let Some(npx) = npx {
+                // npx can bootstrap npm when only the runner is on PATH.
+                (
+                    npx,
+                    vec![
+                        "--yes".into(),
+                        "--package".into(),
+                        "npm@latest".into(),
+                        "npm".into(),
+                    ],
+                )
+            } else if macos {
+                review.blockers.push("Install Node.js with Homebrew (`brew install node`) or npm/npx, then refresh setup.".into());
+                continue;
+            } else {
                 packages.push("npm".into());
-            }
-            if !review.environment.binaries.contains_key("node") {
-                packages.push("nodejs".into());
-            }
-            let mut arguments = vec![
+                if !review.environment.binaries.contains_key("node") {
+                    packages.push("nodejs".into());
+                }
+                (PathBuf::from("/usr/bin/npm"), Vec::new())
+            };
+            arguments.extend([
                 "install".into(),
                 "--global".into(),
                 "--prefix".into(),
                 prefix.to_string_lossy().into_owned(),
                 "--registry=https://registry.npmjs.org".into(),
-            ];
+            ]);
             if id == "pi" {
                 arguments.push("--ignore-scripts".into());
             }
@@ -291,7 +330,7 @@ impl Plan {
                 installer_url: None,
                 script_sha256: None,
                 component: id.clone(),
-                executable: npm.clone(),
+                executable,
                 arguments,
                 expected_binaries: vec![tool.executables[0].into()],
                 source: source.into(),
@@ -315,11 +354,18 @@ impl Plan {
         packages.sort();
         packages.dedup();
         if !packages.is_empty() {
-            let manager = ["apt-get", "dnf", "pacman"]
-                .into_iter()
-                .find(|name| review.environment.binaries.contains_key(*name));
+            let manager = if review.environment.os == "macos" {
+                ["brew"]
+                    .into_iter()
+                    .find(|name| review.environment.binaries.contains_key(*name))
+            } else {
+                ["apt-get", "dnf", "pacman"]
+                    .into_iter()
+                    .find(|name| review.environment.binaries.contains_key(*name))
+            };
             if let Some(manager) = manager {
                 let mut arguments: Vec<String> = match manager {
+                    "brew" => vec!["install"],
                     "apt-get" => vec!["install", "-y"],
                     "dnf" => vec!["install", "-y"],
                     _ => vec!["-S", "--needed", "--noconfirm"],
@@ -329,7 +375,7 @@ impl Plan {
                 .collect();
                 arguments.extend(packages.clone());
                 let mut executable = review.environment.binaries[manager].clone();
-                if !review.environment.root {
+                if manager != "brew" && !review.environment.root {
                     if let Some(sudo) = review.environment.binaries.get("sudo") {
                         arguments.splice(
                             0..0,
@@ -340,6 +386,11 @@ impl Plan {
                         review.blockers.push("System dependencies require root or sudo; no elevation tool was found.".into());
                     }
                 }
+                let source = if manager == "brew" {
+                    "Homebrew formula repositories".into()
+                } else {
+                    format!("Configured {manager} system repositories")
+                };
                 review.operations.insert(
                     0,
                     Operation {
@@ -358,15 +409,17 @@ impl Plan {
                                 }
                             })
                             .collect(),
-                        source: format!("Configured {manager} system repositories"),
+                        source,
                         system_packages: true,
                     },
                 );
             } else {
-                review.blockers.push(
+                review.blockers.push(if review.environment.os == "macos" {
+                    "Install missing system dependencies with Homebrew, then refresh setup.".into()
+                } else {
                     "Install missing system dependencies with your package manager, then refresh."
-                        .into(),
-                );
+                        .to_owned()
+                });
             }
         }
         if let Some(operation) = review.operations.first().filter(|op| {
@@ -592,6 +645,9 @@ impl Executor for NativeExecutor {
                 "NPM_CONFIG_GLOBALCONFIG",
                 empty_npm_config.0.join("installer"),
             )
+            .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+            .env("HOMEBREW_NO_ANALYTICS", "1")
+            .env("HOMEBREW_NO_ENV_HINTS", "1")
             .env("DEBIAN_FRONTEND", "noninteractive")
             .env("CI", "1")
             .env("GROK_BIN_DIR", environment.home.join(".local/bin"))
@@ -793,6 +849,24 @@ mod tests {
             root: false,
         }
     }
+    fn macos_env() -> Environment {
+        Environment {
+            os: "macos".into(),
+            architecture: "aarch64".into(),
+            home: "/private/user".into(),
+            search: vec!["/opt/homebrew/bin".into(), "/usr/bin".into()],
+            binaries: BTreeMap::from([
+                ("brew".into(), "/opt/homebrew/bin/brew".into()),
+                ("curl".into(), "/usr/bin/curl".into()),
+                ("git".into(), "/usr/bin/git".into()),
+                ("tar".into(), "/usr/bin/tar".into()),
+                ("gzip".into(), "/usr/bin/gzip".into()),
+                ("unzip".into(), "/usr/bin/unzip".into()),
+                ("bash".into(), "/bin/bash".into()),
+            ]),
+            root: false,
+        }
+    }
     #[test]
     fn windows_review_never_offers_posix_installers() {
         let mut windows = env();
@@ -843,8 +917,8 @@ mod tests {
         );
     }
     #[test]
-    fn backend_installation_is_optional_on_linux_and_windows() {
-        for os in ["linux", "windows"] {
+    fn backend_installation_is_optional_on_supported_platforms() {
+        for os in ["linux", "windows", "macos"] {
             for installed in [false, true] {
                 let mut environment = env();
                 environment.os = os.into();
@@ -875,7 +949,7 @@ mod tests {
             herdr: false,
             harnesses: vec![],
         };
-        for (os, arch) in [("linux", "riscv64"), ("macos", "aarch64")] {
+        for (os, arch) in [("linux", "riscv64"), ("macos", "riscv64")] {
             let mut e = env();
             e.os = os.into();
             e.architecture = arch.into();
@@ -904,6 +978,121 @@ mod tests {
         .unwrap();
         assert!(plan.review.operations.is_empty());
         assert!(plan.review.blockers.is_empty());
+    }
+    #[test]
+    fn macos_system_tools_use_homebrew_and_node_uses_npm() {
+        let mut environment = macos_env();
+        environment
+            .binaries
+            .insert("node".into(), "/opt/homebrew/bin/node".into());
+        environment
+            .binaries
+            .insert("npm".into(), "/opt/homebrew/bin/npm".into());
+        let plan = Plan::prepare(
+            environment,
+            Selection {
+                tmux: true,
+                herdr: false,
+                harnesses: vec!["codex".into()],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.blockers.is_empty());
+        assert_eq!(plan.review.operations.len(), 2);
+        assert_eq!(
+            plan.review.operations[0].executable,
+            PathBuf::from("/opt/homebrew/bin/brew")
+        );
+        assert_eq!(plan.review.operations[0].arguments, ["install", "tmux"]);
+        assert_eq!(
+            plan.review.operations[1].executable,
+            PathBuf::from("/opt/homebrew/bin/npm")
+        );
+        assert!(
+            plan.review.operations[1]
+                .arguments
+                .windows(2)
+                .any(|pair| pair == ["--prefix", "/private/user/.local"])
+        );
+        assert!(!plan.review.operations.iter().any(|operation| {
+            operation
+                .arguments
+                .iter()
+                .any(|argument| argument == "sudo")
+        }));
+    }
+    #[test]
+    fn macos_brew_installs_node_when_npm_is_absent() {
+        let plan = Plan::prepare(
+            macos_env(),
+            Selection {
+                tmux: false,
+                herdr: false,
+                harnesses: vec!["codex".into()],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.blockers.is_empty());
+        assert_eq!(plan.review.operations.len(), 2);
+        assert_eq!(plan.review.operations[0].arguments, ["install", "node"]);
+        assert_eq!(
+            plan.review.operations[1].executable,
+            PathBuf::from("/opt/homebrew/bin/npm")
+        );
+    }
+    #[test]
+    fn macos_npx_bootstraps_npm_when_only_the_runner_exists() {
+        let mut environment = macos_env();
+        environment.binaries.remove("brew");
+        environment
+            .binaries
+            .insert("npx".into(), "/opt/homebrew/bin/npx".into());
+        let plan = Plan::prepare(
+            environment,
+            Selection {
+                tmux: false,
+                herdr: false,
+                harnesses: vec!["codex".into()],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.blockers.is_empty());
+        assert_eq!(plan.review.operations.len(), 1);
+        assert_eq!(
+            plan.review.operations[0].executable,
+            PathBuf::from("/opt/homebrew/bin/npx")
+        );
+        assert_eq!(
+            &plan.review.operations[0].arguments[..5],
+            ["--yes", "--package", "npm@latest", "npm", "install"]
+        );
+    }
+    #[test]
+    fn macos_without_brew_npm_or_npx_blocks_explicitly() {
+        let mut environment = macos_env();
+        environment.binaries.remove("brew");
+        let plan = Plan::prepare(
+            environment,
+            Selection {
+                tmux: true,
+                herdr: false,
+                harnesses: vec!["codex".into()],
+            },
+        )
+        .unwrap();
+        assert!(plan.review.operations.is_empty());
+        assert!(
+            plan.review
+                .blockers
+                .iter()
+                .any(|message| message.contains("Homebrew"))
+        );
+        assert!(
+            plan.review
+                .blockers
+                .iter()
+                .any(|message| message.contains("Node.js"))
+        );
     }
     #[test]
     fn system_install_uses_exact_argv_and_explicit_elevation() {

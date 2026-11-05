@@ -975,10 +975,7 @@ mod tests {
             let directory = std::env::temp_dir().join(format!(
                 "daedalus-telegram-menu-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&directory.join("fixture"), b"fixture").unwrap();
             Self {
