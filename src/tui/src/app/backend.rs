@@ -1466,7 +1466,7 @@ impl NativeSource {
             // Isolated fixtures keep the procfs reader.
             #[cfg(target_os = "macos")]
             let libproc = self.terminals.proc_root == Path::new("/proc");
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(unix, not(target_os = "macos")))]
             let libproc = false;
             #[cfg(unix)]
             let parent = if libproc {

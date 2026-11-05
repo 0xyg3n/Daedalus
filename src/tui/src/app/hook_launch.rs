@@ -409,13 +409,12 @@ pub fn activate(path: &Path, terminals: &Terminals, now_ms: u64) -> Result<Activ
         if bytes.len() > 8192 {
             return Err("Invalid launch process evidence".into());
         }
-        let start_ticks = std::str::from_utf8(&bytes)
+        std::str::from_utf8(&bytes)
             .ok()
             .and_then(|s| s.rsplit_once(')'))
             .and_then(|(_, s)| s.split_whitespace().nth(19))
-            .and_then(|s| s.parse().ok())
-            .ok_or("Invalid launch process generation")?;
-        start_ticks
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or("Invalid launch process generation")?
     };
     let mut registration = plan.spec.registration.clone();
     registration.harness_process = Some(ProcessIdentity { pid, start_ticks });

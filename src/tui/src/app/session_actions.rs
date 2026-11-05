@@ -405,24 +405,12 @@ mod macos_tests {
             crate::test_support::unique_nanos()
         ));
         fs::create_dir_all(root.join("project")).unwrap();
-        // Apple platform binaries hide their environment; an ad-hoc signed copy does not.
-        let image = root.join("sleep-copy");
-        fs::copy("/bin/sleep", &image).unwrap();
-        for args in [&["--remove-signature"][..], &["-s", "-"][..]] {
-            assert!(
-                std::process::Command::new("/usr/bin/codesign")
-                    .args(args)
-                    .arg(&image)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
+        // Apple platform binaries hide their environment; this test binary does not.
+        let image = std::env::current_exe().unwrap();
         let program = root.join("codex");
         std::os::unix::fs::symlink(&image, &program).unwrap();
         let project = root.join("project").canonicalize().unwrap();
-        let mut child = std::process::Command::new(&program)
-            .arg("30")
+        let mut child = crate::test_support::idle_process(&program)
             .current_dir(&project)
             .env("CODEX_HOME", root.join("profile"))
             .spawn()
@@ -514,7 +502,7 @@ fn foreground_guarded(
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(unix, not(target_os = "macos")))]
             let procfs = true;
             #[cfg(unix)]
             let raw = if procfs {
