@@ -1,9 +1,9 @@
 //! Display-only discovery of terminals not owned by an integrated backend.
 //! Process evidence cannot authorize terminal input, capture, adoption or killing.
 use serde_json::Value;
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use serde_json::json;
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -14,7 +14,7 @@ pub fn collect(proc_root: &Path, managed: &[Value]) -> Result<Vec<Value>, String
     collect_with(proc_root, managed, &settings, &budget)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Debug)]
 struct Process {
     pid: u32,
@@ -30,7 +30,7 @@ struct Process {
     state: char,
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn clean(value: &str) -> String {
     value
         .chars()
@@ -39,7 +39,7 @@ fn clean(value: &str) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn pid(value: &Value) -> Option<u32> {
     value
         .as_u64()
@@ -48,7 +48,7 @@ fn pid(value: &Value) -> Option<u32> {
         .filter(|p| *p > 0)
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn managed_pids(rows: &[Value]) -> BTreeSet<u32> {
     rows.iter()
         .flat_map(|row| {
@@ -63,7 +63,7 @@ fn managed_pids(rows: &[Value]) -> BTreeSet<u32> {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn excluded(mut current: u32, parents: &BTreeMap<u32, u32>, managed: &BTreeSet<u32>) -> bool {
     let mut visited = BTreeSet::new();
     for _ in 0..256 {
@@ -85,7 +85,7 @@ fn excluded(mut current: u32, parents: &BTreeMap<u32, u32>, managed: &BTreeSet<u
     true
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn is_shell(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().trim_end_matches(".exe"),
@@ -105,7 +105,7 @@ fn is_shell(name: &str) -> bool {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn project_with(
     processes: Vec<Process>,
     managed: &[Value],
@@ -287,6 +287,101 @@ pub(crate) fn collect_with(
     project_with(processes, managed, deadline, budget)
 }
 
+/// macOS has no procfs: `libproc` supplies the same identity fields. Only
+/// processes owned by this user are observed; PID reuse between the identity
+/// and display observations is rejected exactly as on Linux.
+#[cfg(target_os = "macos")]
+pub(crate) fn collect_with(
+    proc_root: &Path,
+    managed: &[Value],
+    settings: &crate::app::runtime_settings::Settings,
+    budget: &crate::app::discovery_budget::Budget,
+) -> Result<Vec<Value>, String> {
+    use crate::platform::{process_cwd, process_info, process_list, process_name};
+    use std::time::{Duration, Instant};
+    let deadline = budget
+        .deadline
+        .min(Instant::now() + Duration::from_millis(settings.external_discovery_timeout_ms));
+    let pids = process_list(proc_root);
+    if pids.is_empty() {
+        return Err("Cannot enumerate local terminal processes".into());
+    }
+    let ttys = macos_tty_paths(settings.external_discovery_entry_limit as usize);
+    let uid = unsafe { libc::geteuid() };
+    let mut processes = Vec::new();
+    for (count, number) in pids.into_iter().enumerate() {
+        if count >= settings.external_discovery_entry_limit as usize || Instant::now() >= deadline {
+            return Err("External process discovery entry limit or deadline reached".into());
+        }
+        let Some(info) = process_info(proc_root, number).filter(|i| i.uid == uid) else {
+            continue;
+        };
+        // `e_tdev` is NODEV (all ones) when the process has no controlling terminal.
+        let tty = if info.tty == i64::from(u32::MAX) {
+            0
+        } else {
+            info.tty
+        };
+        let name = info
+            .executable
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .or_else(|| process_name(number))
+            .unwrap_or_default();
+        let mut process = Process {
+            pid: number,
+            parent: info.parent,
+            start: info.start,
+            tty,
+            tty_path: None,
+            group: i64::from(info.pgid),
+            foreground_group: info.foreground,
+            name: clean(&name),
+            executable: None,
+            cwd: None,
+            state: info.state,
+        };
+        if tty != 0 {
+            process.tty_path = ttys.get(&tty).cloned();
+            process.executable = info.executable.map(|p| clean(&p.to_string_lossy()));
+            process.cwd = process_cwd(number).map(|p| clean(&p.to_string_lossy()));
+            let current = process_info(proc_root, number);
+            if current.is_none_or(|c| c.uid != uid || c.start != info.start || c.tty != info.tty) {
+                continue;
+            }
+        }
+        processes.push(process);
+    }
+    if Instant::now() >= deadline {
+        return Err("External process discovery deadline reached".into());
+    }
+    project_with(processes, managed, deadline, budget)
+}
+
+/// Map character-device numbers of `/dev/tty*` nodes to their paths.
+#[cfg(target_os = "macos")]
+fn macos_tty_paths(limit: usize) -> BTreeMap<i64, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let mut map = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/dev") else {
+        return map;
+    };
+    for entry in entries.flatten().take(limit) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|n| n.starts_with("tty")) else {
+            continue;
+        };
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.file_type().is_char_device() {
+            map.insert(meta.rdev() as i64, format!("/dev/{}", clean(name)));
+        }
+    }
+    map
+}
+
 #[cfg(windows)]
 pub(crate) fn collect_with(
     _proc_root: &Path,
@@ -334,7 +429,7 @@ pub(crate) fn collect_with(
     Ok(rows)
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn collect_with(
     _proc_root: &Path,
     _managed: &[Value],
@@ -467,5 +562,31 @@ mod tests {
             )
             .is_empty()
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    #[test]
+    fn enumerates_owned_processes_and_excludes_managed_ancestry() {
+        let me = std::process::id();
+        let rows = collect(Path::new("/proc"), &[json!({"pid": me})]).unwrap();
+        for row in &rows {
+            assert_eq!(row["backend"], "external");
+            assert_ne!(row["pid"], json!(me));
+            assert_eq!(row["controllable"], false);
+            assert!(
+                row["tty"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("/dev/tty"))
+            );
+        }
+    }
+    #[test]
+    fn tty_paths_map_character_devices() {
+        let map = macos_tty_paths(4096);
+        assert!(map.values().all(|p| p.starts_with("/dev/tty")));
+        assert!(!map.is_empty());
     }
 }

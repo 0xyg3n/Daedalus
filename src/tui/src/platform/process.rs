@@ -250,6 +250,53 @@ fn macos_bsd(pid: u32) -> Option<libc::proc_bsdinfo> {
     (read == size).then_some(info)
 }
 
+/// Current working directory of a live macOS process owned by this user.
+/// Display evidence only; `None` when the kernel withholds it.
+#[cfg(target_os = "macos")]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    if pid == 0 {
+        return None;
+    }
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let bytes: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|c| *c as u8)
+        .take_while(|b| *b != 0)
+        .collect();
+    let path = String::from_utf8(bytes).ok()?;
+    (path.starts_with('/') && !path.chars().any(char::is_control)).then(|| PathBuf::from(path))
+}
+
+/// Kernel short command name (`p_comm`, at most 16 bytes) for a macOS process.
+#[cfg(target_os = "macos")]
+pub fn process_name(pid: u32) -> Option<String> {
+    let info = macos_bsd(pid)?;
+    let bytes: Vec<u8> = info
+        .pbi_comm
+        .iter()
+        .map(|c| *c as u8)
+        .take_while(|b| *b != 0)
+        .collect();
+    let name = String::from_utf8(bytes).ok()?;
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_executable(pid: u32) -> Option<PathBuf> {
     let mut bytes = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -442,6 +489,19 @@ mod tests {
                 .and_then(|path| path.file_name().map(|name| !name.is_empty())),
             Some(true)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn current_process_cwd_and_name_are_available() {
+        let pid = std::process::id();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            process_cwd(pid).map(|p| p.canonicalize().unwrap()),
+            Some(cwd)
+        );
+        assert!(process_name(pid).is_some_and(|name| !name.is_empty()));
+        assert!(process_cwd(0).is_none());
     }
 
     #[test]

@@ -46,12 +46,22 @@ pub fn run(args: &[String], output: &mut impl std::io::Write) -> Result<(), Stri
 }
 
 pub fn socket_roots() -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from("/tmp")];
-    for key in ["TMUX_TMPDIR", "XDG_RUNTIME_DIR"] {
-        if let Some(root) = std::env::var_os(key).map(PathBuf::from)
-            && root.is_absolute()
-            && !roots.contains(&root)
-        {
+    let candidates = std::iter::once(PathBuf::from("/tmp")).chain(
+        ["TMUX_TMPDIR", "XDG_RUNTIME_DIR"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(PathBuf::from)),
+    );
+    canonical_roots(candidates)
+}
+
+/// tmux reports its socket through the resolved directory (macOS `/tmp` is
+/// `/private/tmp`). Scanning the same resolved path keeps one server one
+/// endpoint, so the dashboard's own tmux terminal is still recognized.
+fn canonical_roots(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in candidates.into_iter().filter(|root| root.is_absolute()) {
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        if !roots.contains(&root) {
             roots.push(root);
         }
     }
@@ -419,6 +429,23 @@ fn collect_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn socket_roots_resolve_symlinks_and_deduplicate() {
+        let base = std::env::temp_dir().join(format!("dd-socket-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(
+            canonical_roots([base.join("link"), real.clone(), "relative".into()]),
+            vec![real]
+        );
+        let missing = base.join("missing");
+        assert_eq!(canonical_roots([missing.clone()]), vec![missing]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn workers_advance_past_a_slow_endpoint_join_every_job_and_keep_result_order() {
         use std::sync::{

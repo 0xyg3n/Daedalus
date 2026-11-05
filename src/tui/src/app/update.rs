@@ -423,7 +423,22 @@ fn target_bytes(path: &Path) -> Result<Vec<u8>, String> {
 fn review_at(client: &Client, current: &str, executable: &Path) -> Result<UpdateStatus, String> {
     let installed = Version::parse(current)
         .map_err(|_| "Installed version is not semantic versioning compatible")?;
-    let platform = platform()?;
+    // A platform without reviewed release assets is a known state, not a failed
+    // check: report it without a network request so the interface stays quiet.
+    let Ok(platform) = platform() else {
+        return Ok(UpdateStatus {
+            status: "unsupported_platform".into(),
+            current_version: current.into(),
+            latest_version: None,
+            release_url: RELEASES.into(),
+            message: format!(
+                "In-app updates are not published for {} {}; download new releases from {RELEASES}.",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            review: None,
+        });
+    };
     let body = download(client, API, LIMIT)?;
     let Some((release, version, asset, sum)) = select(&body, &installed, platform)? else {
         return Ok(UpdateStatus {
@@ -795,6 +810,19 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    #[test]
+    fn unsupported_platform_reports_status_without_network() {
+        // An unroutable proxy proves no request is attempted.
+        let client = Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let status = review_at(&client, "1.0.0", Path::new("/nonexistent")).unwrap();
+        assert_eq!(status.status, "unsupported_platform");
+        assert!(status.review.is_none());
+        assert!(status.message.contains(RELEASES));
+    }
     fn elf() -> Vec<u8> {
         let mut bytes = vec![0; 64];
         bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
