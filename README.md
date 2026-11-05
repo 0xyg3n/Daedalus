@@ -112,8 +112,8 @@ use POSIX PTYs (Linux and macOS) or Windows ConPTY and are discoverable across
 launch directories.
 Existing [tmux](https://github.com/tmux/tmux) and [Herdr](https://herdr.dev/) sessions
 can also be managed on Linux and Windows, including Herdr sessions inside tmux.
-macOS uses the same inventory path through libproc; live macOS tmux/Herdr
-verification is part of the CI follow-up.
+macOS uses the same inventory path through libproc and runs the same isolated
+tests in CI; live macOS tmux/Herdr sessions have not been verified yet.
 
 **Ctrl+] then D** detaches while leaving the process running. One view controls
 input and size; additional views can watch. Sessions survive closing the UI, not

@@ -18,6 +18,7 @@
 #   DAEDALUS_MACOS_UNIVERSAL=1   build arm64 + x86_64 and lipo them
 #   DAEDALUS_MACOS_BUNDLE_ID=... override the default bundle identifier
 #   DAEDALUS_MACOS_MINIMUM=...   override LSMinimumSystemVersion (default 11.0)
+#   DAEDALUS_MACOS_NOTARY_KEYCHAIN=... keychain holding the notary profile (CI)
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$root/src/tui/Cargo.toml"
@@ -26,6 +27,7 @@ bundle_version="$(printf '%s' "$version" | sed -E 's/^([0-9]+(\.[0-9]+){0,2}).*/
 bundle_id="${DAEDALUS_MACOS_BUNDLE_ID:-io.github.0xyg3n.daedalus}"
 identity="${DAEDALUS_MACOS_IDENTITY:--}"
 notary_profile="${DAEDALUS_MACOS_NOTARY_PROFILE:-}"
+notary_keychain="${DAEDALUS_MACOS_NOTARY_KEYCHAIN:-}"
 minimum="${DAEDALUS_MACOS_MINIMUM:-11.0}"
 universal="${DAEDALUS_MACOS_UNIVERSAL:-0}"
 dist="$root/dist"
@@ -194,7 +196,11 @@ if [[ -n "$notary_profile" ]]; then
     exit 1
   }
   codesign --force --timestamp --sign "$identity" "$dmg"
-  xcrun notarytool submit "$dmg" --keychain-profile "$notary_profile" --wait
+  notary_args=(--keychain-profile "$notary_profile")
+  if [[ -n "$notary_keychain" ]]; then
+    notary_args+=(--keychain "$notary_keychain")
+  fi
+  xcrun notarytool submit "$dmg" "${notary_args[@]}" --wait
   xcrun stapler staple "$dmg"
   xcrun stapler validate "$dmg"
 fi

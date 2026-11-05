@@ -40,9 +40,15 @@ it from a source you trust. The Linux source installer also supports ARM64.
 
 ## macOS install
 
-Release artifacts are `Daedalus-<version>-macos-arm64.dmg` (or a universal DMG).
-Open it, drag `Daedalus.app` to Applications, and start it. The app opens Terminal
-because Daedalus is a terminal interface.
+Release artifacts are `Daedalus-<version>-macos-universal.dmg` (Apple silicon and
+Intel) and thin `daedalus-<version>-aarch64-macos` / `-x86_64-macos` command-line
+executables, each with a `.sha256` file. Open the DMG, drag `Daedalus.app` to
+Applications, and start it. The app opens Terminal because Daedalus is a terminal
+interface. A build that is not notarized needs right-click → Open the first time.
+
+Maintainers can generate a Homebrew cask from the published DMG with
+`./scripts/homebrew-cask.sh`; it installs the app and links its CLI as `daedalus`.
+No public tap is published yet.
 
 For a terminal-first install from a checkout:
 
