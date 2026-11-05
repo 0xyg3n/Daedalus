@@ -57,6 +57,9 @@ pub enum Placement {
     Split,
     Window,
 }
+/// Pause between a native terminal's text and its Enter key.
+const NATIVE_SUBMIT_GAP: std::time::Duration = std::time::Duration::from_millis(150);
+
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -188,8 +191,27 @@ impl Terminals {
         if id.backend == Backend::Native {
             use crate::app::native_terminal as native;
             let result = match action {
+                // Text and Enter are separate writes, like tmux and Herdr: one
+                // burst reads as a paste to agent UIs, so its Enter would not
+                // submit. The pause lets the program take the text first.
                 Action::Send(text) => {
-                    native::input(&id.endpoint, &id.generation, format!("{text}\r").as_bytes())
+                    if native::input(&id.endpoint, &id.generation, text.as_bytes()).is_err() {
+                        return Ok(Receipt::uncertain(
+                            "Input transfer is unconfirmed; inspect the terminal before retrying",
+                        ));
+                    }
+                    std::thread::sleep(NATIVE_SUBMIT_GAP);
+                    if self.verify(saved).is_err() {
+                        return Ok(Receipt::uncertain(
+                            "Terminal changed after input transfer; Enter was not sent",
+                        ));
+                    }
+                    if native::input(&id.endpoint, &id.generation, b"\r").is_err() {
+                        return Ok(Receipt::uncertain(
+                            "Enter submission is unconfirmed; inspect the terminal before retrying",
+                        ));
+                    }
+                    return Ok(Receipt::submitted());
                 }
                 Action::Keys(keys) => {
                     native::input(&id.endpoint, &id.generation, &super::native::keys(&keys)?)

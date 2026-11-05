@@ -403,13 +403,8 @@ pub fn identity(row: &Value) -> Result<TerminalId> {
 }
 #[cfg(unix)]
 pub fn process_start(proc_root: &Path, pid: &str) -> Option<String> {
-    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let value = fs::read_to_string(proc_root.join(pid).join("stat")).ok()?;
-    let (_, fields) = value.rsplit_once(')')?;
-    let start = fields.split_whitespace().nth(19)?;
-    (!start.is_empty() && start.bytes().all(|b| b.is_ascii_digit())).then(|| start.to_owned())
+    let pid = pid.parse::<u32>().ok()?;
+    crate::platform::process_start(proc_root, pid).map(|start| start.to_string())
 }
 /// Shared saved reference producer; display aliases never replace endpoints.
 pub fn reference(row: &Value) -> Result<crate::core::layouts::TerminalRef> {
@@ -944,24 +939,12 @@ mod tests {
     }
     #[test]
     fn tmux_generations_are_exact() {
-        let rows = parse_tmux(
-            &fixture(),
-            crate::test_support::path("/tmp/test.sock"),
-            |pid| Some(format!("{pid}0")),
-        )
-        .unwrap();
+        let socket = crate::test_support::path("/tmp/test.sock");
+        let rows = parse_tmux(&fixture(), socket, |pid| Some(format!("{pid}0"))).unwrap();
         assert_eq!(rows[0]["terminal_id"], "v2:11:110:22:220");
         assert_eq!(rows[0]["agent"], "cursor");
-        assert_eq!(rows[0]["server"], "tmux@%2Ftmp%2Ftest.sock");
-        assert!(
-            parse_tmux(
-                &fixture(),
-                crate::test_support::path("/tmp/test.sock"),
-                |_| None
-            )
-            .unwrap()
-            .is_empty()
-        );
+        assert_eq!(rows[0]["server"], format!("tmux@{}", encoded(socket)));
+        assert!(parse_tmux(&fixture(), socket, |_| None).unwrap().is_empty());
     }
     #[test]
     fn malformed_tmux_is_rejected() {
@@ -1169,10 +1152,7 @@ mod binary_tests {
         let root = std::env::temp_dir().join(format!(
             "dd-bin-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let directory = root.join(".cargo/bin");
         fs::create_dir_all(&directory).unwrap();

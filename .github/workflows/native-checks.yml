@@ -14,9 +14,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2025]
+        os: [ubuntu-24.04, windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    # macOS also builds a second architecture for the universal package.
+    timeout-minutes: ${{ matrix.os == 'macos-15' && 60 || 35 }}
     env:
       CARGO_BUILD_JOBS: 4
       CARGO_TERM_COLOR: always
@@ -70,6 +71,10 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: ./scripts/check.sh
+      - name: macOS checks
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ./scripts/check.sh
       - name: Windows checks including native ConPTY
         if: runner.os == 'Windows'
         shell: pwsh
@@ -102,6 +107,59 @@ jobs:
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             [IO.File]::WriteAllText($_.FullName + '.sha256', "$hash  $($_.Name)`n", [Text.UTF8Encoding]::new($false))
           }
+      # Developer ID signing and notarization need maintainer secrets. They are
+      # never exposed to pull requests from forks, which build ad-hoc packages.
+      - name: macOS signing availability
+        id: signing
+        if: runner.os == 'macOS' && github.event_name == 'push'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        # Publishes only whether a certificate is configured, never its value.
+        run: |
+          if [[ -n "$MACOS_CERTIFICATE_P12" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: macOS signing keychain
+        if: runner.os == 'macOS' && steps.signing.outputs.available == 'true'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/daedalus-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          certificate="$RUNNER_TEMP/daedalus-signing.p12"
+          notary_key="$RUNNER_TEMP/daedalus-notary.p8"
+          trap 'rm -f -- "$certificate" "$notary_key"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "DAEDALUS_MACOS_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          if [[ -n "$MACOS_NOTARY_KEY" ]]; then
+            printf '%s' "$MACOS_NOTARY_KEY" | base64 --decode > "$notary_key"
+            xcrun notarytool store-credentials daedalus-notary --key "$notary_key" \
+              --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER" \
+              --keychain "$keychain"
+            echo "DAEDALUS_MACOS_NOTARY_PROFILE=daedalus-notary" >> "$GITHUB_ENV"
+            echo "DAEDALUS_MACOS_NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          fi
+      - name: macOS universal DMG, update assets and checksums
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          DAEDALUS_MACOS_UNIVERSAL: '1'
+        run: ./scripts/package-macos.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-${{ runner.os }}-${{ github.sha }}

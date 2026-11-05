@@ -411,18 +411,11 @@ mod tests {
     }
     #[test]
     fn native_adapter_renames_fixture_session_and_checks_readback() {
-        use std::{
-            fs,
-            os::unix::fs::PermissionsExt,
-            time::{SystemTime, UNIX_EPOCH},
-        };
+        use std::{fs, os::unix::fs::PermissionsExt};
         let root = std::env::temp_dir().join(format!(
             "daedalus-rename-native-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         fs::create_dir(&root).unwrap();
         let proc = root.join("proc");

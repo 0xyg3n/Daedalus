@@ -742,6 +742,34 @@ impl State {
                 let pid = unsafe { libc::tcgetpgrp(fd) };
                 (pid > 0).then_some(pid as u32)
             });
+            // Display only: the foreground job's directory and short name.
+            #[cfg(target_os = "macos")]
+            if let Some(pid) = self.info.foreground_pid {
+                let root = Path::new("/proc");
+                if crate::platform::process_info(root, pid)
+                    .is_some_and(|info| info.uid == unsafe { libc::geteuid() })
+                {
+                    if let Some(cwd) = crate::platform::process_cwd(pid) {
+                        self.info.cwd = cwd;
+                    }
+                    // Like Linux `comm`, name the program as it was started:
+                    // macOS reports the resolved file, so a versioned binary
+                    // behind a `claude` link would read as `2.1.317`.
+                    let started = crate::platform::process_argv(root, pid)
+                        .and_then(|argv| argv.into_iter().next())
+                        .and_then(|arg| {
+                            Path::new(&arg)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                        });
+                    if let Some(name) = started
+                        .or_else(|| crate::platform::process_name(pid))
+                        .filter(|n| !n.is_empty() && !n.chars().any(char::is_control))
+                    {
+                        self.info.command = name;
+                    }
+                }
+            }
             #[cfg(target_os = "linux")]
             if let Some(pid) = self.info.foreground_pid {
                 use std::os::unix::fs::MetadataExt;
@@ -2163,7 +2191,25 @@ mod tests {
         assert!(capture.ansi.contains("38;2;12;34;56"));
         assert!(capture.session.pid > 0);
         assert!(capture.session.foreground_pid.is_some());
+        // The program as it was started, on every platform (macOS /bin/sh
+        // would otherwise report the shell its launcher runs).
         assert_eq!(capture.session.command, "sh");
+        // The foreground job's directory follows `cd` (Linux /proc, macOS libproc).
+        let target = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let line = format!("cd '{}' && printf 'CWD_%s\\n' MOVED\r", target.display());
+        fixture
+            .call(json!({"op":"input","bytes":STANDARD.encode(line.as_bytes())}))
+            .unwrap();
+        fixture.wait_text("CWD_MOVED");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let cwd = fixture.call(json!({"op":"info"})).unwrap()["cwd"].clone();
+            if cwd == json!(target) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "cwd not tracked: {cwd}");
+            thread::sleep(Duration::from_millis(50));
+        }
         fixture
             .call(json!({"op":"resize","cols":93,"rows":31}))
             .unwrap();

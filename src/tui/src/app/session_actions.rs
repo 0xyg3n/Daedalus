@@ -227,8 +227,114 @@ fn stat_fields(raw: &[u8]) -> Result<Vec<&str>> {
         .take(20)
         .collect())
 }
+/// A harness command line that identifies a conversation (or Pi's managed launch).
 #[cfg(unix)]
+fn session_command(harness: &str, argv: &[String]) -> bool {
+    let managed_pi = harness == "pi"
+        && argv.windows(2).any(|a| a[0] == "--session-dir")
+        && argv.windows(2).any(|a| a[0] == "--extension")
+        && argv
+            .get(1)
+            .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "cli.js"));
+    managed_pi || harnesses::conversation_argv(argv, harness).is_some()
+}
+/// The harness profile from its variable, else `HOME` plus its default profile.
+#[cfg(unix)]
+fn session_profile<'a>(
+    tool: &harnesses::Tool,
+    environment: impl Iterator<Item = &'a [u8]>,
+    guard: &mut MetadataGuard<'_>,
+) -> Result<String> {
+    let (mut profile, mut home) = (None, None);
+    for pair in environment.filter(|p| !p.is_empty()) {
+        guard.entries(1)?;
+        let Some(equal) = pair.iter().position(|b| *b == b'=') else {
+            continue;
+        };
+        if &pair[..equal] == tool.profile_variable.as_bytes() {
+            profile = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
+        } else if &pair[..equal] == b"HOME" {
+            home = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
+        }
+    }
+    Ok(profile
+        .or_else(|| {
+            home.map(|home| {
+                Path::new(&home)
+                    .join(tool.default_profile)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .unwrap_or_default())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn read_process(
+    adapter: &Terminals,
+    pid: &str,
+    harness: &str,
+    guard: &mut MetadataGuard<'_>,
+) -> Result<Option<ProcessEvidence>> {
+    read_process_procfs(adapter, pid, harness, guard)
+}
+/// macOS reads the same evidence through libproc; isolated fixtures keep procfs.
+#[cfg(target_os = "macos")]
+fn read_process(
+    adapter: &Terminals,
+    pid: &str,
+    harness: &str,
+    guard: &mut MetadataGuard<'_>,
+) -> Result<Option<ProcessEvidence>> {
+    use crate::platform::{process_argv, process_cwd, process_environment, process_info};
+    if adapter.proc_root != Path::new("/proc") {
+        return read_process_procfs(adapter, pid, harness, guard);
+    }
+    let number = pid
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or("Invalid foreground process ID")?;
+    guard.processes(1)?;
+    let root = adapter.proc_root.as_path();
+    let Some(info) = process_info(root, number) else {
+        return Ok(None);
+    };
+    let start = info.start.to_string();
+    let Some(argv) = process_argv(root, number) else {
+        return Ok(None);
+    };
+    guard.entries(argv.len())?;
+    let Some(tool) = harnesses::tool(harness) else {
+        return Ok(None);
+    };
+    if !session_command(harness, &argv) {
+        return Ok(None);
+    }
+    guard.check()?;
+    let cwd = process_cwd(number).ok_or("Foreground project directory is unavailable")?;
+    let cwd = cwd
+        .to_str()
+        .ok_or("Project directory is not UTF-8")?
+        .to_owned();
+    guard.byte_work(cwd.len())?;
+    let Some(environment) = process_environment(root, number) else {
+        return Ok(None);
+    };
+    let profile = session_profile(&tool, environment.iter().map(|v| v.as_bytes()), guard)?;
+    if process_info(root, number).map(|after| after.start) != Some(info.start) {
+        return Err("Foreground process changed while reading metadata".into());
+    }
+    guard.check()?;
+    Ok(Some(ProcessEvidence {
+        pid: pid.into(),
+        start,
+        argv,
+        cwd,
+        profile,
+    }))
+}
+#[cfg(unix)]
+fn read_process_procfs(
     adapter: &Terminals,
     pid: &str,
     harness: &str,
@@ -259,13 +365,7 @@ fn read_process(
     let Some(tool) = harnesses::tool(harness) else {
         return Ok(None);
     };
-    let managed_pi = harness == "pi"
-        && argv.windows(2).any(|a| a[0] == "--session-dir")
-        && argv.windows(2).any(|a| a[0] == "--extension")
-        && argv
-            .get(1)
-            .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "cli.js"));
-    if !managed_pi && harnesses::conversation_argv(&argv, harness).is_none() {
+    if !session_command(harness, &argv) {
         return Ok(None);
     }
     guard.check()?;
@@ -276,28 +376,7 @@ fn read_process(
     let Some(raw_env) = guard.process_file_optional(&directory.join("environ"))? else {
         return Ok(None);
     };
-    let (mut profile, mut home) = (None, None);
-    for pair in raw_env.split(|b| *b == 0).filter(|p| !p.is_empty()) {
-        guard.entries(1)?;
-        let Some(equal) = pair.iter().position(|b| *b == b'=') else {
-            continue;
-        };
-        if &pair[..equal] == tool.profile_variable.as_bytes() {
-            profile = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
-        } else if &pair[..equal] == b"HOME" {
-            home = Some(String::from_utf8_lossy(&pair[equal + 1..]).into_owned());
-        }
-    }
-    let profile = profile
-        .or_else(|| {
-            home.map(|home| {
-                Path::new(&home)
-                    .join(tool.default_profile)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-        })
-        .unwrap_or_default();
+    let profile = session_profile(&tool, raw_env.split(|b| *b == 0), guard)?;
     let Some(after) = guard.process_file_optional(&directory.join("stat"))? else {
         return Err("Foreground process disappeared while reading metadata".into());
     };
@@ -312,6 +391,52 @@ fn read_process(
         cwd: cwd.into(),
         profile,
     }))
+}
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    /// A live harness process yields its command, working directory, profile
+    /// and incarnation through libproc.
+    #[test]
+    fn live_session_evidence_is_read_through_libproc() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "dd-session-live-{}-{}",
+            std::process::id(),
+            crate::test_support::unique_nanos()
+        ));
+        fs::create_dir_all(root.join("project")).unwrap();
+        // Apple platform binaries hide their environment; this test binary does not.
+        let image = std::env::current_exe().unwrap();
+        let program = root.join("codex");
+        std::os::unix::fs::symlink(&image, &program).unwrap();
+        let project = root.join("project").canonicalize().unwrap();
+        let mut child = crate::test_support::idle_process(&program)
+            .current_dir(&project)
+            .env("CODEX_HOME", root.join("profile"))
+            .spawn()
+            .unwrap();
+        let adapter = Terminals::default();
+        let pid = child.id().to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let evidence = loop {
+            let mut guard = adapter.metadata_guard().unwrap();
+            if let Some(evidence) = read_process(&adapter, &pid, "codex", &mut guard).unwrap() {
+                break evidence;
+            }
+            assert!(std::time::Instant::now() < deadline, "no session evidence");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let mut guard = adapter.metadata_guard().unwrap();
+        let other = read_process(&adapter, &pid, "claude", &mut guard).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(evidence.argv[0].ends_with("/codex"));
+        assert_eq!(Path::new(&evidence.cwd), project);
+        assert_eq!(Path::new(&evidence.profile), root.join("profile"));
+        assert!(evidence.start.parse::<u64>().unwrap() > 0);
+        assert!(other.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 #[cfg(all(test, unix))]
 fn foreground(adapter: &Terminals, pane: &Value, harness: &str) -> Result<Option<ProcessEvidence>> {
@@ -352,10 +477,41 @@ fn foreground_guarded(
         let pid = field(pane, "pid");
         if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
             pids.push(pid.clone());
+            // macOS: the foreground group leaders on the pane's terminal, by libproc.
+            #[cfg(target_os = "macos")]
+            let procfs = adapter.proc_root != Path::new("/proc");
+            #[cfg(target_os = "macos")]
+            if !procfs {
+                use crate::platform::{process_info, process_list};
+                let root = adapter.proc_root.as_path();
+                guard.processes(1)?;
+                let tty = pid
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|n| process_info(root, n))
+                    .map(|info| info.tty)
+                    .filter(|tty| *tty != 0);
+                if let Some(tty) = tty {
+                    for candidate in process_list(root) {
+                        guard.snapshot_entries(1)?;
+                        if process_info(root, candidate).is_some_and(|info| {
+                            info.tty == tty && i64::from(info.pgid) == info.foreground
+                        }) {
+                            pids.push(candidate.to_string());
+                        }
+                    }
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let procfs = true;
             #[cfg(unix)]
-            if let Some(raw) =
+            let raw = if procfs {
                 guard.process_file_optional(&adapter.proc_root.join(&pid).join("stat"))?
-            {
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            if let Some(raw) = raw {
                 let fields = stat_fields(&raw)?;
                 if let Some(tty) = fields.get(4).filter(|tty| **tty != "0") {
                     let entries = fs::read_dir(&adapter.proc_root)

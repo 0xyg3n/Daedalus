@@ -2457,7 +2457,8 @@ fn part_spans(
     let mut left = room;
     for (i, (part, role)) in parts.iter().enumerate() {
         let (sep, style) = match role.as_str() {
-            "id" => ("", theme.fg(Tone::Faint)),
+            // Identifiers lead most labels; after a name they need a space.
+            "id" => (" ", theme.fg(Tone::Faint)),
             "title" => (" ", theme.fg(Tone::Text).add_modifier(Modifier::BOLD)),
             "harness" => (" ", theme.fg(harness_tone(part))),
             "model" => (" ", theme.fg(Tone::Info)),
@@ -2956,6 +2957,26 @@ mod tests {
     };
     use crate::options;
     use ratatui::{Terminal, backend::TestBackend, style::Color};
+    #[test]
+    fn identifier_parts_lead_tight_and_follow_with_a_space() {
+        let theme = Theme::default();
+        let text = |parts: &[(&str, &str)]| {
+            let parts: Vec<_> = parts
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+            part_spans(&theme, &parts, 80, &|s| s)
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(text(&[("%0", "id"), ("host", "muted")]), "%0 host");
+        assert_eq!(
+            text(&[("PID 7", "id"), ("read only", "muted")]),
+            "PID 7 read only"
+        );
+        assert!(text(&[("zsh", "title"), ("PID 7", "id")]).ends_with("zsh PID 7"));
+    }
 
     fn fixture(theme: Theme) -> Ui {
         let sections = FALLBACK

@@ -960,10 +960,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-memory-config-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let first = Plan::prepare(&root, config.clone()).unwrap();
         assert!(!root.join("hindsight.json").exists());
@@ -1011,10 +1008,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-memory-size-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
+            crate::test_support::unique_nanos(),
         ));
         assert!(
             Plan::prepare(&root, config.clone())
@@ -1047,10 +1041,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-memory-snapshot-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
+            crate::test_support::unique_nanos(),
         ));
         let first = Plan::prepare(&root, config.clone()).unwrap();
         let approval = first.approval();

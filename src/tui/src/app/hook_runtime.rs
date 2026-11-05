@@ -693,7 +693,7 @@ mod metadata_inspection_tests {
 }
 /// A proved Codex binding may refresh process incarnations and the generation
 /// of its already registered pane. It never retargets routes or copies grants.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn persist_codex_binding(
     expected: &Registration,
     next: &Registration,
@@ -881,7 +881,7 @@ fn process_metadata_error(guard: &crate::core::native_metadata::Guard<'_>) -> Er
 }
 #[cfg(unix)]
 impl Verifier for NativeVerifier {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prepare_codex(&mut self, registration: &Registration) -> Result<Option<Registration>> {
         super::codex_hook_binding::prepare(
             registration,
@@ -940,15 +940,21 @@ impl Verifier for NativeVerifier {
                 ));
             }
             metadata.processes(1).map_err(Error::Metadata)?;
-            let bytes = metadata
-                .process_file(&self.terminals.proc_root.join(pid.to_string()).join("stat"))
-                .map_err(|_| process_metadata_error(&metadata))?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
-            let parent = text
-                .rsplit_once(')')
-                .and_then(|(_, s)| s.split_whitespace().nth(1))
-                .and_then(|s| s.parse::<u32>().ok())
-                .ok_or(Error::Identity)?;
+            #[cfg(not(target_os = "macos"))]
+            let parent = {
+                let bytes = metadata
+                    .process_file(&self.terminals.proc_root.join(pid.to_string()).join("stat"))
+                    .map_err(|_| process_metadata_error(&metadata))?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
+                text.rsplit_once(')')
+                    .and_then(|(_, s)| s.split_whitespace().nth(1))
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .ok_or(Error::Identity)?
+            };
+            // macOS has no procfs; libproc reports the same parent link.
+            #[cfg(target_os = "macos")]
+            let parent = crate::platform::parent_pid(&self.terminals.proc_root, pid)
+                .ok_or_else(|| process_metadata_error(&metadata))?;
             if parent == 0 || parent == pid {
                 break;
             }
@@ -1405,16 +1411,13 @@ fn event_key(
 /// Stop always requires a stable assistant boundary or explicit provider ID.
 #[cfg(unix)]
 fn invocation_id() -> Result<String> {
-    let stat = fs::read_to_string("/proc/self/stat").map_err(|_| Error::EventIdentity)?;
-    let start = stat
-        .rsplit_once(')')
-        .and_then(|(_, s)| s.split_whitespace().nth(19))
-        .ok_or(Error::EventIdentity)?;
-    let boot =
-        fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|_| Error::EventIdentity)?;
+    let pid = std::process::id();
+    let start =
+        crate::platform::process_start(Path::new("/proc"), pid).ok_or(Error::EventIdentity)?;
+    let boot = crate::platform::boot_id(Path::new("/proc")).ok_or(Error::EventIdentity)?;
     Ok(format!(
         "invocation-{:x}",
-        Sha256::digest(format!("{}:{}:{}", boot.trim(), std::process::id(), start))
+        Sha256::digest(format!("{}:{}:{}", boot, pid, start))
     ))
 }
 #[cfg(windows)]
@@ -1927,14 +1930,7 @@ fn is_ancestor(pid: u32) -> bool {
 }
 #[cfg(unix)]
 fn parent_pid(pid: u32) -> Option<u32> {
-    let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("PPid:") else {
-            continue;
-        };
-        return rest.trim().parse().ok();
-    }
-    None
+    crate::platform::parent_pid(Path::new("/proc"), pid)
 }
 #[cfg(not(unix))]
 fn is_ancestor(_pid: u32) -> bool {
@@ -1958,16 +1954,12 @@ fn ancestor_harness(harness: Harness) -> Option<ProcessIdentity> {
         if pid <= 1 {
             return None;
         }
-        let cmd = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let first = cmd.split(|byte| *byte == 0).next().unwrap_or_default();
-        let first = String::from_utf8_lossy(first);
-        let name = Path::new(first.as_ref()).file_name()?.to_str()?;
+        let command = crate::platform::process_command(Path::new("/proc"), pid)?;
+        let name = Path::new(&command).file_name()?.to_str()?;
         if name != needle {
             continue;
         }
-        let ticks =
-            crate::adapters::terminals::process_start(Path::new("/proc"), &pid.to_string())?;
-        let start_ticks = ticks.parse().ok()?;
+        let start_ticks = crate::platform::process_start(Path::new("/proc"), pid)?;
         return Some(ProcessIdentity { pid, start_ticks });
     }
     None
@@ -2720,7 +2712,7 @@ mod tests {
         invoke(&f.0, "Stop", "one", &mut FakeClock(1)).unwrap();
         assert_eq!(readiness(&p, 1, 1000).unwrap(), Readiness::Busy);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn codex_bootstrap_requires_open_completed_rollout_and_rechecks_before_reserving() {
         use std::os::unix::fs::symlink;
@@ -4719,10 +4711,15 @@ fn verify_server_image(server: &ServerEmitter, proc_root: &Path) -> Result<PathB
         .map_err(|_| Error::Identity)?;
     let meta = executable.metadata().map_err(|_| Error::Identity)?;
     let process_dir = proc_root.join(server.process.pid.to_string());
-    if fs::metadata(&process_dir)
+    #[cfg(not(target_os = "macos"))]
+    let owner = fs::metadata(&process_dir)
         .map_err(|_| Error::Identity)?
-        .uid()
-        != unsafe { libc::geteuid() }
+        .uid();
+    #[cfg(target_os = "macos")]
+    let owner = crate::platform::process_info(proc_root, server.process.pid)
+        .ok_or(Error::Identity)?
+        .uid;
+    if owner != unsafe { libc::geteuid() }
         || !meta.is_file()
         || meta.mode() & 0o022 != 0
         || meta.mode() & 0o111 == 0
@@ -4736,18 +4733,42 @@ fn verify_server_image(server: &ServerEmitter, proc_root: &Path) -> Result<PathB
     executable
         .read_exact(&mut magic)
         .map_err(|_| Error::Identity)?;
-    if &magic != b"\x7fELF" {
+    if !crate::platform::native_image(&magic) {
         return Err(Error::Invalid(
             "Hook server requires a pinned native executable",
         ));
     }
+    // Linux follows the kernel-held image; macOS asks libproc for the image's
+    // current path, so a replaced or renamed file fails the identity check.
+    #[cfg(not(target_os = "macos"))]
     let live = fs::metadata(process_dir.join("exe")).map_err(|_| Error::Identity)?;
+    #[cfg(target_os = "macos")]
+    let live = fs::metadata(
+        crate::platform::process_executable(proc_root, server.process.pid)
+            .ok_or(Error::Identity)?,
+    )
+    .map_err(|_| Error::Identity)?;
     if live.dev() != server.device || live.ino() != server.inode {
         return Err(Error::Identity);
     }
     Ok(process_dir)
 }
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    verify_server_image(server, proc_root)?;
+    verify_server_incarnation(server, proc_root)
+}
+/// The pinned server process is still the reviewed, live incarnation.
+#[cfg(target_os = "macos")]
+fn verify_server_incarnation(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
+    let info =
+        crate::platform::process_info(proc_root, server.process.pid).ok_or(Error::Identity)?;
+    if matches!(info.state, 'Z' | 'X' | 'T' | 't') || info.start != server.process.start_ticks {
+        return Err(Error::Identity);
+    }
+    Ok(())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result<()> {
     let process_dir = verify_server_image(server, proc_root)?;
     let file = OpenOptions::new()
@@ -4764,7 +4785,7 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     }
     verify_server_stat(server, &bytes)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn verify_server_stat(server: &ServerEmitter, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
@@ -4790,8 +4811,16 @@ pub(crate) fn verify_server_metadata(
 ) -> std::result::Result<(), String> {
     guard.processes(1)?;
     let directory = verify_server_image(server, proc_root).map_err(|e| e.to_string())?;
-    let bytes = guard.process_file(&directory.join("stat"))?;
-    verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let bytes = guard.process_file(&directory.join("stat"))?;
+        verify_server_stat(server, &bytes).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = directory;
+        verify_server_incarnation(server, proc_root).map_err(|e| e.to_string())?;
+    }
     guard.check()
 }
 #[cfg(unix)]
@@ -4840,7 +4869,7 @@ pub fn verify_server_emitter(server: &ServerEmitter, proc_root: &Path) -> Result
     verify_process(&server.process, proc_root)
 }
 /// Linux process incarnation, supplied by trusted setup after launch/discovery.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
     if process.pid == 0 || process.start_ticks == 0 {
         return Err(Error::Identity);
@@ -4859,7 +4888,7 @@ pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()>
     }
     verify_process_stat(process, &bytes)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn verify_process_stat(process: &ProcessIdentity, bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::Identity)?;
     let fields = text
@@ -4883,7 +4912,7 @@ fn verify_process_stat(process: &ProcessIdentity, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn verify_process_metadata(
     process: &ProcessIdentity,
     proc_root: &Path,
@@ -4895,6 +4924,45 @@ pub(crate) fn verify_process_metadata(
     }
     let bytes = guard.process_file(&proc_root.join(process.pid.to_string()).join("stat"))?;
     verify_process_stat(process, &bytes).map_err(|e| e.to_string())?;
+    guard.check()
+}
+/// macOS process incarnation through libproc.
+#[cfg(target_os = "macos")]
+pub fn verify_process(process: &ProcessIdentity, proc_root: &Path) -> Result<()> {
+    if process.pid == 0 || process.start_ticks == 0 {
+        return Err(Error::Identity);
+    }
+    let info = crate::platform::process_info(proc_root, process.pid).ok_or(Error::Identity)?;
+    if info.start != process.start_ticks
+        || info.uid != unsafe { libc::geteuid() }
+        || matches!(info.state, 'Z' | 'T')
+        || info.pgid == 0
+        || info.foreground != i64::from(info.pgid)
+    {
+        return Err(Error::Identity);
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub(crate) fn verify_process_metadata(
+    process: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> std::result::Result<(), String> {
+    guard.processes(1)?;
+    if process.pid == 0 || process.start_ticks == 0 {
+        return Err(Error::Identity.to_string());
+    }
+    let info = crate::platform::process_info(proc_root, process.pid)
+        .ok_or_else(|| Error::Identity.to_string())?;
+    if info.start != process.start_ticks
+        || info.uid != unsafe { libc::geteuid() }
+        || matches!(info.state, 'Z' | 'T')
+        || info.pgid == 0
+        || info.foreground != i64::from(info.pgid)
+    {
+        return Err(Error::Identity.to_string());
+    }
     guard.check()
 }
 #[cfg(windows)]
@@ -5428,7 +5496,7 @@ fn verify_live_session_guarded(
     metadata.check().map_err(Error::Metadata)?;
     Ok(actual)
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn process_tty(
     pid: u32,
     proc_root: &Path,
@@ -5443,6 +5511,17 @@ fn process_tty(
         .and_then(|s| s.rsplit_once(')'))
         .and_then(|(_, s)| s.split_whitespace().nth(4))
         .and_then(|s| s.parse().ok())
+        .ok_or(Error::Identity)
+}
+#[cfg(target_os = "macos")]
+fn process_tty(
+    pid: u32,
+    proc_root: &Path,
+    metadata: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<i64> {
+    metadata.processes(1).map_err(Error::Metadata)?;
+    crate::platform::process_info(proc_root, pid)
+        .map(|info| info.tty)
         .ok_or(Error::Identity)
 }
 

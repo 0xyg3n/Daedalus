@@ -25,6 +25,10 @@ fn private_dashboard_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Resu
     fs::write(path, bytes)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
+/// Upper bound for the interface to show expected output. Generous because
+/// hosted macOS runners start dozens of debug PTY sessions on few cores; a
+/// passing test returns as soon as the text appears.
+const UI_WAIT: Duration = Duration::from_secs(60);
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Ui {
     command: Command,
@@ -91,13 +95,26 @@ impl Ui {
         };
         assert_eq!(
             unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
-                )
+                #[cfg(target_os = "macos")]
+                {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &size as *const libc::winsize as *mut libc::winsize,
+                    )
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    libc::openpty(
+                        &mut master,
+                        &mut slave,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        &size,
+                    )
+                }
             },
             0
         );
@@ -177,8 +194,42 @@ impl Ui {
     fn wait_text(&mut self, text: &str) {
         self.wait_presence(text, true);
     }
+    fn send(&mut self, bytes: &[u8]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut offset = 0;
+        let mut scratch = [0; 16384];
+        while offset < bytes.len() {
+            match self.master.write(&bytes[offset..]) {
+                Ok(0) => panic!("PTY write returned zero"),
+                Ok(count) => offset += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // The child can block writing a large render while the test
+                    // is still writing input. Drain output so both sides proceed.
+                    loop {
+                        match self.master.read(&mut scratch) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                self.raw.extend_from_slice(&scratch[..count]);
+                                self.screen.process(&scratch[..count]);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => (),
+                            Err(error) => panic!("PTY read failed: {error}"),
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "PTY write stalled after {offset} bytes: {}",
+                        self.screen.screen().contents()
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("PTY write failed: {error}"),
+            }
+        }
+    }
     fn wait_presence(&mut self, text: &str, present: bool) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + UI_WAIT;
         let mut bytes = [0; 16384];
         loop {
             match self.master.read(&mut bytes) {
@@ -211,7 +262,7 @@ impl Ui {
     }
     fn quit(&mut self) {
         self.master.write_all(b"q").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + UI_WAIT / 2;
         loop {
             let mut bytes = [0; 16384];
             if let Ok(n) = self.master.read(&mut bytes) {
@@ -272,7 +323,7 @@ fn demo_drag_back_to_anchor_copies_the_current_selection_through_the_real_ui() {
     let mut ui = Ui::start(true);
     ui.wait_text("project-alpha");
     ui.master.write_all(b"]").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + UI_WAIT;
     let (column, row, expected) = loop {
         let needles = [
             "Document the new",
@@ -2595,9 +2646,7 @@ fn hindsight_settings_edit_full_query_and_exact_bank_with_review_and_reopen() {
     select(&mut ui, 3);
     ui.wait_text("bytes of decoded text");
     let query = "x".repeat(8192);
-    ui.master
-        .write_all(format!("\x15\x1b[200~{query}\x1b[201~\r").as_bytes())
-        .unwrap();
+    ui.send(format!("\x15\x1b[200~{query}\x1b[201~\r").as_bytes());
     ui.wait_text("Changes remain in this draft");
     select(&mut ui, 4);
     ui.wait_text("Ctrl+U clears the field.");
@@ -2835,7 +2884,7 @@ fn gateway_editor_prefills_validates_and_preserves_disabled_state_after_reopen()
 #[test]
 fn workspace_native_logos_negotiate_without_splash_and_hide_behind_options() {
     fn wait_raw(ui: &mut Ui, start: usize, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + UI_WAIT;
         while !String::from_utf8_lossy(&ui.raw[start..]).contains(needle) {
             ui.wait_presence("impossible-logo-fixture-marker", false);
             assert!(

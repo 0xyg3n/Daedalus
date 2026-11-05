@@ -292,7 +292,7 @@ mod tests {
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
             let server_emitter = if harness == Harness::Opencode {
                 let server = directory.join("server");
-                fs::write(&server, b"\x7fELF fixture only").unwrap();
+                fs::write(&server, crate::test_support::native_image(b" fixture only")).unwrap();
                 fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
                 std::os::unix::fs::symlink(&server, proc.join("42/exe")).unwrap();
                 Some(

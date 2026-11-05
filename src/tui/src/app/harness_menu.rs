@@ -679,10 +679,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-profile-menu-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let directory = root.join("state");
         crate::core::layouts::write_private(
@@ -808,10 +805,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-gateway-menu-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let token = root.join("token");
         crate::core::layouts::write_private(&token, b"fixture-raw-token").unwrap();

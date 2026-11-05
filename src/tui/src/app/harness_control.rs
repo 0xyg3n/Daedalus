@@ -200,8 +200,11 @@ pub fn prepare(
         .harness_process
         .as_ref()
         .ok_or("No verified harness process")?;
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let executable = terminals.proc_root.join(pid.pid.to_string()).join("exe");
+    #[cfg(target_os = "macos")]
+    let executable = crate::platform::process_executable(&terminals.proc_root, pid.pid)
+        .ok_or("Harness executable unavailable")?;
     #[cfg(windows)]
     let executable = crate::platform::process_metadata(pid.pid)
         .map_err(|_| "Harness executable unavailable")?
@@ -336,10 +339,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "daedalus-control-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();

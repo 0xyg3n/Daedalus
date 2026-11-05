@@ -3,12 +3,15 @@
 use super::telegram_config::{self, ServiceConfig};
 use crate::core::layouts;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+use serde_json::json;
 use std::path::{Path, PathBuf};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::{fs, io::Read};
 #[cfg(unix)]
 use std::{
-    fs::{self, OpenOptions},
-    io::Read,
+    fs::OpenOptions,
     os::unix::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawFd,
@@ -52,7 +55,7 @@ pub struct Observation {
     pub state: &'static str,
     pub process: Option<Record>,
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -76,7 +79,17 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-#[cfg(unix)]
+/// Start time and liveness from libproc; `start_ticks` holds microseconds.
+#[cfg(target_os = "macos")]
+fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
+    let info = crate::platform::process_info(proc_root, pid)
+        .ok_or("Service process evidence unavailable")?;
+    if info.uid != unsafe { libc::geteuid() } {
+        return Err("Service process is owned by another user".into());
+    }
+    Ok((info.start, !matches!(info.state, 'Z' | 'X')))
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     if pid == 0 {
         return Err("Invalid service process".into());
@@ -97,7 +110,44 @@ fn incarnation(proc_root: &Path, pid: u32) -> Result<(u64, bool)> {
     let alive = fields.first().is_some_and(|s| !matches!(*s, "Z" | "X"));
     Ok((ticks, alive))
 }
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn boot(proc_root: &Path) -> Result<String> {
+    let value = crate::platform::boot_id(proc_root).ok_or("Cannot read system boot identity")?;
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("Invalid system boot identity".into());
+    }
+    Ok(value)
+}
+/// The image this process runs, as the kernel reports it, so the recorded and
+/// verified executable come from the same source.
+#[cfg(target_os = "macos")]
+fn executable(proc_root: &Path, pid: u32) -> Result<PathBuf> {
+    crate::platform::process_executable(proc_root, pid)
+        .ok_or_else(|| "Cannot verify service executable".into())
+}
+#[cfg(target_os = "macos")]
+fn arguments(proc_root: &Path, pid: u32) -> Result<Vec<Vec<u8>>> {
+    Ok(crate::platform::process_argv(proc_root, pid)
+        .ok_or("Service process evidence unavailable")?
+        .into_iter()
+        .map(String::into_bytes)
+        .collect())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn executable(proc_root: &Path, pid: u32) -> Result<PathBuf> {
+    fs::read_link(proc_root.join(pid.to_string()).join("exe"))
+        .map_err(|_| "Cannot verify service executable".into())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn arguments(proc_root: &Path, pid: u32) -> Result<Vec<Vec<u8>>> {
+    let bytes = read_bounded(&proc_root.join(pid.to_string()).join("cmdline"))?;
+    Ok(bytes
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
 fn boot(proc_root: &Path) -> Result<String> {
     // boot_id is kernel-owned rather than process-owned.
     let value = fs::read_to_string(proc_root.join("sys/kernel/random/boot_id"))
@@ -117,16 +167,10 @@ fn verify(record: &Record, proc_root: &Path) -> Result<()> {
     if ticks != record.start_ticks || !alive {
         return Err("Service process is no longer live".into());
     }
-    let actual = fs::read_link(proc_root.join(record.pid.to_string()).join("exe"))
-        .map_err(|_| "Cannot verify service executable")?;
-    if actual != record.executable {
+    if executable(proc_root, record.pid)? != record.executable {
         return Err("Service executable changed".into());
     }
-    let bytes = read_bounded(&proc_root.join(record.pid.to_string()).join("cmdline"))?;
-    let args = bytes
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
+    let args = arguments(proc_root, record.pid)?;
     use std::os::unix::ffi::OsStrExt;
     if args.len() != 5
         || args[1] != b"telegram"
@@ -210,139 +254,181 @@ pub(crate) fn inspect_at(directory: &Path, proc_root: &Path) -> Result<Observati
 /// Called by the service itself only while its Owner guards remain held.
 #[cfg(unix)]
 pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<()> {
-    let pid = std::process::id();
-    let proc_root = Path::new("/proc");
-    let (start_ticks, alive) = incarnation(proc_root, pid)?;
-    if !alive {
-        return Err("Service process is not live".into());
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (directory, config, phase);
+        Err("Telegram service supervision is not available on this platform".into())
     }
-    let value = Record {
-        version: 1,
-        pid,
-        start_ticks,
-        boot_id: boot(proc_root)?,
-        executable: std::env::current_exe().map_err(|_| "Cannot inspect service executable")?,
-        directory: directory.into(),
-        instance: config.instance.clone(),
-        bot_id: config.bot_id,
-        phase,
-    };
-    layouts::write_private(
-        &directory.join(STATE),
-        &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
-    )
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let pid = std::process::id();
+        let proc_root = Path::new("/proc");
+        let (start_ticks, alive) = incarnation(proc_root, pid)?;
+        if !alive {
+            return Err("Service process is not live".into());
+        }
+        let value = Record {
+            version: 1,
+            pid,
+            start_ticks,
+            boot_id: boot(proc_root)?,
+            executable: executable(proc_root, pid)
+                .map_err(|_| "Cannot inspect service executable")?,
+            directory: directory.into(),
+            instance: config.instance.clone(),
+            bot_id: config.bot_id,
+            phase,
+        };
+        layouts::write_private(
+            &directory.join(STATE),
+            &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
+        )
+    }
 }
 #[cfg(unix)]
 pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    if expected.directory != directory {
-        return Err("Stop request belongs to another instance".into());
-    }
-    let observed = inspect(directory)?;
-    if observed.process.as_ref() != Some(expected) {
-        return Err("Service changed; review the stop request again".into());
-    }
-    // Pin the kernel process before the final incarnation check: never signal a
-    // recycled PID. Unsupported kernels fail closed rather than using kill(pid).
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) };
-    if raw < 0 {
-        return Err("Cannot pin service process for stop".into());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
-    verify(expected, Path::new("/proc"))?;
-    if !held(directory)? {
-        return Err("Service already released ownership".into());
-    }
-    if unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            libc::SIGTERM,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    } < 0
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        return Err("Service stop was not accepted by the kernel".into());
+        let _ = (directory, expected);
+        Err("Telegram service supervision is not available on this platform".into())
     }
-    Ok(
-        json!({"state":"submitted","operation":"stop","message":"Stop requested. Running state remains observed until the process exits."}),
-    )
+    // macOS has no pidfd, and kill(pid) could reach a recycled PID. The service
+    // instead consumes a private request naming its exact incarnation.
+    #[cfg(target_os = "macos")]
+    {
+        if expected.directory != directory || inspect(directory)?.process.as_ref() != Some(expected)
+        {
+            return Err("Service changed; review the stop request again".into());
+        }
+        verify(expected, Path::new("/proc"))?;
+        if !held(directory)? {
+            return Err("Service already released ownership".into());
+        }
+        write_stop_request(directory, expected)?;
+        Ok(
+            json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Running state remains observed until the service exits."}),
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        if expected.directory != directory {
+            return Err("Stop request belongs to another instance".into());
+        }
+        let observed = inspect(directory)?;
+        if observed.process.as_ref() != Some(expected) {
+            return Err("Service changed; review the stop request again".into());
+        }
+        // Pin the kernel process before the final incarnation check: never signal a
+        // recycled PID. Unsupported kernels fail closed rather than using kill(pid).
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) };
+        if raw < 0 {
+            return Err("Cannot pin service process for stop".into());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        verify(expected, Path::new("/proc"))?;
+        if !held(directory)? {
+            return Err("Service already released ownership".into());
+        }
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                libc::SIGTERM,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            return Err("Service stop was not accepted by the kernel".into());
+        }
+        Ok(
+            json!({"state":"submitted","operation":"stop","message":"Stop requested. Running state remains observed until the process exits."}),
+        )
+    }
 }
 #[cfg(unix)]
 pub fn start(directory: &Path) -> Result<Value> {
-    use std::os::unix::process::CommandExt;
-    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
-    config.read_token()?;
-    config.check_registrations()?;
-    super::cutover::activation_check(directory)?;
-    if inspect(directory)?.state != "stopped" {
-        return Err("Service already owns or may be starting for this instance".into());
-    }
-    let path = directory.join("telegram-service.log");
-    layouts::check_path(&path)?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|_| "Cannot open private service log")?;
-    let meta = log.metadata().map_err(|_| "Cannot inspect service log")?;
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o077 != 0
-        || meta.nlink() != 1
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        return Err("Service log must be a private owned regular file".into());
+        let _ = directory;
+        Err("Telegram service supervision is not available on this platform".into())
     }
-    let mut command = std::process::Command::new(
-        std::env::current_exe().map_err(|_| "Cannot locate native service executable")?,
-    );
-    command
-        .args(["telegram", "serve", "--config-dir"])
-        .arg(directory)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
-        .stderr(log);
-    // Only generic tool-discovery/session environment is inherited. Bot tokens
-    // and account secrets are read from private files by their owning adapter.
-    command.env_clear();
-    for key in [
-        "HOME",
-        "PATH",
-        "USER",
-        "LANG",
-        "LC_ALL",
-        "XDG_RUNTIME_DIR",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "TMUX_TMPDIR",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::process::CommandExt;
+        let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+        config.read_token()?;
+        config.check_registrations()?;
+        super::cutover::activation_check(directory)?;
+        if inspect(directory)?.state != "stopped" {
+            return Err("Service already owns or may be starting for this instance".into());
         }
-    }
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
+        let path = directory.join("telegram-service.log");
+        layouts::check_path(&path)?;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(|_| "Cannot open private service log")?;
+        let meta = log.metadata().map_err(|_| "Cannot inspect service log")?;
+        if !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0
+            || meta.nlink() != 1
+        {
+            return Err("Service log must be a private owned regular file".into());
+        }
+        let mut command = std::process::Command::new(
+            std::env::current_exe().map_err(|_| "Cannot locate native service executable")?,
+        );
+        command
+            .args(["telegram", "serve", "--config-dir"])
+            .arg(directory)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().map_err(|_| "Cannot attach service log")?)
+            .stderr(log);
+        // Only generic tool-discovery/session environment is inherited. Bot tokens
+        // and account secrets are read from private files by their owning adapter.
+        command.env_clear();
+        for key in [
+            "HOME",
+            "PATH",
+            "USER",
+            "LANG",
+            "LC_ALL",
+            "XDG_RUNTIME_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "TMUX_TMPDIR",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
             }
+        }
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|_| "Cannot start native Telegram service")?;
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let _ = child.wait();
         });
+        Ok(
+            json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested. Service ownership and transport identity are checked separately."}),
+        )
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Cannot start native Telegram service")?;
-    let pid = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(
-        json!({"state":"submitted","operation":"start","pid":pid,"message":"Start requested. Service ownership and transport identity are checked separately."}),
-    )
 }
 
 #[cfg(windows)]
@@ -408,7 +494,7 @@ pub fn record(directory: &Path, config: &ServiceConfig, phase: Phase) -> Result<
         &serde_json::to_vec(&value).map_err(|_| "Cannot encode service state")?,
     )
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StopRequest {
@@ -431,7 +517,7 @@ pub fn stop(directory: &Path, expected: &Record) -> Result<Value> {
         json!({"state":"submitted","operation":"stop","message":"Cooperative stop requested. Ownership remains observed until shutdown finishes."}),
     )
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn write_stop_request(directory: &Path, expected: &Record) -> Result<()> {
     let request = StopRequest {
         pid: expected.pid,
@@ -628,9 +714,31 @@ fn confirm_same_process(record: &Record) -> Result<()> {
     }
     Ok(())
 }
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn stop_requested(_: &Path) -> Result<bool> {
     Ok(false)
+}
+/// Only a request naming this exact process incarnation and instance stops it.
+#[cfg(target_os = "macos")]
+pub fn stop_requested(directory: &Path) -> Result<bool> {
+    let path = directory.join("telegram-stop.json");
+    let Some(bytes) = telegram_config::read_private(&path, 8192)? else {
+        return Ok(false);
+    };
+    let request: StopRequest =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid private stop request")?;
+    let pid = std::process::id();
+    let (start, _) = incarnation(Path::new("/proc"), pid)?;
+    let config = ServiceConfig::load(&directory.join("telegram-service.json"))?;
+    let matches = request.pid == pid
+        && request.start_ticks == start
+        && request.directory == directory
+        && request.instance == config.instance;
+    // Stale requests remain inert evidence. A subsequent reviewed stop replaces them.
+    if matches {
+        std::fs::remove_file(path).map_err(|_| "Cannot consume stop request")?;
+    }
+    Ok(matches)
 }
 #[cfg(windows)]
 pub fn stop_requested(directory: &Path) -> Result<bool> {
@@ -832,10 +940,7 @@ mod windows_tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-supervisor-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&directory).unwrap();
         let global = directory.join("owners");
@@ -874,20 +979,20 @@ mod windows_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::{fs, os::unix::fs::symlink};
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            // macOS clocks tick in microseconds; parallel tests need a counter.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "daedalus-supervisor-{}-{}",
+                "daedalus-supervisor-{}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&root.join("fixture"), b"fixture").unwrap();
             Self(root)
@@ -913,6 +1018,65 @@ mod tests {
         assert_eq!(inspect(&fixture.0).unwrap().state, "starting");
         drop(owner);
         assert_eq!(inspect(&fixture.0).unwrap().state, "stopped");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cooperative_stop_request_names_one_exact_incarnation() {
+        let fixture = Fixture::new();
+        let directory = &fixture.0;
+        let config = ServiceConfig {
+            runtime: Default::default(),
+            version: 1,
+            instance: "fixture".into(),
+            bot_id: 123,
+            token_file: directory.join("token"),
+            grants: vec![],
+            listen_chats: Default::default(),
+            registrations: vec![],
+            hook_bindings: vec![],
+        };
+        layouts::write_private(
+            &directory.join("telegram-service.json"),
+            &serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let pid = std::process::id();
+        let (start, alive) = incarnation(Path::new("/proc"), pid).unwrap();
+        assert!(alive);
+        let mut record = Record {
+            version: 1,
+            pid,
+            start_ticks: start + 1,
+            boot_id: boot(Path::new("/proc")).unwrap(),
+            executable: executable(Path::new("/proc"), pid).unwrap(),
+            directory: directory.clone(),
+            instance: "fixture".into(),
+            bot_id: 123,
+            phase: Phase::Running,
+        };
+        // Without a live owner nothing is stopped and no request is written.
+        assert!(stop(directory, &record).is_err());
+        assert!(!directory.join("telegram-stop.json").exists());
+        // A request for another incarnation is inert and kept as evidence.
+        write_stop_request(directory, &record).unwrap();
+        assert!(!stop_requested(directory).unwrap());
+        assert!(directory.join("telegram-stop.json").exists());
+        record.start_ticks = start;
+        write_stop_request(directory, &record).unwrap();
+        assert!(stop_requested(directory).unwrap());
+        assert!(!stop_requested(directory).unwrap());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recorded_executable_matches_the_verified_image() {
+        let pid = std::process::id();
+        let image = executable(Path::new("/proc"), pid).unwrap();
+        assert!(image.is_absolute());
+        assert_eq!(
+            fs::canonicalize(&image).unwrap(),
+            fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+        assert!(!arguments(Path::new("/proc"), pid).unwrap().is_empty());
     }
     #[test]
     fn process_evidence_rejects_reused_pid_and_wrong_command() {

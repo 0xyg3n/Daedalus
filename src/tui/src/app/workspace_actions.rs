@@ -867,9 +867,9 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(directory.join("proc/18")).unwrap();
-        fs::copy(
-            directory.join("proc/17/stat"),
+        fs::write(
             directory.join("proc/18/stat"),
+            format!("18 (sh) {}", vec!["1"; 20].join(" ")),
         )
         .unwrap();
         let row = [

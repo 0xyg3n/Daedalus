@@ -2975,10 +2975,7 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = crate::test_support::unique_nanos();
         let directory = std::env::temp_dir().join(format!(
             "daedalus-menu-sockets-{}-{nonce}",
             std::process::id()

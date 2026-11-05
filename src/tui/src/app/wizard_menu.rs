@@ -143,6 +143,10 @@ impl Menu {
         self.frame(seq, "input", title, json!({"secret":false}), stage)
     }
     fn tools(&mut self, seq: &mut u64, spec: Spec) -> Result<Outcome> {
+        self.tools_at(seq, spec, None)
+    }
+    /// `focus` keeps the cursor on the harness just toggled.
+    fn tools_at(&mut self, seq: &mut u64, spec: Spec, focus: Option<&str>) -> Result<Outcome> {
         let mut options = HARNESSES
             .into_iter()
             .map(|h| {
@@ -170,11 +174,16 @@ impl Menu {
             "Continue",
             "Review backends and missing dependencies next."
         ]));
-        self.choose(
+        let description = if matches!(spec.mode, Mode::Fresh { .. }) {
+            "Installed harnesses are suggested for this fresh setup. Review or deselect them before saving. Sign-in remains inside each harness."
+        } else {
+            "Saved tool selections are preserved. Detection shows what is installed without selecting extra tools. Saved profiles and gateway selection are retained; sign-in remains inside each harness."
+        };
+        self.frame(
             seq,
+            "choose",
             "Detected harnesses",
-            json!(options),
-            if matches!(spec.mode, Mode::Fresh { .. }) { "Installed harnesses are suggested for this fresh setup. Review or deselect them before saving. Sign-in remains inside each harness." } else { "Saved tool selections are preserved. Detection shows what is installed without selecting extra tools. Saved profiles and gateway selection are retained; sign-in remains inside each harness." },
+            json!({"options":options,"description":description,"focus":focus}),
             Stage::Tools(spec),
         )
     }
@@ -472,7 +481,7 @@ impl Menu {
                     } else {
                         spec.selection.harnesses.push(text.into());
                     }
-                    self.tools(seq, spec)
+                    self.tools_at(seq, spec, Some(text))
                 }
             }
             Stage::Backends(mut spec) => {
@@ -792,7 +801,10 @@ mod tests {
             .find(|r| r[0] == "codex")
             .unwrap();
         assert!(codex[2].as_str().unwrap().contains("Selected"));
-        reply(&mut menu, &mut source, &mut seq, json!("codex")).unwrap();
+        assert!(choice.frames[0]["focus"].is_null());
+        // A toggle re-sends the list with the cursor kept on the toggled row.
+        let toggled = reply(&mut menu, &mut source, &mut seq, json!("codex")).unwrap();
+        assert_eq!(toggled.frames[0]["focus"], "codex");
         reply(&mut menu, &mut source, &mut seq, json!("done")).unwrap();
         reply(&mut menu, &mut source, &mut seq, json!("existing")).unwrap();
         assert!(source.specs[0].selection.harnesses.is_empty());

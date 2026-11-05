@@ -448,8 +448,79 @@ fn local_opencode_server_budgeted(
     select_local_server(servers)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    local_opencode_server_procfs(ui, proc_root, guard)
+}
+/// macOS: the same rules through libproc. Isolated fixtures keep procfs.
+#[cfg(target_os = "macos")]
+fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    use crate::platform::{child_pids, process_argv, process_executable, process_info};
+    if proc_root != Path::new("/proc") {
+        return local_opencode_server_procfs(ui, proc_root, guard);
+    }
+    guard.processes(1)?;
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
+    let executable = process_executable(proc_root, ui.pid)
+        .and_then(|path| fs::canonicalize(path).ok())
+        .ok_or("OpenCode UI executable disappeared")?;
+    let children =
+        child_pids(proc_root, ui.pid, 4096).ok_or("Cannot list OpenCode child processes")?;
+    let mut servers = Vec::new();
+    let mut seen = std::collections::BTreeSet::from([ui.pid]);
+    for pid in children {
+        guard.snapshot_entries(1)?;
+        guard.processes(1)?;
+        if !seen.insert(pid) {
+            return Err("OpenCode child process list is ambiguous".into());
+        }
+        if process_executable(proc_root, pid)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .as_ref()
+            != Some(&executable)
+        {
+            continue;
+        }
+        let Some(args) = process_argv(proc_root, pid) else {
+            continue;
+        };
+        if !args
+            .windows(2)
+            .any(|a| a[0] == "serve" && a[1] == "--service")
+        {
+            continue;
+        }
+        let info = process_info(proc_root, pid).ok_or("OpenCode server generation unavailable")?;
+        if info.parent != ui.pid {
+            return Err("OpenCode server ancestry changed during discovery".into());
+        }
+        guard.check()?;
+        servers.push(hook_runtime::capture_server_metadata(
+            ProcessIdentity {
+                pid,
+                start_ticks: info.start,
+            },
+            &executable,
+            proc_root,
+            guard,
+        )?);
+        guard.check()?;
+    }
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
+    select_local_server(servers)
+}
+#[cfg(unix)]
+fn local_opencode_server_procfs(
     ui: &ProcessIdentity,
     proc_root: &Path,
     guard: &mut crate::core::native_metadata::Guard<'_>,
@@ -535,6 +606,7 @@ const NO_LOCAL_SERVER: &str = "No directly owned OpenCode server was found. Open
 /// a previously reviewed emitter for this exact terminal generation, never an
 /// arbitrary process with the same executable name or the latest saved session.
 #[cfg(all(test, unix))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn reconnect_opencode_server(
     directory: &Path,
     terminal: &TerminalId,
@@ -566,8 +638,8 @@ fn reconnect_opencode_server_budgeted(
         .map_err(|_| "OpenCode UI disappeared")?
         .executable;
     #[cfg(unix)]
-    let executable = fs::read_link(proc_root.join(ui.pid.to_string()).join("exe"))
-        .map_err(|_| "OpenCode UI disappeared")?;
+    let executable =
+        crate::platform::process_executable(proc_root, ui.pid).ok_or("OpenCode UI disappeared")?;
     let entries = fs::read_dir(directory.join("hooks")).map_err(|_| NO_LOCAL_SERVER)?;
     let mut servers = Vec::new();
     for entry in entries {
@@ -1516,6 +1588,86 @@ pub fn rollback(receipt: &Receipt) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    /// A UI leading its terminal's foreground group owns one `serve --service`
+    /// child with the same executable; libproc finds and pins exactly that one.
+    #[test]
+    fn local_server_is_found_through_libproc() {
+        let (mut primary, mut secondary) = (0, 0);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut primary,
+                    &mut secondary,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut command = std::process::Command::new("/bin/bash");
+        command.args([
+            "-c",
+            "/bin/bash -c 'sleep 30; :' serve --service & /bin/bash -c 'sleep 30; :' other & wait",
+        ]);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(secondary, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for fd in 0..3 {
+                    libc::dup2(secondary, fd);
+                }
+                Ok(())
+            });
+        }
+        let mut ui = command.spawn().unwrap();
+        unsafe { libc::close(secondary) };
+        let root = Path::new("/proc");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let servers = |pid| {
+            crate::platform::child_pids(root, pid, 64)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|child| {
+                    crate::platform::process_argv(root, *child)
+                        .is_some_and(|argv| argv.iter().any(|a| a == "--service"))
+                })
+                .count()
+        };
+        while servers(ui.id()) != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server child not started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let identity = ProcessIdentity {
+            pid: ui.id(),
+            start_ticks: crate::platform::process_info(root, ui.id()).unwrap().start,
+        };
+        let found = local_opencode_server(&identity, root);
+        let stale = local_opencode_server(
+            &ProcessIdentity {
+                pid: ui.id(),
+                start_ticks: identity.start_ticks + 1,
+            },
+            root,
+        );
+        unsafe { libc::killpg(ui.id() as libc::pid_t, libc::SIGKILL) };
+        ui.wait().unwrap();
+        unsafe { libc::close(primary) };
+        let server = found.unwrap();
+        assert_ne!(server.process.pid, ui.id());
+        assert_eq!(server.executable, Path::new("/bin/bash"));
+        assert!(stale.is_err());
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1540,12 +1692,15 @@ mod tests {
         assert!(select_local_server(vec![server.clone(), server.clone()]).is_err());
         assert_eq!(select_local_server(vec![server.clone()]).unwrap(), server);
     }
+    // This fixture asserts Linux /proc entry/file budget accounting; macOS uses
+    // libproc for the same identity checks and does not consume those file reads.
+    #[cfg(target_os = "linux")]
     #[test]
     fn guided_opencode_server_pins_native_local_child_and_rejects_other_commands() {
         let f = Fixture::new();
         let proc = &f.terminals.proc_root;
         let executable = f.dir.join("opencode");
-        fs::write(&executable, b"\x7fELFfixture").unwrap();
+        fs::write(&executable, crate::test_support::native_image(b"fixture")).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(proc.join("42/task/42")).unwrap();
         fs::write(proc.join("42/task/42/children"), b"43").unwrap();
@@ -2170,7 +2325,11 @@ handlers.session_start({{}},{{sessionManager:{{getSessionId:()=> 'other'}}}});
         ];
         registration.transcript = None;
         let server_file = f.dir.join("opencode-server");
-        fs::write(&server_file, b"\x7fELF fixture only").unwrap();
+        fs::write(
+            &server_file,
+            crate::test_support::native_image(b" fixture only"),
+        )
+        .unwrap();
         fs::set_permissions(&server_file, fs::Permissions::from_mode(0o700)).unwrap();
         let server_dir = f.terminals.proc_root.join("333");
         fs::create_dir(&server_dir).unwrap();
@@ -2363,7 +2522,7 @@ if(disposed!==3)throw new Error('hook cleanup missing');
             "UI ancestry is not server authorization"
         );
         let other = f.dir.join("other-server");
-        fs::write(&other, b"\x7fELF other").unwrap();
+        fs::write(&other, crate::test_support::native_image(b" other")).unwrap();
         fs::remove_file(server_dir.join("exe")).unwrap();
         std::os::unix::fs::symlink(other, server_dir.join("exe")).unwrap();
         assert!(hook_runtime::verify_live_session(&registration, &f.terminals).is_err());
@@ -2387,7 +2546,11 @@ if(disposed!==3)throw new Error('hook cleanup missing');
                 .join(format!("{}.jsonl", registration.scope.conversation)),
         );
         let native = f.dir.join("native-provider");
-        fs::write(&native, b"\x7fELF isolated fixture, never executed").unwrap();
+        fs::write(
+            &native,
+            crate::test_support::native_image(b" isolated fixture, never executed"),
+        )
+        .unwrap();
         fs::set_permissions(&native, fs::Permissions::from_mode(0o700)).unwrap();
         let pid = std::process::id();
         let process_dir = f.terminals.proc_root.join(pid.to_string());
@@ -2761,7 +2924,11 @@ esac
         fs::write(&process, "malformed").unwrap();
         assert!(launch::activate(&path, &f.terminals, 1001).is_err());
         assert!(!path.with_extension("claimed").exists());
-        fs::write(&plan.spec.native_binary, b"\x7fELF changed native binary").unwrap();
+        fs::write(
+            &plan.spec.native_binary,
+            crate::test_support::native_image(b" changed native binary"),
+        )
+        .unwrap();
         assert!(launch::activate(&path, &f.terminals, 1001).is_err());
         assert!(!plan.spec.registration.path().exists());
         assert!(!plan.plugin().exists());
@@ -3173,10 +3340,7 @@ mod windows_server_tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-win-launcher-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let local = root.join("local");
         let launcher = local.join("Daedalus/bin/daedalus.exe");
@@ -3242,10 +3406,7 @@ mod windows_server_tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-hook-service-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&directory).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())

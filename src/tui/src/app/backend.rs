@@ -1462,8 +1462,22 @@ impl NativeSource {
             if !ancestors.insert(pid.to_string()) {
                 return Err("Process ancestry has cycles".into());
             }
+            // macOS has no procfs; libproc reports the same parent link.
+            // Isolated fixtures keep the procfs reader.
+            #[cfg(target_os = "macos")]
+            let libproc = self.terminals.proc_root == Path::new("/proc");
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let libproc = false;
             #[cfg(unix)]
-            let parent = {
+            let parent = if libproc {
+                guard.processes(1)?;
+                let result = crate::platform::parent_pid(&self.terminals.proc_root, pid);
+                guard.check()?;
+                match result {
+                    Some(parent) => parent,
+                    None => break,
+                }
+            } else {
                 guard.processes(1)?;
                 let result = guard.process_file_optional(
                     &self.terminals.proc_root.join(pid.to_string()).join("stat"),
@@ -1927,7 +1941,18 @@ impl Source for NativeSource {
                 .ok_or("Native process evidence missing")?;
             #[cfg(unix)]
             {
-                let running=std::fs::metadata(self.terminals.proc_root.join(pid).join("exe")).map_err(|_|"Cannot verify running native executable; restart the harness before hook installation")?;
+                // Linux follows the kernel-held image; macOS asks libproc for its path.
+                #[cfg(not(target_os = "macos"))]
+                let image = self.terminals.proc_root.join(pid).join("exe");
+                #[cfg(target_os = "macos")]
+                let image = pid
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|pid| {
+                        crate::platform::process_executable(&self.terminals.proc_root, pid)
+                    })
+                    .unwrap_or_default();
+                let running=std::fs::metadata(image).map_err(|_|"Cannot verify running native executable; restart the harness before hook installation")?;
                 let installed =
                     std::fs::metadata(&binary).map_err(|_| "Native executable disappeared")?;
                 if running.dev() != installed.dev() || running.ino() != installed.ino() {
@@ -3756,16 +3781,41 @@ mod tests {
                 .contains(&terminals::identity(&pane).unwrap())
         );
     }
+    /// A dashboard running inside a native terminal recognizes that terminal
+    /// through live macOS ancestry, so it never attaches to itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_macos_ancestry_marks_the_dashboards_own_terminal() {
+        let parent = crate::platform::parent_pid(Path::new("/proc"), std::process::id()).unwrap();
+        let own = json!({"backend":"native","session":"own","pane_id":"own","terminal_id":"generation","pid":parent.to_string()});
+        let other = json!({"backend":"native","session":"other","pane_id":"other","terminal_id":"generation","pid":"999999"});
+        let source = NativeSource {
+            directory: std::env::temp_dir(),
+            terminals: Terminals::default(),
+            last_snapshot: json!({"panes":[own.clone(), other.clone()]}),
+            usage_recorder: Default::default(),
+        };
+        let context = source
+            .attach_context(&BTreeMap::new(), String::new())
+            .unwrap();
+        assert!(
+            context
+                .own_terminals
+                .contains(&terminals::identity(&own).unwrap())
+        );
+        assert!(
+            !context
+                .own_terminals
+                .contains(&terminals::identity(&other).unwrap())
+        );
+    }
     #[test]
     fn finish_local_setup_enables_verified_attach_and_preserves_existing_settings() {
         use std::os::unix::fs::PermissionsExt;
         let directory = std::env::temp_dir().join(format!(
             "daedalus-finish-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         std::fs::create_dir(&directory).unwrap();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
@@ -3819,10 +3869,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-first-run-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let mut source = NativeSource {
             directory: directory.clone(),
@@ -3852,10 +3899,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-switch-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let config =
             ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();
