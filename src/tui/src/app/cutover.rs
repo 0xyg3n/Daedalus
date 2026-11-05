@@ -1452,27 +1452,33 @@ mod macos_tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let result = legacy_processes_absent(&source, Path::new("/proc"));
+            // Whether macOS exposed the scope; some releases hide it for Apple binaries.
+            let scope_visible =
+                crate::platform::process_environment(Path::new("/proc"), child.id())
+                    .is_some_and(|env| env.iter().any(|v| v.starts_with("CONFIG_DIR=")));
             child.kill().unwrap();
             child.wait().unwrap();
-            result
+            (result, scope_visible)
         };
         assert!(
             run(&program, Some(&source))
+                .0
                 .unwrap_err()
                 .contains("original supervisor")
         );
         assert!(
             run(&program, None)
+                .0
                 .unwrap_err()
                 .contains("original supervisor")
         );
-        run(&program, Some(&other)).unwrap();
-        // A hidden environment is no evidence of another scope: fail closed.
-        assert!(
-            run(&platform, Some(&other))
-                .unwrap_err()
-                .contains("original supervisor")
-        );
+        run(&program, Some(&other)).0.unwrap();
+        // An Apple platform binary's environment may be hidden. Hidden is no
+        // evidence of another scope: fail closed; a visible scope is honored.
+        match run(&platform, Some(&other)) {
+            (result, true) => result.unwrap(),
+            (result, false) => assert!(result.unwrap_err().contains("original supervisor")),
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

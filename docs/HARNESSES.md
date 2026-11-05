@@ -116,9 +116,10 @@ The same backend provides:
 - OpenCode guided local-server enrollment: the server is the one direct child
   of the verified UI with the same executable and `serve --service`, found through
   `proc_listchildpids`. Tested with a live process tree, not a live OpenCode.
-- Legacy cutover process checks. macOS hides the environment of Apple platform
-  binaries; a matching legacy process whose `CONFIG_DIR` cannot be read counts as
-  belonging to the instance and blocks cutover until its supervisor stops it.
+- Legacy cutover process checks. Some macOS releases hide the environment of
+  Apple platform binaries; a matching legacy process whose `CONFIG_DIR` cannot be
+  read counts as belonging to the instance and blocks cutover until its
+  supervisor stops it.
 - In-app updates for command-line installs (`daedalus-<version>-<arch>-macos`).
   `Daedalus.app` updates through a newer DMG.
 
