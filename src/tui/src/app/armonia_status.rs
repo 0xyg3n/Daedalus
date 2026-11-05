@@ -314,10 +314,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "daedalus-armonia-{}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
+                crate::test_support::unique_nanos(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             write_private(&path.join("marker"), b"").unwrap();

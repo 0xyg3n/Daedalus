@@ -940,10 +940,7 @@ mod windows_tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-supervisor-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&directory).unwrap();
         let global = directory.join("owners");
@@ -995,10 +992,7 @@ mod tests {
                 "daedalus-supervisor-{}-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&root.join("fixture"), b"fixture").unwrap();
             Self(root)

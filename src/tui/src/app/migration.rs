@@ -1155,10 +1155,7 @@ mod windows_tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-import-win-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&root).unwrap();
         let source = root.join("source");

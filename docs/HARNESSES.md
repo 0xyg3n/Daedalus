@@ -113,13 +113,19 @@ The same backend provides:
   signals a PID: it writes a private request naming the service's exact process
   incarnation, which only that process consumes before shutting down. Like any
   stop, it is submitted, not complete, until ownership is released.
+- OpenCode guided local-server enrollment: the server is the one direct child
+  of the verified UI with the same executable and `serve --service`, found through
+  `proc_listchildpids`. Tested with a live process tree, not a live OpenCode.
+- Legacy cutover process checks. macOS hides the environment of Apple platform
+  binaries; a matching legacy process whose `CONFIG_DIR` cannot be read counts as
+  belonging to the instance and blocks cutover until its supervisor stops it.
+- In-app updates for command-line installs (`daedalus-<version>-<arch>-macos`).
+  `Daedalus.app` updates through a newer DMG.
 
-The following remain unavailable or incomplete on macOS:
+The following remain unavailable or unverified on macOS:
 
-- OpenCode guided local-server enrollment.
-- Legacy cutover process checks.
 - Native-terminal Telegram feeder end-to-end verification.
-- macOS update assets; `daedalus update check` reports that none are published.
+- Live Codex, Grok and OpenCode sessions.
 - `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
 
 ## Native Windows boundaries

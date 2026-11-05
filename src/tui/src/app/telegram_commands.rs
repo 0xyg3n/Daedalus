@@ -2650,10 +2650,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-native-legacy-review-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::core::layouts::write_private(&directory.join("marker"), b"").unwrap();
         let mut config = super::super::config::ControlConfig::fresh(&directory).unwrap();
@@ -3132,10 +3129,7 @@ mod tests {
     fn confirmation_consumption_survives_restart_and_grant_revocation() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let (mut dispatcher, caller, mut routes, mut operations) = fixture();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = crate::test_support::unique_nanos();
         let directory =
             std::env::temp_dir().join(format!("daedalus-controls-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();

@@ -3762,10 +3762,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-finish-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         std::fs::create_dir(&directory).unwrap();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
@@ -3819,10 +3816,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-first-run-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let mut source = NativeSource {
             directory: directory.clone(),
@@ -3852,10 +3846,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-switch-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let config =
             ControlConfig::fresh(Path::new(crate::test_support::path("/tmp/project"))).unwrap();

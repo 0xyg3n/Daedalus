@@ -521,10 +521,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "dd-inventory-scan-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         struct Cleanup(PathBuf);
         impl Drop for Cleanup {
@@ -559,10 +556,7 @@ mod tests {
     #[test]
     fn stale_socket_does_not_hide_live_query_failure_or_delete_endpoints() {
         use std::os::unix::net::UnixListener;
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let unique = crate::test_support::unique_nanos();
         let root =
             std::env::temp_dir().join(format!("dd-inventory-{}-{unique}", std::process::id()));
         std::fs::create_dir(&root).unwrap();

@@ -274,10 +274,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-hermes-config-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::core::layouts::write_private(&root.join("marker"), b"").unwrap();
         assert_eq!(
@@ -308,10 +305,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-hermes-metadata-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let children = root.join("profiles");
         crate::core::layouts::write_private(&children.join(".ignored"), b"").unwrap();

@@ -131,6 +131,99 @@ fn platform_argv(_: &Path, _: u32) -> Option<Vec<String>> {
     None
 }
 
+/// Environment as `KEY=value` strings: Linux `/proc/PID/environ`, macOS
+/// `KERN_PROCARGS2`. Only this user's processes are readable.
+pub fn process_environment(root: &Path, pid: u32) -> Option<Vec<String>> {
+    if pid == 0 {
+        return None;
+    }
+    platform_environment(root, pid)
+}
+#[cfg(target_os = "macos")]
+fn platform_environment(root: &Path, pid: u32) -> Option<Vec<String>> {
+    if synthetic(root, pid) {
+        linux_environment(root, pid)
+    } else {
+        macos_procargs(pid).map(|(_, environment)| environment)
+    }
+}
+#[cfg(target_os = "linux")]
+fn platform_environment(root: &Path, pid: u32) -> Option<Vec<String>> {
+    linux_environment(root, pid)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_environment(_: &Path, _: u32) -> Option<Vec<String>> {
+    None
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn linux_environment(root: &Path, pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(root.join(pid.to_string()).join("environ")).ok()?;
+    Some(
+        bytes
+            .split(|byte| *byte == 0)
+            .filter(|value| !value.is_empty())
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+            .collect(),
+    )
+}
+
+/// Direct children of `pid`, at most `limit`. Linux reads
+/// `/proc/PID/task/PID/children`; macOS uses `proc_listchildpids`. `None` when
+/// the list is unreadable or larger than `limit`.
+pub fn child_pids(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
+    if pid == 0 {
+        return None;
+    }
+    platform_children(root, pid, limit)
+}
+#[cfg(target_os = "macos")]
+fn platform_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
+    if root != Path::new("/proc") {
+        return linux_children(root, pid, limit);
+    }
+    let capacity = limit.checked_add(1)?;
+    let mut pids = vec![0 as libc::pid_t; capacity];
+    let count = unsafe {
+        libc::proc_listchildpids(
+            pid as libc::pid_t,
+            pids.as_mut_ptr().cast(),
+            (capacity * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+        )
+    };
+    if count < 0 || count as usize > limit {
+        return None;
+    }
+    pids.truncate(count as usize);
+    Some(
+        pids.into_iter()
+            .filter(|p| *p > 0)
+            .map(|p| p as u32)
+            .collect(),
+    )
+}
+#[cfg(target_os = "linux")]
+fn platform_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
+    linux_children(root, pid, limit)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_children(_: &Path, _: u32, _: usize) -> Option<Vec<u32>> {
+    None
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn linux_children(root: &Path, pid: u32, limit: usize) -> Option<Vec<u32>> {
+    let path = root
+        .join(pid.to_string())
+        .join("task")
+        .join(pid.to_string())
+        .join("children");
+    let text = std::fs::read_to_string(path).ok()?;
+    let pids = text
+        .split_whitespace()
+        .map(|word| word.parse::<u32>().ok().filter(|p| *p > 0))
+        .collect::<Option<Vec<_>>>()?;
+    (pids.len() <= limit).then_some(pids)
+}
+
 /// A file a process holds open, identified by the kernel's device and inode.
 /// `path` is the kernel's last known name, display and matching evidence only.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -462,6 +555,13 @@ fn macos_command(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn macos_argv(pid: u32) -> Option<Vec<String>> {
+    macos_procargs(pid).map(|(argv, _)| argv)
+}
+
+/// Arguments and environment from `KERN_PROCARGS2`. The kernel returns them
+/// only for the caller's own processes (or to root).
+#[cfg(target_os = "macos")]
+fn macos_procargs(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size = 0usize;
     if unsafe {
@@ -516,7 +616,24 @@ fn macos_argv(pid: u32) -> Option<Vec<String>> {
         }
         cursor = end + 1;
     }
-    (!argv.is_empty()).then_some(argv)
+    if argv.is_empty() {
+        return None;
+    }
+    // KERN_PROCARGS2 continues with NUL-terminated environment strings up to
+    // the first empty string.
+    let mut environment = Vec::new();
+    while cursor < bytes.len() {
+        let end = bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map_or(bytes.len(), |n| n + cursor);
+        if end == cursor {
+            break;
+        }
+        environment.push(String::from_utf8_lossy(&bytes[cursor..end]).into_owned());
+        cursor = end + 1;
+    }
+    Some((argv, environment))
 }
 
 #[cfg(target_os = "macos")]
@@ -785,6 +902,36 @@ mod tests {
             &[0xcf, 0xfa, 0xed, 0xfe]
         };
         assert!(!native_image(foreign));
+    }
+
+    #[test]
+    fn environment_of_the_current_process_is_readable() {
+        // A key that was never exported must not appear.
+        let key = format!("DAEDALUS_ENV_PROBE_{}=", std::process::id());
+        let environment = process_environment(Path::new("/proc"), std::process::id()).unwrap();
+        // The kernel copy is the environment at exec time.
+        assert!(
+            environment
+                .iter()
+                .any(|v| v.starts_with("PATH=") || v.starts_with("HOME="))
+        );
+        assert!(!environment.iter().any(|v| v.starts_with(&key)));
+        assert!(process_environment(Path::new("/proc"), 0).is_none());
+    }
+
+    #[test]
+    fn direct_children_are_listed_and_bounded() {
+        let root = Path::new("/proc");
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let listed = child_pids(root, std::process::id(), 4096).unwrap();
+        let bounded = child_pids(root, std::process::id(), 0);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(listed.contains(&child.id()));
+        assert!(bounded.is_none());
     }
 
     #[test]

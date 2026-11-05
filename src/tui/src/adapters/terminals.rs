@@ -1152,10 +1152,7 @@ mod binary_tests {
         let root = std::env::temp_dir().join(format!(
             "dd-bin-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let directory = root.join(".cargo/bin");
         fs::create_dir_all(&directory).unwrap();

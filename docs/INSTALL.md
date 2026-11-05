@@ -61,12 +61,11 @@ changes the destination; `--plan` reviews the action without writing anything.
 
 macOS is a preview. The TUI, CLI, configuration, routes, native PTY terminals,
 agent identity, fresh instance import, tmux/Herdr process identity, hook
-invocation/ancestry, external terminal discovery, Codex/Grok readiness evidence and
-Telegram service supervision use the macOS process backend. Codex and Grok
-readiness have not been verified against live sessions on macOS. OpenCode guided
-server enrollment, legacy cutover process checks and macOS update assets remain
-unavailable. Setup installs dependencies with Homebrew and npm; it does not use
-Linux package managers.
+invocation/ancestry, external terminal discovery, Codex/Grok readiness evidence,
+OpenCode guided server enrollment, Telegram service supervision and legacy
+cutover process checks use the macOS process backend. Codex, Grok and OpenCode
+have not been verified against live sessions on macOS. Setup installs
+dependencies with Homebrew and npm; it does not use Linux package managers.
 
 ## Native Windows install
 
@@ -272,6 +271,11 @@ daedalus update install --version VERSION --approve APPROVAL_SHA256
 The installer rechecks the release and approval against the running binary,
 verifies SHA-256 and native architecture, and preserves the previous executable.
 Linux activation is atomic; the running session continues until you restart it.
+On macOS, command-line installs from `scripts/install-macos.sh` update the same
+way from the thin `daedalus-<version>-<arch>-macos` asset, which must be a Mach-O
+executable for the running CPU. `Daedalus.app` is not modified in place, because
+that would break its signature: `update check` reports that the app updates by
+installing a newer DMG.
 After installation, a confirmation shows the installed version and restart
 instructions, even if you closed the dialog while it was downloading. A status
 notice remains visible until restart. Failed checks and installations also show

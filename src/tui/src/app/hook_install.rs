@@ -390,7 +390,6 @@ pub fn preview_live(
 // enrollment supports one native local server directly owned by the selected UI.
 // The review pins both process incarnations and the executable's file identity.
 #[cfg(test)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn local_opencode_server(
     ui: &ProcessIdentity,
     proc_root: &Path,
@@ -449,8 +448,79 @@ fn local_opencode_server_budgeted(
     select_local_server(servers)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    local_opencode_server_procfs(ui, proc_root, guard)
+}
+/// macOS: the same rules through libproc. Isolated fixtures keep procfs.
+#[cfg(target_os = "macos")]
+fn local_opencode_server_budgeted(
+    ui: &ProcessIdentity,
+    proc_root: &Path,
+    guard: &mut crate::core::native_metadata::Guard<'_>,
+) -> Result<hook_runtime::ServerEmitter> {
+    use crate::platform::{child_pids, process_argv, process_executable, process_info};
+    if proc_root != Path::new("/proc") {
+        return local_opencode_server_procfs(ui, proc_root, guard);
+    }
+    guard.processes(1)?;
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
+    let executable = process_executable(proc_root, ui.pid)
+        .and_then(|path| fs::canonicalize(path).ok())
+        .ok_or("OpenCode UI executable disappeared")?;
+    let children =
+        child_pids(proc_root, ui.pid, 4096).ok_or("Cannot list OpenCode child processes")?;
+    let mut servers = Vec::new();
+    let mut seen = std::collections::BTreeSet::from([ui.pid]);
+    for pid in children {
+        guard.snapshot_entries(1)?;
+        guard.processes(1)?;
+        if !seen.insert(pid) {
+            return Err("OpenCode child process list is ambiguous".into());
+        }
+        if process_executable(proc_root, pid)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .as_ref()
+            != Some(&executable)
+        {
+            continue;
+        }
+        let Some(args) = process_argv(proc_root, pid) else {
+            continue;
+        };
+        if !args
+            .windows(2)
+            .any(|a| a[0] == "serve" && a[1] == "--service")
+        {
+            continue;
+        }
+        let info = process_info(proc_root, pid).ok_or("OpenCode server generation unavailable")?;
+        if info.parent != ui.pid {
+            return Err("OpenCode server ancestry changed during discovery".into());
+        }
+        guard.check()?;
+        servers.push(hook_runtime::capture_server_metadata(
+            ProcessIdentity {
+                pid,
+                start_ticks: info.start,
+            },
+            &executable,
+            proc_root,
+            guard,
+        )?);
+        guard.check()?;
+    }
+    hook_runtime::verify_process_metadata(ui, proc_root, guard)?;
+    guard.check()?;
+    select_local_server(servers)
+}
+#[cfg(unix)]
+fn local_opencode_server_procfs(
     ui: &ProcessIdentity,
     proc_root: &Path,
     guard: &mut crate::core::native_metadata::Guard<'_>,
@@ -568,8 +638,8 @@ fn reconnect_opencode_server_budgeted(
         .map_err(|_| "OpenCode UI disappeared")?
         .executable;
     #[cfg(unix)]
-    let executable = fs::read_link(proc_root.join(ui.pid.to_string()).join("exe"))
-        .map_err(|_| "OpenCode UI disappeared")?;
+    let executable =
+        crate::platform::process_executable(proc_root, ui.pid).ok_or("OpenCode UI disappeared")?;
     let entries = fs::read_dir(directory.join("hooks")).map_err(|_| NO_LOCAL_SERVER)?;
     let mut servers = Vec::new();
     for entry in entries {
@@ -1516,6 +1586,86 @@ pub fn rollback(receipt: &Receipt) -> Result<()> {
         None => fs::remove_file(&receipt.profile).map_err(|_| "Cannot remove managed profile")?,
     };
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    /// A UI leading its terminal's foreground group owns one `serve --service`
+    /// child with the same executable; libproc finds and pins exactly that one.
+    #[test]
+    fn local_server_is_found_through_libproc() {
+        let (mut primary, mut secondary) = (0, 0);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut primary,
+                    &mut secondary,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut command = std::process::Command::new("/bin/bash");
+        command.args([
+            "-c",
+            "/bin/bash -c 'sleep 30; :' serve --service & /bin/bash -c 'sleep 30; :' other & wait",
+        ]);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(secondary, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for fd in 0..3 {
+                    libc::dup2(secondary, fd);
+                }
+                Ok(())
+            });
+        }
+        let mut ui = command.spawn().unwrap();
+        unsafe { libc::close(secondary) };
+        let root = Path::new("/proc");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let servers = |pid| {
+            crate::platform::child_pids(root, pid, 64)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|child| {
+                    crate::platform::process_argv(root, *child)
+                        .is_some_and(|argv| argv.iter().any(|a| a == "--service"))
+                })
+                .count()
+        };
+        while servers(ui.id()) != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server child not started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let identity = ProcessIdentity {
+            pid: ui.id(),
+            start_ticks: crate::platform::process_info(root, ui.id()).unwrap().start,
+        };
+        let found = local_opencode_server(&identity, root);
+        let stale = local_opencode_server(
+            &ProcessIdentity {
+                pid: ui.id(),
+                start_ticks: identity.start_ticks + 1,
+            },
+            root,
+        );
+        unsafe { libc::killpg(ui.id() as libc::pid_t, libc::SIGKILL) };
+        ui.wait().unwrap();
+        unsafe { libc::close(primary) };
+        let server = found.unwrap();
+        assert_ne!(server.process.pid, ui.id());
+        assert_eq!(server.executable, Path::new("/bin/bash"));
+        assert!(stale.is_err());
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -3190,10 +3340,7 @@ mod windows_server_tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-win-launcher-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let local = root.join("local");
         let launcher = local.join("Daedalus/bin/daedalus.exe");
@@ -3259,10 +3406,7 @@ mod windows_server_tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-hook-service-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::platform::ensure_private_dir(&directory).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())

@@ -155,6 +155,21 @@ sign "$app/Contents/MacOS/daedalus-cli"
 sign "$app/Contents/MacOS/Daedalus"
 sign "$app"
 
+# In-app update assets: one thin, signed CLI per architecture, named as
+# `daedalus update` selects them (`daedalus-<version>-<arch>-macos`).
+for target in "${targets[@]}"; do
+  case "$target" in
+    aarch64-apple-darwin) asset_arch=aarch64 ;;
+    x86_64-apple-darwin) asset_arch=x86_64 ;;
+  esac
+  asset="daedalus-$version-$asset_arch-macos"
+  cp "$root/src/tui/target/$target/release/daedalus-tui" "$dist/$asset"
+  chmod 755 "$dist/$asset"
+  sign "$dist/$asset"
+  (cd "$dist" && shasum -a 256 "$asset" > "$asset.sha256")
+  printf 'Built update asset %s\n' "$dist/$asset"
+done
+
 ditto "$app" "$stage/Daedalus.app"
 ln -s /Applications "$stage/Applications"
 cat > "$stage/README.txt" <<README

@@ -48,3 +48,17 @@ pub(crate) fn native_image(rest: &[u8]) -> Vec<u8> {
     };
     [header, rest].concat()
 }
+
+/// Strictly increasing nanoseconds for fixture names. macOS clocks advance in
+/// microseconds, so `SystemTime` alone lets parallel tests pick the same path.
+#[allow(dead_code)]
+pub(crate) fn unique_nanos() -> u128 {
+    static LAST: std::sync::Mutex<u128> = std::sync::Mutex::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    *last = now.max(*last + 1);
+    *last
+}

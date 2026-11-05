@@ -503,10 +503,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "dd-proc-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         fs::create_dir(&root).unwrap();
         for (pid, tty) in [(400, 10), (500, 20)] {

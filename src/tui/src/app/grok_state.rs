@@ -267,10 +267,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = crate::test_support::unique_nanos();
             let root =
                 std::env::temp_dir().join(format!("dd-grok-proof-{}-{unique}", std::process::id()));
             let transcript = root.join("native/session/events.jsonl");

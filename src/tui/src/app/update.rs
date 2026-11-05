@@ -82,6 +82,8 @@ fn platform() -> Result<&'static str, String> {
         ("linux", "x86_64") => Ok("x86_64-linux"),
         ("linux", "aarch64") => Ok("aarch64-linux"),
         ("windows", "x86_64") => Ok("x86_64-windows"),
+        ("macos", "aarch64") => Ok("aarch64-macos"),
+        ("macos", "x86_64") => Ok("x86_64-macos"),
         _ => Err("No reviewed native update asset for this platform".into()),
     }
 }
@@ -420,9 +422,29 @@ fn target_bytes(path: &Path) -> Result<Vec<u8>, String> {
         }
     }
 }
+/// The CLI inside a signed macOS application bundle is part of the bundle's
+/// signature; replacing it in place would break the app.
+fn in_app_bundle(executable: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && executable
+            .ancestors()
+            .any(|a| a.extension().is_some_and(|e| e == "app"))
+}
 fn review_at(client: &Client, current: &str, executable: &Path) -> Result<UpdateStatus, String> {
     let installed = Version::parse(current)
         .map_err(|_| "Installed version is not semantic versioning compatible")?;
+    if in_app_bundle(executable) {
+        return Ok(UpdateStatus {
+            status: "app_bundle".into(),
+            current_version: current.into(),
+            latest_version: None,
+            release_url: RELEASES.into(),
+            message: format!(
+                "Daedalus.app updates by installing a newer DMG from {RELEASES}; command-line installs from scripts/install-macos.sh update in place."
+            ),
+            review: None,
+        });
+    }
     // A platform without reviewed release assets is a known state, not a failed
     // check: report it without a network request so the interface stays quiet.
     let Ok(platform) = platform() else {
@@ -525,6 +547,17 @@ fn executable_format(bytes: &[u8], platform: &str) -> Result<(), String> {
                 }
     } else if platform == "x86_64-windows" {
         windows_setup_stub(bytes)
+    } else if platform.ends_with("macos") {
+        // Thin 64-bit Mach-O executable (MH_EXECUTE) for this CPU type.
+        bytes.len() >= 16
+            && bytes[..4] == [0xcf, 0xfa, 0xed, 0xfe]
+            && u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+                == if platform.starts_with("aarch64") {
+                    0x0100_000c
+                } else {
+                    0x0100_0007
+                }
+            && u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) == 2
     } else {
         false
     };
@@ -810,7 +843,45 @@ pub fn run(args: &[String], output: &mut impl Write) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_bundle_reports_dmg_updates_without_network() {
+        // An unroutable proxy proves no request is attempted.
+        let client = Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let bundled = Path::new("/Applications/Daedalus.app/Contents/MacOS/daedalus-cli");
+        let status = review_at(&client, "1.0.0", bundled).unwrap();
+        assert_eq!(status.status, "app_bundle");
+        assert!(status.review.is_none() && status.message.contains("DMG"));
+        assert!(!in_app_bundle(Path::new("/Users/me/.local/bin/daedalus")));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mach_o_assets_must_match_this_cpu() {
+        let own = fs::read(std::env::current_exe().unwrap()).unwrap();
+        let platform = platform().unwrap();
+        executable_format(&own, platform).unwrap();
+        let other = if platform.starts_with("aarch64") {
+            "x86_64-macos"
+        } else {
+            "aarch64-macos"
+        };
+        assert!(executable_format(&own, other).is_err());
+        assert!(executable_format(&elf(), platform).is_err());
+        let mut universal = own.clone();
+        universal[..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+        assert!(executable_format(&universal, platform).is_err());
+        let mut library = own[..16].to_vec();
+        library[12] = 6; // MH_DYLIB
+        assert!(executable_format(&library, platform).is_err());
+        assert_eq!(
+            asset_name(&Version::parse("1.2.3").unwrap(), platform),
+            format!("daedalus-1.2.3-{platform}")
+        );
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     #[test]
     fn unsupported_platform_reports_status_without_network() {
         // An unroutable proxy proves no request is attempted.
