@@ -420,7 +420,7 @@ Environment overrides:
 | `DAEDALUS_REDUCED_MOTION=1` | No animation |
 | `DAEDALUS_BACKDROP=0` | No background light or artwork; otherwise `b` changes it |
 | `DAEDALUS_SPLASH=0` | Skip the start-up splash |
-| `DAEDALUS_SCREENSAVER=SECONDS` | Idle time before the screensaver (default: 15 seconds; `0`: never); `s` toggles it |
+| `DAEDALUS_SCREENSAVER=SECONDS` | Idle time before the screensaver (default: 15 seconds; `0`: never), counted from the first loaded inventory; `s` toggles it |
 | `DAEDALUS_GRAPHICS=0` or `kitty` | Force the character artwork, or always request images |
 
 Terminals with the [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)

@@ -481,6 +481,12 @@ fn main() -> io::Result<()> {
                                 if let Some(splash) = ui.splash.as_mut() {
                                     splash.ready.get_or_insert_with(Instant::now);
                                 }
+                                // Idle time counts from when the interface has
+                                // content, not from launch: a slow first load
+                                // must not open straight into the screensaver.
+                                if !inventory {
+                                    ui.saver.last_input = Instant::now();
+                                }
                                 inventory = true;
                                 last = Instant::now();
                                 if let Some(request) = queued.take() {
@@ -589,6 +595,7 @@ fn main() -> io::Result<()> {
                 ui.saver.last_input = Instant::now();
             }
             if !updater.visible()
+                && inventory
                 && may_rest(&ui)
                 && ui.saver.due(ui.theme.screensaver, Instant::now())
             {
