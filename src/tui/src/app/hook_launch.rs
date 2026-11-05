@@ -392,24 +392,31 @@ pub fn activate(path: &Path, terminals: &Terminals, now_ms: u64) -> Result<Activ
         return Err("Launch plan expired or changed".into());
     }
     let pid = std::process::id();
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(terminals.proc_root.join(pid.to_string()).join("stat"))
-        .map_err(|_| "Cannot inspect launch process")?;
-    let mut bytes = Vec::new();
-    file.take(8193)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot inspect launch process")?;
-    if bytes.len() > 8192 {
-        return Err("Invalid launch process evidence".into());
-    }
-    let start_ticks = std::str::from_utf8(&bytes)
-        .ok()
-        .and_then(|s| s.rsplit_once(')'))
-        .and_then(|(_, s)| s.split_whitespace().nth(19))
-        .and_then(|s| s.parse().ok())
+    #[cfg(target_os = "macos")]
+    let start_ticks = crate::platform::process_start(&terminals.proc_root, pid)
         .ok_or("Invalid launch process generation")?;
+    #[cfg(not(target_os = "macos"))]
+    let start_ticks = {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(terminals.proc_root.join(pid.to_string()).join("stat"))
+            .map_err(|_| "Cannot inspect launch process")?;
+        let mut bytes = Vec::new();
+        file.take(8193)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot inspect launch process")?;
+        if bytes.len() > 8192 {
+            return Err("Invalid launch process evidence".into());
+        }
+        let start_ticks = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|s| s.rsplit_once(')'))
+            .and_then(|(_, s)| s.split_whitespace().nth(19))
+            .and_then(|s| s.parse().ok())
+            .ok_or("Invalid launch process generation")?;
+        start_ticks
+    };
     let mut registration = plan.spec.registration.clone();
     registration.harness_process = Some(ProcessIdentity { pid, start_ticks });
     NativeVerifier {

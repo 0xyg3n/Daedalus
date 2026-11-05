@@ -1,8 +1,8 @@
 //! Native PTY + hook lifecycle + feeder integration with a private shell fixture.
 //! This exercises no provider, Telegram bot, or user terminal.
-//! Hook process identity and ancestry use the host process backend; the
-//! remaining native-terminal feeder fixture is still Linux-only.
-#![cfg(target_os = "linux")]
+//! Hook process identity and ancestry use the host process backend (Linux
+//! `/proc`, macOS libproc).
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 use daedalus_tui::{
     adapters::{
         native, process,

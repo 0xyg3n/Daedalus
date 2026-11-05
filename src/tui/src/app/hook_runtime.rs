@@ -940,15 +940,21 @@ impl Verifier for NativeVerifier {
                 ));
             }
             metadata.processes(1).map_err(Error::Metadata)?;
-            let bytes = metadata
-                .process_file(&self.terminals.proc_root.join(pid.to_string()).join("stat"))
-                .map_err(|_| process_metadata_error(&metadata))?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
-            let parent = text
-                .rsplit_once(')')
-                .and_then(|(_, s)| s.split_whitespace().nth(1))
-                .and_then(|s| s.parse::<u32>().ok())
-                .ok_or(Error::Identity)?;
+            #[cfg(not(target_os = "macos"))]
+            let parent = {
+                let bytes = metadata
+                    .process_file(&self.terminals.proc_root.join(pid.to_string()).join("stat"))
+                    .map_err(|_| process_metadata_error(&metadata))?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| Error::Identity)?;
+                text.rsplit_once(')')
+                    .and_then(|(_, s)| s.split_whitespace().nth(1))
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .ok_or(Error::Identity)?
+            };
+            // macOS has no procfs; libproc reports the same parent link.
+            #[cfg(target_os = "macos")]
+            let parent = crate::platform::parent_pid(&self.terminals.proc_root, pid)
+                .ok_or_else(|| process_metadata_error(&metadata))?;
             if parent == 0 || parent == pid {
                 break;
             }

@@ -123,10 +123,14 @@ The same backend provides:
 - In-app updates for command-line installs (`daedalus-<version>-<arch>-macos`).
   `Daedalus.app` updates through a newer DMG.
 
-The following remain unavailable or unverified on macOS:
+- Native-terminal Telegram feeding: `tests/native_feeder.rs` runs a real native
+  terminal, hook lifecycle and feeder on macOS with a private shell fixture and no
+  bot. Session metadata, dashboard self-terminal detection, guided launch and the
+  Claude command adapter also read processes through `libproc`.
 
-- Native-terminal Telegram feeder end-to-end verification.
-- Live Codex, Grok and OpenCode sessions.
+The following remain unverified on macOS:
+
+- Live Codex, Grok, OpenCode and Claude sessions, and a live Telegram bot.
 - `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
 
 ## Native Windows boundaries
