@@ -1,5 +1,7 @@
 # Build output
 target/
+/dist/
+/qa/
 
 # Secrets and local instance configuration (never commit)
 *.env

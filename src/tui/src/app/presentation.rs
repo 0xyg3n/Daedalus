@@ -166,13 +166,12 @@ pub fn project(context: &Context<'_>) -> Presentation {
         registry::HOOKS,
         hook_rows(context.health.get("hooks").unwrap_or(&Value::Null), context),
     );
-    records.insert(
-        registry::ARMONIA,
-        armonia_rows(
-            context.health.get("armonia").unwrap_or(&Value::Null),
-            context.fresh(),
-        ),
+    let mut organizer = armonia_rows(
+        context.health.get("armonia").unwrap_or(&Value::Null),
+        context.fresh(),
     );
+    organizer.extend(live_terminal_rows(context.snapshot, context.fresh()));
+    records.insert(registry::ARMONIA, organizer);
     Presentation {
         sections: registry::builtin().section_snapshots(&records, context.show_saved),
         overview: overview(context),
@@ -713,6 +712,47 @@ fn ago(age: Option<f64>) -> String {
     }
 }
 
+/// Fresh native identities remain available even when the optional organizer is stopped.
+fn live_terminal_rows(snapshot: &Value, fresh: bool) -> Vec<Item> {
+    if !fresh {
+        return Vec::new();
+    }
+    let panes = rows(snapshot, "panes");
+    let mut identities = std::collections::HashMap::new();
+    for pane in panes {
+        if let Ok(id) = crate::adapters::terminals::identity(pane) {
+            *identities.entry(id).or_insert(0usize) += 1;
+        }
+    }
+    panes
+        .iter()
+        .filter_map(|pane| {
+            if crate::adapters::pane_observations::conflicted(pane) {
+                return None;
+            }
+            let identity = crate::adapters::terminals::identity(pane).ok()?;
+            if identities.get(&identity) != Some(&1) {
+                return None;
+            }
+            let key = serde_json::to_string(&identity).ok()?;
+            Some(item(
+                format!("armonia:terminal:{key}"),
+                "Live terminal IDs",
+                &format!("{} · {}", identity.pane, text(pane, "title")),
+                format!(
+                    "{} · {} · {}",
+                    text(pane, "backend"),
+                    identity.endpoint,
+                    identity.generation
+                ),
+                "pane",
+                vec![badge("Live ID", "ok")],
+                vec![identity.pane, identity.generation],
+            ))
+        })
+        .collect()
+}
+
 pub fn armonia_rows(view: &Value, fresh: bool) -> Vec<Item> {
     if !view.is_object() {
         return vec![unavailable("armonia:service", "Organizer", "Organizer")];
@@ -720,7 +760,9 @@ pub fn armonia_rows(view: &Value, fresh: bool) -> Vec<Item> {
     let mut result = Vec::new();
     let services = view.get("services").and_then(Value::as_array);
     let mine = services.and_then(|services| services.iter().find(|service| truth(service, "mine")));
-    let (note, labels) = if !fresh || services.is_none() {
+    let (note, labels) = if fresh && services.is_none() && text(view, "service_error").is_empty() {
+        ("Optional organizer observer is not configured; live terminal IDs are listed separately".into(),vec![badge("Optional","muted")])
+    } else if !fresh || services.is_none() {
         (
             "Observation unavailable".into(),
             vec![badge("Unknown", "warn")],
@@ -1000,6 +1042,27 @@ pub fn armonia_rows(view: &Value, fresh: bool) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_terminal_index_requires_fresh_unique_unconflicted_identities() {
+        let pane = json!({"backend":"herdr","session":"fixture","pane_id":"w1:p1","terminal_id":"generation-1","title":"Shell"});
+        let snapshot = json!({"panes":[pane]});
+        let live = live_terminal_rows(&snapshot, true);
+        assert_eq!(live.len(), 1);
+        let raw = live[0].id.strip_prefix("armonia:terminal:").unwrap();
+        let identity: crate::core::identity::TerminalId = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            identity,
+            crate::adapters::terminals::identity(&pane).unwrap()
+        );
+        assert!(live_terminal_rows(&snapshot, false).is_empty());
+        assert!(live_terminal_rows(&json!({"panes":[pane,pane]}), true).is_empty());
+        let mut conflict = pane.clone();
+        conflict["observation_conflict"] = json!(true);
+        assert!(live_terminal_rows(&json!({"panes":[conflict]}), true).is_empty());
+        let mut missing_generation = pane;
+        missing_generation["terminal_id"] = json!("");
+        assert!(live_terminal_rows(&json!({"panes":[missing_generation]}), true).is_empty());
+    }
     #[test]
     fn saved_pin_references_and_presentation_share_canonical_endpoints() {
         let socket = crate::test_support::path("/tmp/reference.sock");

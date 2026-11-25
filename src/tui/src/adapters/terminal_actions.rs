@@ -325,6 +325,18 @@ impl Terminals {
         launch: &LaunchPlan,
         placement: Placement,
     ) -> Result<Receipt> {
+        self.spawn_at(parent, launch, placement, "below")
+    }
+    pub fn spawn_at(
+        &self,
+        parent: &Value,
+        launch: &LaunchPlan,
+        placement: Placement,
+        direction: &str,
+    ) -> Result<Receipt> {
+        if !["above", "below", "left", "right"].contains(&direction) {
+            return Err("Unsupported split direction".into());
+        }
         validate_launch(launch)?;
         let actual = self.verify(parent)?;
         let id = identity(&actual)?;
@@ -378,7 +390,17 @@ impl Terminals {
                 "#{pane_id}".into(),
             ];
             if placement == Placement::Split {
-                args.push("-v".into());
+                args.push(
+                    if matches!(direction, "left" | "right") {
+                        "-h"
+                    } else {
+                        "-v"
+                    }
+                    .into(),
+                );
+                if matches!(direction, "above" | "left") {
+                    args.push("-b".into());
+                }
             }
             let shell = is_interactive_shell(launch);
             if shell {
@@ -442,7 +464,11 @@ impl Terminals {
                     "--pane",
                     &id.pane,
                     "--direction",
-                    "down",
+                    if matches!(direction, "left" | "right") {
+                        "right"
+                    } else {
+                        "down"
+                    },
                     "--cwd",
                     cwd,
                 ],
@@ -464,6 +490,18 @@ impl Terminals {
             let created = identity(&pane)?;
             if created.generation == id.generation {
                 return Ok(Receipt::uncertain("Server did not create a new terminal"));
+            }
+            if matches!(direction, "above" | "left")
+                && super::pane_swap::apply(self, &pane, &actual).is_err()
+            {
+                return Ok(Receipt {
+                    state: ReceiptState::Unconfirmed,
+                    message: format!(
+                        "New pane {} exists; requested position is unconfirmed. Inspect before retrying.",
+                        created.pane
+                    ),
+                    terminal: Some(pane),
+                });
             }
             if is_interactive_shell(launch) {
                 // Herdr already started the login shell in the new pane.
@@ -901,6 +939,72 @@ esac
         let receipt = adapter.action(&pane, Action::Send("hello".into())).unwrap();
         assert_eq!(receipt.state, ReceiptState::Unconfirmed);
         assert_eq!(fs::read_to_string(log).unwrap(), "text\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn directional_shell_splits_keep_new_identity_and_verify_above_swaps() {
+        use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt};
+        let dir = std::env::temp_dir().join(format!(
+            "daedalus-shell-placement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let binary = dir.join("herdr");
+        let script=r#"#!/bin/sh
+printf '%s\n' "$*" >> '@ROOT@/calls'
+case "$4" in
+get)
+ if [ "$5" = parent ]; then printf '%s\n' '{"pane":{"pane_id":"parent","terminal_id":"old","workspace_id":"w","tab_id":"t","pid":1}}'
+ else printf '%s\n' '{"pane":{"pane_id":"child","terminal_id":"new","workspace_id":"w","tab_id":"t","pid":2}}'; fi ;;
+split) printf '%s\n' '{"pane":{"pane_id":"child","terminal_id":"new","workspace_id":"w","tab_id":"t","pid":2}}' ;;
+layout) printf '%s\n' '{"layout":{"area":{"x":0,"y":0,"width":80,"height":24},"tab_id":"t","workspace_id":"w","panes":[{"pane_id":"parent","rect":{"x":0,"y":0,"width":80,"height":12}},{"pane_id":"child","rect":{"x":0,"y":12,"width":80,"height":12}}]}}' ;;
+swap) printf '%s\n' '{"swap":{"changed":true,"source_pane_id":"child","target_pane_id":"parent","layout":{"area":{"x":0,"y":0,"width":80,"height":24},"tab_id":"t","workspace_id":"w","panes":[{"pane_id":"child","rect":{"x":0,"y":0,"width":80,"height":12}},{"pane_id":"parent","rect":{"x":0,"y":12,"width":80,"height":12}}]}}}' ;;
+*) exit 1 ;;
+esac
+"#.replace("@ROOT@",&dir.to_string_lossy());
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let adapter = Terminals {
+            herdr: binary,
+            ..Terminals::default()
+        };
+        let parent = json!({"backend":"herdr","session":"fixture","pane_id":"parent","terminal_id":"old","workspace_id":"w","tab_id":"t","cwd":dir});
+        let launch = LaunchPlan {
+            binary: "/bin/sh".into(),
+            args: vec!["-i".into()],
+            environment: BTreeMap::from([
+                ("HOME".into(), dir.to_string_lossy().into_owned()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ]),
+            cwd: dir.clone(),
+            operation: crate::core::checkpoints::Operation::Handoff,
+        };
+        for direction in ["below", "above", "left", "right"] {
+            fs::write(dir.join("calls"), "").unwrap();
+            let receipt = adapter
+                .spawn_at(&parent, &launch, Placement::Split, direction)
+                .unwrap();
+            assert_eq!(receipt.state, ReceiptState::Accepted);
+            assert_eq!(receipt.terminal.as_ref().unwrap()["terminal_id"], "new");
+            let calls = fs::read_to_string(dir.join("calls")).unwrap();
+            assert_eq!(
+                calls.lines().filter(|l| l.contains("pane split")).count(),
+                1
+            );
+            assert_eq!(
+                calls.lines().filter(|l| l.contains("pane swap")).count(),
+                usize::from(matches!(direction, "above" | "left"))
+            );
+            assert!(calls.contains(if matches!(direction, "left" | "right") {
+                "--direction right"
+            } else {
+                "--direction down"
+            }));
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 }

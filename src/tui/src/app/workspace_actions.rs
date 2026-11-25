@@ -5,8 +5,7 @@ use crate::core::identity::Backend;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
-    process::{Command, Stdio},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 type Result<T> = std::result::Result<T, String>;
@@ -105,7 +104,13 @@ pub fn native_command(
     }
     Ok(command)
 }
+#[cfg(unix)]
+pub fn run_native(command: Command) -> Result<String> {
+    super::native_client::run(command)
+}
+#[cfg(not(unix))]
 pub fn run_native(mut command: Command) -> Result<String> {
+    use std::{fs::OpenOptions, process::Stdio};
     let tty = OpenOptions::new()
         .read(true)
         .write(true)
@@ -152,7 +157,9 @@ pub fn launch_plan(
     config: &ControlConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<LaunchPlan> {
-    let (binary, args, environment) = if tool == "shell" {
+    let selection = tool;
+    let (tool, _) = super::permissions::parse(selection)?;
+    let (binary, mut args, environment) = if tool == "shell" {
         let environment: BTreeMap<String, String> = environment
             .iter()
             .filter(|(key, _)| {
@@ -202,6 +209,7 @@ pub fn launch_plan(
             harnesses::launch_plan(&adapter, &executable, cwd, environment, &config.profiles)?;
         (plan.binary, plan.args, plan.environment)
     };
+    super::permissions::apply(selection, &mut args)?;
     // Operation is not interpreted by terminal transports. Fresh launches carry
     // no checkpoint, resume flag, session ID, or inherited conversation.
     let plan = LaunchPlan {
@@ -454,11 +462,14 @@ pub fn organize(
     if operation == "unlink-group" {
         return session_actions::unlink_window(adapter, pane);
     }
-    if operation == "split" {
-        return adapter.spawn(
+    if operation == "split"
+        || ["split-above", "split-below", "split-left", "split-right"].contains(&operation)
+    {
+        return adapter.spawn_at(
             pane,
             launch.ok_or("Choose a tool or shell")?,
             Placement::Split,
+            operation.strip_prefix("split-").unwrap_or("below"),
         );
     }
     if identity.backend == Backend::Native {
@@ -578,7 +589,8 @@ impl WorkspaceRequest {
                 tool,
                 ..
             } => format!(
-                "Create {backend:?} project {name} in {cwd}, starting {tool}. Existing projects keep running."
+                "Create {backend:?} project {name} in {cwd}, starting {}. Existing projects keep running.",
+                super::permissions::label(tool)
             ),
             Self::Organize {
                 pane,
@@ -586,9 +598,10 @@ impl WorkspaceRequest {
                 label,
                 tool,
             } => format!(
-                "{operation} on {}/{} · {label} · {tool}. Group changes affect shared views; closing a shared group closes all its terminals.",
+                "{operation} on {}/{} · {label} · {}. Group changes affect shared views; closing a shared group closes all its terminals.",
                 pane["session"].as_str().unwrap_or(""),
-                pane["pane_id"].as_str().unwrap_or("")
+                pane["pane_id"].as_str().unwrap_or(""),
+                super::permissions::label(tool)
             ),
         }
     }
@@ -613,7 +626,7 @@ impl WorkspaceRequest {
                 let mut launch = launch_plan(&tool, Path::new(&cwd), config, environment)?;
                 super::gateway::wrap(
                     directory,
-                    &tool,
+                    super::permissions::parse(&tool)?.0,
                     &mut launch,
                     &std::env::current_exe().map_err(|_| "Cannot locate native launcher")?,
                 )?;
@@ -625,7 +638,16 @@ impl WorkspaceRequest {
                 label,
                 tool,
             } => {
-                let mut launch = if ["new-group", "split"].contains(&operation.as_str()) {
+                let mut launch = if [
+                    "new-group",
+                    "split",
+                    "split-above",
+                    "split-below",
+                    "split-left",
+                    "split-right",
+                ]
+                .contains(&operation.as_str())
+                {
                     Some(launch_plan(
                         &tool,
                         Path::new(text(&pane, "cwd")?),
@@ -638,7 +660,7 @@ impl WorkspaceRequest {
                 if let Some(launch) = &mut launch {
                     super::gateway::wrap(
                         directory,
-                        &tool,
+                        super::permissions::parse(&tool)?.0,
                         launch,
                         &std::env::current_exe().map_err(|_| "Cannot locate native launcher")?,
                     )?;

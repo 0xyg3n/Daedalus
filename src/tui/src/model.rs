@@ -20,6 +20,8 @@ pub struct Node {
     pub branch: String,
     pub kind: String,
     pub backend: String,
+    /// One-based workspace position reported by this backend endpoint.
+    pub workspace_number: usize,
     pub children: bool,
     pub count: usize,
     pub state: String,
@@ -446,11 +448,13 @@ pub struct Pin {
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Apply {
+    pub map: Option<Vec<daedalus_tui::core::map_layout::Card>>,
     pub mode: String,
     pub selected: String,
     /// Panel sizes remembered with the view or a saved layout.
     pub sizes: Option<Sizes>,
     /// How strongly the artwork shows: off, normal or bright.
+    pub palette: String,
     pub backdrop: String,
     /// The screensaver: "on" or "off".
     pub saver: String,
@@ -623,6 +627,7 @@ pub enum View {
     /// Every terminal on one screen, however many there are.
     Wall,
     Cube,
+    Map,
     Focus,
 }
 impl View {
@@ -632,6 +637,7 @@ impl View {
             View::Tiles => "tiles",
             View::Wall => "wall",
             View::Cube => "cube",
+            View::Map => "map",
             View::Focus => "focus",
         }
     }
@@ -641,6 +647,7 @@ impl View {
             View::Tiles => "Tiles",
             View::Wall => "Wall",
             View::Cube => "Cube",
+            View::Map => "Tetris",
             View::Focus => "Focus",
         }
     }
@@ -650,15 +657,23 @@ impl View {
             "tiles" => Some(View::Tiles),
             "wall" => Some(View::Wall),
             "cube" => Some(View::Cube),
+            "map" => Some(View::Map),
             "focus" => Some(View::Focus),
             _ => None,
         }
     }
     /// Terminals laid out as a grid of screens, sharing selection and keys.
     pub fn grid(self) -> bool {
-        matches!(self, View::Tiles | View::Wall | View::Cube)
+        matches!(self, View::Tiles | View::Wall | View::Cube | View::Map)
     }
-    pub const ALL: [View; 5] = [View::Tree, View::Tiles, View::Wall, View::Cube, View::Focus];
+    pub const ALL: [View; 6] = [
+        View::Tree,
+        View::Tiles,
+        View::Wall,
+        View::Cube,
+        View::Focus,
+        View::Map,
+    ];
 }
 /// How Tree, Tiles and the Wall order terminals.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1342,6 +1357,11 @@ pub type TerminalSelection = (String, (u16, u16), (u16, u16));
 
 #[derive(Default)]
 pub struct Ui {
+    pub preview_offsets: HashMap<String, u16>,
+    pub popup: bool,
+    pub popup_start: bool,
+    pub map: crate::map::State,
+    pub context: Option<crate::context_menu::Menu>,
     pub harness_logo_targets: std::cell::RefCell<Vec<crate::harness_icons::Placement>>,
     pub harness_logo_cache: crate::harness_icons::Cache,
     pub settings: daedalus_tui::app::interface_settings::InterfaceSettings,
@@ -1373,6 +1393,8 @@ pub struct Ui {
     /// Captured when the user selects a request, before any background wait.
     pub(crate) request_navigation_revision: Option<u64>,
     /// Screen row → list row, for mouse selection.
+    pub tree_clicked: Option<(String, Instant)>,
+    pub tree_hits: Vec<(ratatui::layout::Rect, String)>,
     pub list_hits: Vec<(ratatui::layout::Rect, usize)>,
     pub nav_hits: Vec<(ratatui::layout::Rect, usize)>,
     /// When the selection or page last changed, for transitions.
@@ -1402,8 +1424,11 @@ pub struct Ui {
     pub focus_target: String,
     /// Live stream of the focused terminal, observing or controlling.
     pub embed: Option<Embed>,
+    pub remote: Option<daedalus_tui::app::remote::Target>,
     /// Exact visible terminal screen accepting input in the current layout.
     pub inline_screen: Option<ratatui::layout::Rect>,
+    pub focus_heading: Option<ratatui::layout::Rect>,
+    pub fullscreen_back: Option<ratatui::layout::Rect>,
     /// Terminal screens drawn last frame: rect, node id, and each display row's
     /// source row and left column. Selection uses these in every view.
     pub screens: Vec<RenderedScreen>,
@@ -1539,6 +1564,11 @@ impl Ui {
         self.detail_view.area = None;
         self.search_area = None;
         self.inline_screen = None;
+        self.focus_heading = None;
+        self.fullscreen_back = None;
+        self.map.fullscreen_hits.clear();
+        self.map.toolbar_hits.clear();
+        self.map.nav.clear_hits();
         self.dialog_hits.clear();
         self.view_hits.clear();
         self.quick_items.clear();
@@ -1547,6 +1577,7 @@ impl Ui {
         self.tile_hits.clear();
         self.nav_hits.clear();
         self.list_hits.clear();
+        self.tree_hits.clear();
         self.focus_tree_hits.clear();
         self.focus_tree_toggles.clear();
         self.focus_tree_area = None;
@@ -2067,13 +2098,53 @@ impl Ui {
                     None
                 }
             }
-            View::Tiles | View::Wall | View::Cube => self
+            View::Tiles | View::Wall | View::Cube | View::Map => self
                 .tiles()
                 .get(self.tile)
                 .filter(|t| !t.id.is_empty())
                 .map(|t| t.id.clone()),
             View::Focus => (!self.focus_target.is_empty()).then(|| self.focus_target.clone()),
         }
+    }
+    /// Exact ancestry, bounded even if a partial snapshot contains a cycle.
+    pub fn within_scope(&self, id: &str, scope: &str) -> bool {
+        let mut current = id;
+        for _ in 0..=self.snapshot.tree.len() {
+            if current == scope {
+                return true;
+            }
+            let Some(node) = self.snapshot.tree.iter().find(|n| n.id == current) else {
+                return false;
+            };
+            if node.parent == current || node.parent.is_empty() {
+                return false;
+            }
+            current = &node.parent;
+        }
+        false
+    }
+    /// Group navigation may choose a descendant; mutations still capture its
+    /// exact pane ID and generation before opening any backend dialog.
+    pub fn terminal_in_scope(&self, id: &str) -> Option<String> {
+        if let Some(pane) = self.terminal_node(id) {
+            return (!pane.conflicted).then(|| pane.id.clone());
+        }
+        self.snapshot.tree.iter().find(|n| n.id == id)?;
+        let candidates = self
+            .snapshot
+            .tree
+            .iter()
+            .filter(|n| n.tile.is_some() && !n.conflicted && self.within_scope(&n.id, id))
+            .collect::<Vec<_>>();
+        let previous = self
+            .terminal_node(&self.last_selected)
+            .map(|n| n.id.as_str())
+            .unwrap_or(&self.last_selected);
+        candidates
+            .iter()
+            .find(|n| n.id == previous)
+            .or_else(|| candidates.first())
+            .map(|n| n.id.clone())
     }
     /// The terminal node behind an ID; agent sessions resolve to their pane.
     pub fn terminal_node(&self, id: &str) -> Option<&Node> {
@@ -2133,6 +2204,8 @@ impl Ui {
             self.previous = self.view;
             self.focus_target = current.clone().unwrap_or_default();
         }
+        self.reset_hit_regions();
+        self.tree_clicked = None;
         self.view = view;
         self.paged_at = Some(Instant::now());
         if let Some(id) = current {
@@ -2142,7 +2215,7 @@ impl Ui {
     /// Select a terminal by ID in the current view.
     pub fn reveal(&mut self, id: &str) {
         match self.view {
-            View::Tiles | View::Wall | View::Cube => {
+            View::Tiles | View::Wall | View::Cube | View::Map => {
                 let id = self
                     .terminal_node(id)
                     .map(|n| n.id.clone())
@@ -2291,9 +2364,13 @@ impl Ui {
         }
     }
     pub fn update(&mut self, mut snapshot: Snapshot) {
+        // Click geometry belongs to the rendered snapshot. Never reuse its row
+        // indexes or terminal origins after a topology refresh or layout restore.
+        self.reset_hit_regions();
         if snapshot.ui_settings != self.settings && snapshot.ui_settings.validate().is_ok() {
             let mut theme = crate::theme::Theme::from_env(&snapshot.ui_settings);
             theme.epoch = self.theme.epoch;
+            theme.palette = self.theme.palette;
             self.still = theme.reduced_motion;
             theme.reduced_motion |= !self.prefs.motion;
             self.theme = theme;
@@ -2331,8 +2408,45 @@ impl Ui {
         // Previews of terminals that are gone are dropped, never reassigned.
         self.previews
             .retain(|id, _| tiles.iter().any(|t| &t.id == id));
+        self.preview_offsets
+            .retain(|id, _| tiles.iter().any(|t| &t.id == id));
+        if let Some(cards) = apply.map
+            && daedalus_tui::core::map_layout::validate(&cards).is_ok()
+        {
+            self.map.restore(cards);
+        }
+        if let Some(baselines) = apply.switches.get("map_native")
+            && let Ok(baselines) = daedalus_tui::core::map_layout::native_baselines(baselines)
+        {
+            self.map.native_signatures = baselines;
+        }
         if let Some(sizes) = apply.sizes {
             self.sizes = sizes.clamped();
+        }
+        if let Some(mode) = apply
+            .switches
+            .get("map_split")
+            .and_then(Value::as_str)
+            .filter(|v| ["off", "columns", "rows"].contains(v))
+        {
+            self.map.split = mode.into();
+        }
+        if let Some(id) = apply.switches.get("map_primary").and_then(Value::as_str) {
+            self.map.primary = id.into();
+        }
+        if let Some(id) = apply.switches.get("map_peer").and_then(Value::as_str) {
+            self.map.peer = id.into();
+        }
+        if let Some(ratio) = apply
+            .switches
+            .get("map_ratio")
+            .and_then(Value::as_u64)
+            .filter(|v| (10..=90).contains(v))
+        {
+            self.map.ratio = ratio as u16;
+        }
+        if let Some(palette) = crate::theme::Palette::parse(&apply.palette) {
+            self.theme.palette = palette;
         }
         if let Some(look) = crate::backdrop::Look::parse(&apply.backdrop) {
             self.look = look;
@@ -2363,6 +2477,10 @@ impl Ui {
             if view == View::Focus {
                 self.previous = View::Tiles;
                 self.focus_target = apply.selected.clone();
+            }
+            if self.view != view {
+                self.reset_hit_regions();
+                self.tree_clicked = None;
             }
             self.view = view;
             if !apply.selected.is_empty() {

@@ -9,6 +9,22 @@ use ratatui::{buffer::Buffer, style::Modifier};
 
 /// Map a screen cell to a terminal id and a source row and column.
 pub fn cell_at(ui: &Ui, column: u16, row: u16) -> Option<(String, (u16, u16))> {
+    if ui.view == crate::model::View::Map {
+        let point = ratatui::layout::Position::new(column, row);
+        let top = ui
+            .tile_hits
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(point))
+            .and_then(|(_, i)| ui.tiles().get(*i).map(|t| t.id.clone()))?;
+        let (rect, id, rows) = ui
+            .screens
+            .iter()
+            .rev()
+            .find(|(r, id, _)| *id == top && r.contains(point))?;
+        let &(src_row, left) = rows.get(usize::from(row - rect.y))?;
+        return Some((id.clone(), (src_row, left.saturating_add(column - rect.x))));
+    }
     let mut best: Option<(u32, String, (u16, u16))> = None;
     for (rect, id, rows) in &ui.screens {
         if column < rect.x || row < rect.y || column >= rect.right() || row >= rect.bottom() {
@@ -91,6 +107,20 @@ pub fn paint(buf: &mut Buffer, ui: &Ui) {
         || ordered(*anchor, *head),
         |screen| range(screen, *anchor, *head),
     );
+    // Resolve the selected card once; painting cells must not rebuild the tile list.
+    let occluders = if ui.view == crate::model::View::Map {
+        let tiles = ui.tiles();
+        let Some(layer) = ui
+            .tile_hits
+            .iter()
+            .position(|(_, index)| tiles.get(*index).is_some_and(|t| t.id == *id))
+        else {
+            return;
+        };
+        &ui.tile_hits[layer + 1..]
+    } else {
+        &[]
+    };
     for (rect, screen_id, rows) in &ui.screens {
         if screen_id != id {
             continue;
@@ -102,7 +132,12 @@ pub fn paint(buf: &mut Buffer, ui: &Ui) {
             }
             for x in 0..rect.width {
                 let col = left.saturating_add(x);
-                if (src_row, col) >= start && (src_row, col) <= end {
+                if (src_row, col) >= start
+                    && (src_row, col) <= end
+                    && !occluders
+                        .iter()
+                        .any(|(r, _)| r.contains(ratatui::layout::Position::new(rect.x + x, y)))
+                {
                     buf[(rect.x + x, y)].modifier.insert(Modifier::REVERSED);
                 }
             }

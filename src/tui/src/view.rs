@@ -1,4 +1,4 @@
-mod workspaces;
+pub(crate) mod workspaces;
 pub(crate) use workspaces::agent_session_label;
 #[cfg(test)]
 use workspaces::{
@@ -342,6 +342,7 @@ fn splash(f: &mut Frame, ui: &mut Ui) -> bool {
             }
         }
     }
+    crate::context_menu::draw(f, area, ui);
     if theme.ascii {
         theme::asciify(f.buffer_mut());
     }
@@ -491,6 +492,8 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         overview(f, content, ui);
     } else if workspaces && ui.view == View::Tiles {
         tiles_panel(f, content, ui);
+    } else if workspaces && ui.view == View::Map {
+        crate::map::draw(f, content, ui);
     } else if workspaces && ui.view == View::Cube {
         cube_panel(f, content, ui);
     } else if workspaces && ui.view == View::Wall {
@@ -542,19 +545,6 @@ pub fn draw(f: &mut Frame, ui: &mut Ui) {
         }
         if let Some(screen) = ui.inline_screen {
             cursor = focus_screen(f, screen, ui, true);
-            if let Some(embed) = &ui.embed {
-                let label = if embed.prefix {
-                    " Ctrl+] · D detach · arrows navigate · [ ] layout · O observe "
-                } else if embed.mode == Mode::Control {
-                    " INPUT HERE · Ctrl+] then D detaches "
-                } else {
-                    " WATCHING · a types here · Esc detaches "
-                };
-                f.render_widget(
-                    Paragraph::new(label).style(ui.theme.fg(Tone::Warn)),
-                    Rect::new(screen.x, screen.y.saturating_sub(1), screen.width, 1),
-                );
-            }
         } else if let Some(embed) = ui.embed.as_mut() {
             embed.origin = None;
             ui.status = "Input paused: enlarge the terminal window to see the selected pane. Ctrl+] then D detaches.".into();
@@ -574,9 +564,36 @@ fn present(
 ) {
     let theme = ui.theme;
     light_handle(f, ui);
-    if let Some(keys) = keys {
-        footer(f, keys, ui);
-    }
+    // Keep controls outside modal geometry and paint them after visual effects.
+    let overlay_area = Rect {
+        height: keys.map_or(area.height, |r| r.y.saturating_sub(area.y)),
+        ..area
+    };
+    // Effects belong to the dashboard chrome. Preserve every terminal cell,
+    // including its native colors, before glow, artwork or transition bands.
+    let effects = ui.look != Look::Off || ui.paged_at.is_some();
+    let regions = if ui.page == WORKSPACES && ui.view == View::Map {
+        ui.tile_hits
+            .iter()
+            .map(|(r, _)| *r)
+            .chain(ui.map.nav.area)
+            .collect::<Vec<_>>()
+    } else {
+        ui.screens
+            .iter()
+            .map(|(r, _, _)| *r)
+            .chain(ui.focus_heading)
+            .collect::<Vec<_>>()
+    };
+    let protected: Vec<_> = if effects {
+        regions
+            .iter()
+            .flat_map(|r| (r.y..r.bottom()).flat_map(|y| (r.x..r.right()).map(move |x| (x, y))))
+            .filter_map(|p| f.buffer_mut().cell(p).cloned().map(|cell| (p, cell)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Before the page fade and any dialog, so both dim the background too.
     match ui.look {
         Look::Glow => {
@@ -586,7 +603,6 @@ fn present(
         Look::Off => {}
         look => ui.backdrop.apply(f.buffer_mut(), area, &theme, look),
     }
-    crate::select::paint(f.buffer_mut(), ui);
     if ui.paged_at.is_some() {
         fade_in(f, content, ui);
         let seed = (ui.page as u64) << 4 | ui.view as u64;
@@ -598,29 +614,42 @@ fn present(
             seed,
         );
     }
+    for (p, cell) in protected {
+        if let Some(target) = f.buffer_mut().cell_mut(p) {
+            *target = cell;
+        }
+    }
+    crate::select::paint(f.buffer_mut(), ui);
     if ui.tooltip.is_some()
         || ui.dialog.is_some()
         || ui.options.is_some()
         || ui.binding_search.is_some()
+        || ui.context.is_some()
     {
         ui.harness_logo_targets.get_mut().clear();
     }
     if let Some((at, label)) = ui.tooltip.take() {
-        tooltip(f, area, &theme, at, &label);
+        tooltip(f, overlay_area, &theme, at, &label);
     }
     if ui.dialog.is_some() {
         dim(f, area, &theme);
-        dialog(f, area, ui);
+        dialog(f, overlay_area, ui);
     } else if ui.options.is_some() {
         dim(f, area, &theme);
-        options_panel(f, area, ui);
-    } else if let Some(position) = cursor.filter(|_| ui.binding_search.is_none()) {
+        options_panel(f, overlay_area, ui);
+    } else if let Some(position) =
+        cursor.filter(|_| ui.binding_search.is_none() && ui.context.is_none())
+    {
         // The attached terminal's own cursor; hidden whenever a dialog is open.
         f.set_cursor_position(position);
     }
     if ui.binding_search.is_some() {
         dim(f, area, &theme);
-        crate::shortcuts::draw(f, area, ui);
+        crate::shortcuts::draw(f, overlay_area, ui);
+    }
+    crate::context_menu::draw(f, overlay_area, ui);
+    if let Some(keys) = keys {
+        footer(f, keys, ui);
     }
     if theme.ascii {
         theme::asciify(f.buffer_mut());
@@ -1081,7 +1110,7 @@ fn switcher(f: &mut Frame, x: u16, y: u16, max: u16, ui: &mut Ui) -> u16 {
 
 /// One-key actions for the selected terminal, with click targets.
 // Collect local actions for the single global shortcut bar.
-fn quick_bar(_f: &mut Frame, _area: Rect, ui: &mut Ui, tail: &[(&str, &str, &str)]) {
+pub(crate) fn quick_bar(_f: &mut Frame, _area: Rect, ui: &mut Ui, tail: &[(&str, &str, &str)]) {
     if ui.selected_terminal().is_none() {
         return;
     }
@@ -1233,6 +1262,13 @@ fn header(f: &mut Frame, area: Rect, ui: &mut Ui, wide: bool) {
                 name => format!(" {} {}", theme.glyph("·", "-"), fit(name, 24, &theme)),
             },
             theme.fg(Tone::Muted),
+        ),
+        Span::styled(
+            ui.remote
+                .as_ref()
+                .map(|r| format!("  SSH {}", fit(&r.host, 30, &theme)))
+                .unwrap_or_default(),
+            theme.fg(Tone::Info),
         ),
         Span::styled(
             format!("   {} {} ", category, theme.glyph("›", ">")),
@@ -2414,7 +2450,11 @@ fn render_list(f: &mut Frame, area: Rect, ui: &mut Ui, rows: &[Row], two_line: b
                     Rect::new(body.x, y + 1, body.width, 1),
                 );
             }
-            ui.list_hits.push((Rect::new(body.x, y, body.width, h), i));
+            let hit = Rect::new(body.x, y, body.width, h);
+            if ui.page == WORKSPACES && ui.view == View::Tree && row.kind == Kind::Node {
+                ui.tree_hits.push((hit, row.id.clone()));
+            }
+            ui.list_hits.push((hit, i));
         }
         y += h;
     }
@@ -2527,7 +2567,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         (theme.glyph("›", ">"), Tone::Faint)
     };
     let where_ = match (ui.page == WORKSPACES, ui.view) {
-        (true, View::Tiles | View::Wall | View::Cube) => {
+        (true, View::Tiles | View::Wall | View::Cube | View::Map) => {
             let tiles = ui.tiles().len();
             if tiles > 0 {
                 format!("{} of {tiles} ", ui.tile + 1)
@@ -2553,7 +2593,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         } else {
             " Enable screensaver  "
         });
-    let reminder = if ui.hide_keys { 8 } else { 0 } + saver.map_or(0, |label| width(label) + 3);
+    let reminder = if ui.hide_keys { 18 } else { 0 } + saver.map_or(0, |label| width(label) + 3);
     let room = (area.width as usize).saturating_sub(width(&where_) + 4 + reminder);
     let top = Rect { height: 1, ..area };
     // In Focus the input mode is the status; it can never go stale.
@@ -2596,7 +2636,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
                     held.as_str()
                 }
                 (Phase::Live, Mode::Control, _) => {
-                    "Attached: keys go to the terminal. Ctrl+] then D detaches; it keeps running."
+                    "Typing · Ctrl+] then D detaches; pane keeps running"
                 }
                 (Phase::Live, Mode::Observe, _) => match &embed.held {
                     Some(by) => {
@@ -2639,6 +2679,7 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
     };
     let identity_status;
     let status = if ui.page == WORKSPACES
+        && ui.embed.is_none()
         && ui.settings.agent_session_ids
         && !ui.status_error
         && !ui.busy
@@ -2677,8 +2718,28 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
         right.insert(1, Span::styled(label, theme.fg(Tone::Muted)));
     }
     if ui.hide_keys {
-        right.insert(0, Span::styled("?", theme.keycap()));
-        right.insert(1, Span::styled(" keys  ", theme.fg(Tone::Muted)));
+        let start = top.right().saturating_sub(
+            right
+                .iter()
+                .map(|s| s.width() as u16)
+                .sum::<u16>()
+                .saturating_add(18),
+        );
+        right.insert(
+            0,
+            Span::styled(
+                if ui.embed.as_ref().is_some_and(|e| e.mode == Mode::Control) {
+                    "   Show controls  "
+                } else {
+                    " ? Show controls  "
+                },
+                theme.keycap(),
+            ),
+        );
+        ui.quick_hits.push((
+            Rect::new(start, top.y, 18.min(top.right() - start), 1),
+            "bar:hide".into(),
+        ));
     }
     f.render_widget(
         Paragraph::new(Line::from(right)).alignment(Alignment::Right),
@@ -2687,252 +2748,21 @@ fn footer(f: &mut Frame, area: Rect, ui: &mut Ui) {
     if ui.hide_keys {
         return;
     }
-    let enter = theme.glyph("⏎", "Enter");
-    let arrows = theme.glyph("↑↓", "Up/Dn");
-    let fold = theme.glyph("←→", "Lt/Rt");
-    let move4 = theme.glyph("↑↓←→", "Arrows");
-    let control = ui
-        .embed
-        .as_ref()
-        .is_some_and(|e| e.live() && e.mode == Mode::Control);
-    let pairs: Vec<(&str, &str)> = if ui.searching {
-        if ui.switching {
-            vec![
-                (enter, "Watch"),
-                ("Alt+1–9", "Open"),
-                ("Esc", "Close"),
-                (arrows, "Move"),
-            ]
-        } else {
-            vec![(enter, "Done"), ("Esc", "Clear"), (arrows, "Move")]
-        }
-    } else if ui.page == WORKSPACES && control {
-        vec![
-            ("^] D", "Detach"),
-            ("^] [ ]", "View"),
-            ("^] O", "Observe"),
-            ("^] F", "Fit size"),
-            ("^] M", "More"),
-            ("^] ^]", "Send ^]"),
-        ]
-    } else if ui.page == WORKSPACES && ui.view == View::Focus {
-        let split = ui
-            .terminal_node(&ui.focus_target)
-            .and_then(|n| ui.tab_layout(&n.id))
-            .is_some();
-        let mut pairs = vec![("a", "Attach"), ("w", "Watch"), ("Esc", "Back")];
-        if split {
-            pairs.push((move4, "Pane"));
-            pairs.push(("Z", if ui.zoomed { "Whole tab" } else { "Zoom" }));
-            pairs.push(("F11", "Full"));
-        }
-        pairs.extend([
-            ("[ ]", "View"),
-            ("m", "More"),
-            ("Tab", "Section"),
-            ("q", "Quit"),
-        ]);
-        pairs
-    } else if ui.page == WORKSPACES && ui.view == View::Tiles {
-        vec![
-            (move4, "Move"),
-            (enter, "Menu"),
-            ("z", "Focus"),
-            ("F11", "Full"),
-            ("[ ]", "View"),
-            ("PgUp/Dn", "Page"),
-            ("Alt+↑↓", "Workspace"),
-            ("o", "Order"),
-            ("P", "Pinned only"),
-            ("+ -", "Tile size"),
-            ("u", "Forget missing pin"),
-            ("L", "Save layout"),
-            ("/", "Search"),
-            ("q", "Quit"),
-        ]
-    } else if ui.page == WORKSPACES && matches!(ui.view, View::Wall | View::Cube) {
-        vec![
-            (
-                move4,
-                if ui.view == View::Cube {
-                    "Rotate"
-                } else {
-                    "Move"
-                },
-            ),
-            (enter, "Menu"),
-            ("z", "Focus"),
-            ("F11", "Full"),
-            (
-                if ui.view == View::Cube {
-                    "Alt+arrows"
-                } else {
-                    ""
-                },
-                if ui.view == View::Cube {
-                    "Cubes/terminals"
-                } else {
-                    ""
-                },
-            ),
-            ("[ ]", "View"),
-            ("o", "Order"),
-            ("P", "Pinned only"),
-            ("L", "Save layout"),
-            ("/", "Search"),
-            ("q", "Quit"),
-        ]
-    } else if ui.page == WORKSPACES {
-        vec![
-            (arrows, "Move"),
-            (enter, "Menu"),
-            (fold, "Fold"),
-            ("[ ]", "View"),
-            ("o", "Order"),
-            ("/", "Search"),
-            ("^P", "Commands"),
-            ("Tab", "Section"),
-            ("< > + -", "Resize"),
-            ("E/C", "Unfold/fold all"),
-            ("r", "Refresh"),
-            ("q", "Quit"),
-        ]
-    } else {
-        vec![
-            (arrows, "Move"),
-            (enter, "Open"),
-            ("/", "Search"),
-            ("^P", "Commands"),
-            ("Tab", "Section"),
-            ("0-9", "Jump"),
-            ("< >", "Resize"),
-            ("r", "Refresh"),
-            ("q", "Quit"),
-        ]
-    };
-    let mut pairs = pairs;
-    // Queued actions own their aliases; show each action once in the footer.
-    pairs.retain(|(_, label)| {
-        if label.is_empty() {
-            return false;
-        }
-        let id = match *label {
-            "Attach" => "terminal.attach",
-            "Watch" => "terminal.watch",
-            "Back" => "detach",
-            "More" | "Menu" => "more",
-            _ => return true,
-        };
-        !ui.quick_items.iter().any(|(_, _, drawn)| drawn == id)
-    });
-    if control && ui.embed.as_ref().is_some_and(|e| e.prefix) {
-        pairs = vec![
-            ("D", "Detach"),
-            ("O", "Observe"),
-            ("[ ]", "View"),
-            (move4, "Pane"),
-            ("M", "More"),
-        ];
-    }
-    if control && !ui.embed.as_ref().is_some_and(|e| e.prefix) {
-        pairs.insert(0, ("^] K", "Switch"));
-    }
-    if !ui.searching && !control {
-        if ui.page == WORKSPACES {
-            pairs.insert(0, ("n", "New workspace"));
-        }
-        pairs.insert(0, ("F1", "Bindings"));
-        pairs.insert(0, ("^K", "Switch"));
-        // Before Quit, so it survives a narrow screen as long as Quit does.
-        let at = pairs.len().saturating_sub(1);
-        pairs.insert(at, ("?", "Hide keys"));
-        // Next to the views, so it stays when a narrow bar drops keys.
-        let at = pairs
-            .iter()
-            .position(|p| p.0 == "[ ]")
-            .map_or(at, |i| i + 1);
-        pairs.insert(at, (",", "Options"));
-    }
-    let mut items = Vec::<(String, String, String)>::new();
-    if control && !ui.searching {
-        items.push(("^] G".into(), "Telegram".into(), "telegram.route".into()));
-    }
-    let priority = |label: &str| {
-        matches!(
-            label,
-            "Switch"
-                | "Move"
-                | "Rotate"
-                | "Pane"
-                | "Cubes/terminals"
-                | "Focus"
-                | "Back"
-                | "View"
-                | "Options"
-                | "Hide keys"
-        )
-    };
-    for (key, label) in pairs.iter().filter(|(_, label)| *label == "Switch") {
-        items.push((key.to_string(), label.to_string(), String::new()));
-    }
-    if !ui.searching && !control {
-        items.extend(
-            ui.quick_items
-                .iter()
-                .filter(|(_, _, id)| id == "more" || id == "detach")
-                .cloned(),
-        );
-    }
-    for (key, label) in pairs
-        .iter()
-        .filter(|(_, label)| priority(label) && *label != "Switch")
+    let bar = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1);
+    if let Some(help) = crate::hotkey_bar::draw(f, bar, ui)
+        && !ui.status_error
     {
-        items.push((key.to_string(), label.to_string(), String::new()));
-    }
-    if !ui.searching && !control {
-        items.extend(
-            ui.quick_items
-                .iter()
-                .filter(|(_, _, id)| id != "more" && id != "detach")
-                .cloned(),
-        );
-    }
-    for (key, label) in pairs.iter().filter(|(_, label)| !priority(label)) {
-        items.push((key.to_string(), label.to_string(), String::new()));
-    }
-    let mut x = area.x + 1;
-    let mut seen = std::collections::HashSet::new();
-    for (key, label, id) in items {
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        let cap = format!(" {key} ");
-        let text = format!(" {label} ");
-        let w = (width(&cap) + width(&text)) as u16;
-        if x + w > area.right() {
-            break;
-        }
-        let rect = Rect::new(x, area.y + 1, w, 1);
+        let hint = if ui.embed.as_ref().is_some_and(|e| e.mode == Mode::Control) {
+            format!("Typing · {help}")
+        } else {
+            help.to_string()
+        };
+        let rect = Rect::new(top.x + 3, top.y, room.min(u16::MAX as usize) as u16, 1);
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(cap, theme.keycap()),
-                Span::styled(text, theme.fg(Tone::Muted)),
-            ])),
+            Paragraph::new(format!("{:<w$}", fit(&hint, room, &theme), w = room))
+                .style(theme.fg(Tone::Text)),
             rect,
         );
-        if hovered(ui, rect) && theme.animated() {
-            neon::sweep(
-                f.buffer_mut(),
-                rect,
-                &theme,
-                (theme.clock() * 0.8).fract(),
-                u64::from(x),
-            );
-        }
-        if !id.is_empty() {
-            ui.quick_hits.push((rect, id));
-        }
-        x += w + 1;
     }
 }
 
@@ -4036,7 +3866,7 @@ mod tests {
                 .quick_hits
                 .iter()
                 .filter(|(_, id)| {
-                    id == "more"
+                    id == "bar:actions"
                         || id == "detach"
                         || ui
                             .snapshot
@@ -4048,12 +3878,12 @@ mod tests {
             assert!(!actions.is_empty(), "{view:?}");
             assert!(actions.iter().all(|(rect, _)| rect.y == 39), "{view:?}");
             let footer: String = (0..190).map(|x| buffer[(x, 39)].symbol()).collect();
-            assert_eq!(footer.matches("More").count(), 1, "{view:?}");
+            assert_eq!(footer.matches("Actions").count(), 1, "{view:?}");
             assert!(!footer.contains("Menu"), "{view:?}");
             ui.hide_keys = true;
             render(&mut ui, 190, 40);
             assert!(!ui.quick_hits.iter().any(|(_, id)| {
-                id == "more"
+                id == "bar:actions"
                     || ui
                         .snapshot
                         .terminal_actions
@@ -4066,12 +3896,105 @@ mod tests {
     fn shortcut_bar_hides_and_returns_the_row() {
         let mut ui = workspace(Theme::default(), View::Tree);
         let shown = text(&render(&mut ui, 140, 36));
-        assert!(shown.contains("Hide keys"));
+        assert!(shown.contains("All keys"));
         ui.hide_keys = true;
         let hidden = text(&render(&mut ui, 140, 36));
         assert!(!hidden.contains("Unfold/fold all"));
         // The way back stays visible on the status line.
-        assert!(hidden.contains("? keys"));
+        assert!(hidden.contains("Show controls"));
+    }
+    #[test]
+    fn contextual_controls_fit_without_overlap_and_always_leave_a_way_out() {
+        for width in [44, 60, 80, 140, 180, 300] {
+            for view in View::ALL {
+                for overlay in ["none", "menu", "dialog", "options", "help", "search"] {
+                    let mut ui = workspace(
+                        Theme {
+                            reduced_motion: true,
+                            ..Theme::default()
+                        },
+                        view,
+                    );
+                    ui.reveal("a");
+                    match overlay {
+                        "menu" => crate::context_menu::show(&mut ui, "a", width - 1, 39),
+                        "dialog" => {
+                            ui.dialog = Some(Dialog {
+                                mode: "choose".into(),
+                                ..Dialog::default()
+                            })
+                        }
+                        "options" => crate::open_options(&mut ui),
+                        "help" => ui.binding_search = Some(String::new()),
+                        "search" => ui.searching = true,
+                        _ => {}
+                    }
+                    let buffer = render(&mut ui, width, 40);
+                    let controls: Vec<_> =
+                        ui.quick_hits.iter().filter(|(r, _)| r.y == 39).collect();
+                    assert!(!controls.is_empty(), "{width} {view:?} {overlay}");
+                    let mut seen = std::collections::HashSet::new();
+                    for (i, (r, id)) in controls.iter().enumerate() {
+                        assert!(r.right() <= width && r.height == 1);
+                        assert!(seen.insert(id), "duplicate {id}");
+                        for (other, _) in &controls[i + 1..] {
+                            assert!(
+                                r.intersection(*other).is_empty(),
+                                "{width} {view:?} {overlay}"
+                            );
+                        }
+                    }
+                    let exit = if overlay == "none" {
+                        "bar:help"
+                    } else {
+                        "bar:esc"
+                    };
+                    assert!(
+                        controls.iter().any(|(_, id)| id == exit),
+                        "{width} {view:?} {overlay}"
+                    );
+                    let footer: String = (0..width).map(|x| buffer[(x, 39)].symbol()).collect();
+                    assert!(
+                        footer.contains(if overlay == "none" {
+                            "All keys"
+                        } else if overlay == "search" {
+                            "Clear"
+                        } else if overlay == "dialog" {
+                            "Cancel"
+                        } else {
+                            "Close"
+                        }),
+                        "{footer}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn control_hover_explains_actions_without_hiding_an_error() {
+        let mut ui = workspace(
+            Theme {
+                reduced_motion: true,
+                ..Theme::default()
+            },
+            View::Map,
+        );
+        ui.reveal("a");
+        render(&mut ui, 180, 40);
+        let rect = ui
+            .quick_hits
+            .iter()
+            .find(|(_, id)| id == "bar:checkpoint")
+            .unwrap()
+            .0;
+        ui.pointer = Some((rect.x, rect.y));
+        let screen = text(&render(&mut ui, 180, 40));
+        assert!(screen.contains("Quick-save a private session reference"));
+        ui.status_error = true;
+        ui.status = "KEEP THIS ERROR VISIBLE".into();
+        let screen = text(&render(&mut ui, 180, 40));
+        assert!(screen.contains("KEEP THIS ERROR VISIBLE"));
+        assert!(!screen.contains("Quick-save a private session reference"));
     }
     #[test]
     fn tree_labels_color_each_part_by_role() {
@@ -4299,7 +4222,9 @@ mod tests {
             ui.settings.agent_session_ids = false;
             let buffer = render(&mut ui, 66, 23);
             assert!(!text(&buffer).contains("SID:"));
-            assert_eq!(ui.inline_screen, Some(Rect::new(0, 0, 66, 23)));
+            assert_eq!(ui.inline_screen, Some(Rect::new(0, 1, 66, 22)));
+            let heading: String = (0..66).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(heading.contains("alpha"));
         }
     }
     #[test]
@@ -4420,7 +4345,7 @@ mod tests {
         assert!(rendered.contains("NOT CONNECTED"));
         assert!(rendered.contains("Esc returns"));
         assert!(rendered.contains("watches it read-only"));
-        assert!(ui.quick_hits.iter().any(|(_, id)| id == "detach"));
+        assert!(ui.quick_hits.iter().any(|(_, id)| id == "bar:esc"));
     }
     #[test]
     fn workspace_views_render_at_every_size_in_ascii_and_no_color() {
@@ -4587,7 +4512,7 @@ mod tests {
         repeated.quick = "x".into();
         ui.snapshot.terminal_actions.push(repeated);
         let rendered = text(&render(&mut ui, 180, 40));
-        assert_eq!(rendered.matches("Attach").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("Type").count(), 1, "{rendered}");
         assert_eq!(
             ui.quick_hits
                 .iter()
@@ -4597,7 +4522,7 @@ mod tests {
         );
         let buffer = render(&mut ui, 180, 40);
         let footer: String = (0..180).map(|x| buffer[(x, 39)].symbol()).collect();
-        assert_eq!(footer.matches("Attach").count(), 1);
+        assert_eq!(footer.matches("Type").count(), 1);
         assert_eq!(footer.matches("Watch").count(), 1);
         assert!(ui.quick_hits.iter().all(|(rect, _)| rect.y == 39));
     }
@@ -4888,6 +4813,96 @@ mod tests {
                 );
                 assert!(!ui.focus_tree_hits.iter().any(|(_, id, _)| id == "b-agent"));
                 ui.collapsed.remove("b");
+            }
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn attaching_and_using_the_prefix_menu_never_replaces_a_map_pane_title() {
+        for (mode, prefix) in [("control", false), ("observe", false), ("control", true)] {
+            let mut ui = workspace(
+                Theme {
+                    reduced_motion: true,
+                    ..Theme::default()
+                },
+                View::Map,
+            );
+            ui.select_id("a");
+            let index = ui.tiles().iter().position(|r| r.id == "a").unwrap();
+            ui.select_tile(index);
+            let before = render(&mut ui, 160, 40);
+            let rect = ui.tile_hits.iter().find(|(_, i)| *i == index).unwrap().0;
+            let title = |buffer: &ratatui::buffer::Buffer| {
+                (rect.x..rect.right())
+                    .map(|x| buffer[(x, rect.y)].symbol())
+                    .collect::<String>()
+            };
+            let expected = title(&before);
+            assert!(expected.contains("alpha"), "{expected}");
+            let plan = crate::embed::Plan {
+                adapter: "native-session".into(),
+                mode: mode.into(),
+                node: "a".into(),
+                argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/cat".into()],
+                ..crate::embed::Plan::default()
+            };
+            let mut stream = crate::embed::Embed::start(plan, 20, 80).unwrap();
+            stream.phase = Phase::Live;
+            stream.prefix = prefix;
+            stream.parser.process(b"PROGRAM_CONTENT");
+            ui.embed = Some(stream);
+            let after = render(&mut ui, 160, 40);
+            assert!(
+                title(&after).contains("alpha"),
+                "title replaced in {mode}, prefix={prefix}"
+            );
+            assert!(text(&after).contains("PROGRAM_CONTENT"));
+        }
+    }
+    #[test]
+    fn map_terminal_letters_keep_native_colors_during_bright_background_effects() {
+        let mut ui = workspace(Theme::default(), View::Map);
+        ui.theme.backdrop = true;
+        ui.look = Look::ArtBright;
+        ui.paged_at = Some(Instant::now());
+        let ids = ui
+            .snapshot
+            .tree
+            .iter()
+            .filter(|n| n.tile.is_some())
+            .map(|n| n.id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            ui.previews.insert(
+                id,
+                crate::model::Preview::new("\x1b[38;2;10;200;90mREADABLE\x1b[0m", ""),
+            );
+        }
+        let buffer = render(&mut ui, 190, 50);
+        let mut count = 0;
+        for (rect, _, _) in &ui.screens {
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    let cell = &buffer[(x, y)];
+                    if cell.symbol() == "R" {
+                        assert_eq!(cell.fg, Color::Rgb(10, 200, 90));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert!(count > 0);
+        let nav = ui.map.nav.area.unwrap();
+        ui.look = Look::Off;
+        ui.paged_at = None;
+        let plain = render(&mut ui, 190, 50);
+        for y in nav.y..nav.bottom() {
+            for x in nav.x..nav.right() {
+                assert_eq!(
+                    buffer[(x, y)],
+                    plain[(x, y)],
+                    "navigation must remain legible during effects"
+                );
             }
         }
     }

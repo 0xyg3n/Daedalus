@@ -532,6 +532,52 @@
       "quick": ""
     },
     {
+      "id": "checkpoint.save-open",
+      "key": "checkpoint-save-open",
+      "page": 1,
+      "group": "Checkpoints",
+      "title": "Save checkpoint & open new pane",
+      "note": "Save this session privately, then fork, resume or hand off into a new pane here.",
+      "icon": "save",
+      "effects": [
+        "confirm",
+        "settings",
+        "launch",
+        "target"
+      ],
+      "aliases": [
+        "save and spawn",
+        "checkpoint new pane"
+      ],
+      "context": "Save checkpoint & open new pane",
+      "context_note": "Save first, then choose how to open it. Your original pane stays running.",
+      "listed": false,
+      "quick": ""
+    },
+    {
+      "id": "checkpoint.open-here",
+      "key": "checkpoint-open-here",
+      "page": 1,
+      "group": "Checkpoints",
+      "title": "Open saved checkpoint here",
+      "note": "Choose a saved checkpoint and open it in a new pane beside the selected terminal.",
+      "icon": "fork",
+      "effects": [
+        "confirm",
+        "launch",
+        "target"
+      ],
+      "aliases": [
+        "restore checkpoint",
+        "spawn saved session",
+        "checkpoint here"
+      ],
+      "context": "Open saved checkpoint here",
+      "context_note": "Choose a saved checkpoint, operation and exact destination before launching.",
+      "listed": false,
+      "quick": ""
+    },
+    {
       "id": "checkpoint.save",
       "key": "checkpoint-save",
       "page": 2,
@@ -1199,6 +1245,54 @@
       "context_note": "",
       "listed": true,
       "quick": ""
+    },
+    {
+      "id": "project.review",
+      "key": "project-review",
+      "page": 1,
+      "group": "Projects & agents",
+      "title": "Project · Git review",
+      "note": "Review changes, stage paths, commit locally and create isolated worktrees.",
+      "icon": "workspace",
+      "effects": [
+        "guided",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "git",
+        "diff",
+        "worktree"
+      ],
+      "context": "Project · Git review",
+      "context_note": "Review changes, stage paths, commit locally and create isolated worktrees.",
+      "listed": true,
+      "quick": ""
+    },
+    {
+      "id": "workspace.orchestrate",
+      "key": "orchestrate",
+      "page": 1,
+      "group": "Projects & agents",
+      "title": "Agent orchestration",
+      "note": "Run durable task plans across exact agent panes with dependencies and parallel limits.",
+      "icon": "workflow",
+      "effects": [
+        "workflow",
+        "confirm",
+        "target"
+      ],
+      "aliases": [
+        "tasks",
+        "agents",
+        "queue",
+        "parallel",
+        "dependencies"
+      ],
+      "context": "Agent orchestration",
+      "context_note": "Run durable task plans across exact agent panes with dependencies and parallel limits.",
+      "listed": true,
+      "quick": ""
     }
   ],
   "effects": {
@@ -1266,6 +1360,8 @@
     "terminal.focus",
     "terminal.native",
     "checkpoint.save",
+    "checkpoint.save-open",
+    "checkpoint.open-here",
     "terminal.fork",
     "terminal.duplicate",
     "terminal.views",
@@ -1275,6 +1371,8 @@
     "terminal.rename",
     "terminal.new",
     "terminal.organize",
+    "project.review",
+    "workspace.orchestrate",
     "terminal.interrupt",
     "terminal.close"
   ],

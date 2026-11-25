@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn metadata_matches_reviewed_action_and_navigation_contract() {
         let registry = builtin();
-        assert_eq!(registry.actions.len(), 51);
+        assert_eq!(registry.actions.len(), 55);
         assert_eq!(registry.sections.len(), 11);
         // Add the reviewed interface-settings action to the existing Settings
         // page; retain all navigation sections and terminal shortcut order.
@@ -375,11 +375,15 @@ mod tests {
             .iter()
             .filter(|a| {
                 ![
+                    "checkpoint.save-open",
+                    "checkpoint.open-here",
                     "settings.runtime",
                     "settings.instance",
                     "settings.memory",
                     "settings.dashboard",
                     "settings.history",
+                    "project.review",
+                    "workspace.orchestrate",
                 ]
                 .contains(&a.id.as_str())
             })
@@ -429,6 +433,8 @@ mod tests {
                 "terminal.focus",
                 "terminal.native",
                 "checkpoint.save",
+                "checkpoint.save-open",
+                "checkpoint.open-here",
                 "terminal.fork",
                 "terminal.duplicate",
                 "terminal.views",
@@ -438,6 +444,8 @@ mod tests {
                 "terminal.rename",
                 "terminal.new",
                 "terminal.organize",
+                "project.review",
+                "workspace.orchestrate",
                 "terminal.interrupt",
                 "terminal.close"
             ]

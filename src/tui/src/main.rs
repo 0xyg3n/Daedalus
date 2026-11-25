@@ -1,8 +1,12 @@
 mod backdrop;
 mod clipboard;
+mod context_menu;
 mod embed;
 mod graphics;
 mod harness_icons;
+mod hotkey_bar;
+mod map;
+mod map_nav;
 mod model;
 mod neon;
 mod options;
@@ -97,7 +101,7 @@ fn parse_args(args: Vec<String>) -> io::Result<(bool, Vec<String>)> {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "tui" => {}
+            "tui" | "popup" => {}
             "setup" => setup = true,
             "--demo" => backend.push(arg),
             "--config-dir" => {
@@ -138,7 +142,17 @@ fn initial_snapshot() -> Snapshot {
 }
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "orchestrate") {
+        return daedalus_tui::app::orchestration::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other);
+    }
+    let popup = args.first().is_some_and(|a| a == "popup");
+    if args.first().is_some_and(|a| a == "herdr") {
+        daedalus_tui::app::herdr_integration::run(&args[1..], &mut io::stdout())
+            .map_err(io::Error::other)?;
+        return Ok(());
+    }
     #[cfg(windows)]
     let _service_log = if let [telegram, serve, flag, directory] = args.as_slice()
         && telegram == "telegram"
@@ -359,11 +373,12 @@ fn main() -> io::Result<()> {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Daedalus {} terminal control interface\nUsage: daedalus [tui|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, setup, shell, terminal-native, agent, inventory, workspace-usage, terminal, checkpoint, route, job, hook, goal, telegram, memory, gateway, dashboard, history, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: [ and ] switch Tree, Tiles, Wall, Cube and Focus; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
+            "Daedalus {} terminal control interface\nUsage: daedalus [tui|popup|setup] [--demo] [--config-dir PATH] [--version]\n\nCommands: tui, popup, herdr, setup, shell, terminal-native, agent, inventory, workspace-usage, terminal, checkpoint, orchestrate, route, job, hook, goal, telegram, memory, gateway, dashboard, history, config, diagnostics, agent-identity, update.\nUse COMMAND --help for its options.\nRemote: daedalus tui --remote SSH_ALIAS --remote-config-dir /absolute/remote/state [--remote-bin /path/to/daedalus].\nConfigure SSH authentication and the remote instance first; the header identifies its host.\n\nTab or 0-9: sections; Ctrl+P: commands; /: search; ?: key bar; q: exit.\nWorkspaces: F2 actions, F3 focus, F4 Tetris, F5 checkpoint, F6 Git review, F7 agent tasks; [ and ] switch layouts; o orders by activity;\na attaches; w watches.\nInside an attached terminal, Ctrl+] then D detaches; the terminal keeps running.\nNO_COLOR=1 removes color; DAEDALUS_REDUCED_MOTION=1 stops animation;\nDAEDALUS_ICONS=ascii uses plain characters; DAEDALUS_BACKDROP=0 hides the background\nlight and artwork; DAEDALUS_SPLASH=0 skips the start-up splash;\nDAEDALUS_GRAPHICS=0 keeps artwork to text cells, =kitty always asks for pictures;\nDAEDALUS_SCREENSAVER=SECONDS sets the idle time before the screensaver (0: never); s toggles it.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
     }
+    let remote = daedalus_tui::app::remote::take_options(&mut args).map_err(io::Error::other)?;
     let (mut setup, backend_args) = parse_args(args)?;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
@@ -377,8 +392,12 @@ fn main() -> io::Result<()> {
     )
     .map_err(io::Error::other)?;
     let settings = launch.interface_settings().map_err(io::Error::other)?;
-    setup |= launch.first_run;
-    let mut backend = launch.command(std::env::current_exe()?.as_os_str());
+    setup |= launch.first_run && remote.is_none();
+    let mut backend = if let Some(remote) = &remote {
+        remote.backend().map_err(io::Error::other)?
+    } else {
+        launch.command(std::env::current_exe()?.as_os_str())
+    };
     daedalus_tui::platform::hide_console(&mut backend);
     let mut child = backend
         .stdin(Stdio::piped())
@@ -405,7 +424,10 @@ fn main() -> io::Result<()> {
         settings: settings.clone(),
         theme,
         still: theme.reduced_motion,
-        splash: theme.splash.then(Splash::new),
+        splash: (theme.splash && !popup).then(Splash::new),
+        popup,
+        popup_start: popup,
+        remote,
         page: if setup { OVERVIEW } else { WORKSPACES },
         busy: true,
         status: "Discovering local configuration…".into(),
@@ -455,7 +477,11 @@ fn main() -> io::Result<()> {
         EnableFocusChange
     )?;
     // While this process owns the Herdr pane, right click stays in Daedalus.
-    let _herdr_menu = HerdrMenuGuard::engage();
+    let _herdr_menu = if popup || backend_args.iter().any(|arg| arg == "--demo") {
+        None
+    } else {
+        HerdrMenuGuard::engage()
+    };
     let result = (|| -> io::Result<()> {
         'ui: loop {
             loop {
@@ -630,6 +656,7 @@ fn main() -> io::Result<()> {
                     continue;
                 }
                 if matches!(event, Event::Resize(..)) {
+                    map::cancel(&mut ui);
                     ui.pane_resize = None;
                     ui.dragging = None;
                     ui.inline_screen = None;
@@ -662,6 +689,12 @@ fn main() -> io::Result<()> {
                 if saver_input(&mut ui, &event) {
                     continue;
                 }
+                let event = match event {
+                    Event::Mouse(mouse) => hotkey_bar::key_for_click(&ui, mouse)
+                        .map(Event::Key)
+                        .unwrap_or(Event::Mouse(mouse)),
+                    other => other,
+                };
                 let step = match event {
                     Event::Paste(text) => paste(&mut ui, &text),
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -732,6 +765,7 @@ fn main() -> io::Result<()> {
             }
             // Panel sizes need no answer, so they never wait behind an action.
             if ui.dragging.is_none()
+                && ui.map.drag.is_none()
                 && ui.dialog.is_none()
                 && !ui.busy
                 && ui.sizes_changed.is_some_and(|at| {
@@ -745,7 +779,7 @@ fn main() -> io::Result<()> {
                 host.send(json!({
                     "op":"previews",
                     "nodes":ui.preview_targets,
-                    "rows":ui.preview_rows,
+                    "rows":ui.preview_rows.saturating_add(ui.preview_offsets.values().copied().max().unwrap_or(0)).min(200),
                 }))?;
                 ui.preview_pending = true;
                 ui.last_preview = Some(Instant::now());
@@ -818,6 +852,13 @@ fn view_state(ui: &Ui) -> Value {
         "mode": ui.view.name(),
         "selected": selected,
         "sizes": ui.sizes,
+        "map": ui.map.cards,
+        "map_native": ui.map.native_signatures,
+        "map_split": if matches!(ui.map.split.as_str(),"columns"|"rows"){ui.map.split.as_str()}else{"off"},
+        "map_primary": ui.map.primary,
+        "map_peer": ui.map.peer,
+        "map_ratio": if ui.map.ratio<10{50}else{ui.map.ratio.clamp(10,90)},
+        "palette": ui.theme.palette.name(),
         "backdrop": ui.look.name(),
         "saver": if ui.saver.enabled { "on" } else { "off" },
         "order": ui.order.name(),
@@ -838,7 +879,12 @@ fn switch(on: bool) -> &'static str {
 
 /// A Workspaces request about one exact terminal.
 fn terminal_request(ui: &Ui, action: &str, node: &str) -> Value {
-    json!({"op":"action","page":WORKSPACES,"action":action,"node":node,"view":view_state(ui)})
+    let mut request =
+        json!({"op":"action","page":WORKSPACES,"action":action,"node":node,"view":view_state(ui)});
+    if node.is_empty() && matches!(action, "project.review" | "workspace.orchestrate") {
+        request.as_object_mut().unwrap().remove("node");
+    }
+    request
 }
 
 /// Finish a request without replacing navigation started after it was selected.
@@ -852,11 +898,45 @@ fn apply_state(ui: &mut Ui, mut state: Snapshot) {
         state.focus.clear();
         state.workspace.apply.mode.clear();
         state.workspace.apply.selected.clear();
+        state.workspace.apply.map = None;
+        for key in [
+            "map_split",
+            "map_primary",
+            "map_peer",
+            "map_ratio",
+            "map_native",
+        ] {
+            state.workspace.apply.switches.remove(key);
+        }
     }
     if ui.page != WORKSPACES {
         leave_focus(ui);
     }
     ui.update(state);
+    if ui.popup_start && !ui.snapshot.tree.is_empty() {
+        ui.popup_start = false;
+        ui.view = View::Map;
+        ui.previous = View::Map;
+        let pane = std::env::var("HERDR_ACTIVE_PANE_ID").unwrap_or_default();
+        let session = std::env::var("HERDR_SESSION").unwrap_or_default();
+        let matching: Vec<_> = ui
+            .snapshot
+            .tree
+            .iter()
+            .filter(|n| {
+                let key: Vec<Value> = serde_json::from_str(&n.id).unwrap_or_default();
+                n.tile.is_some()
+                    && key.len() >= 3
+                    && key[0] == "herdr"
+                    && (session.is_empty() || key[1] == session)
+                    && key[key.len() - 2] == pane
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        if matching.len() == 1 {
+            ui.reveal(&matching[0]);
+        }
+    }
     ui.busy = false;
     ui.finish_request();
     ui.refresh_status(action_completed);
@@ -868,11 +948,14 @@ fn open_embed(ui: &mut Ui, plan: &Value) {
     // Release even on malformed plans or failed process startup so retry works.
     ui.busy = false;
     ui.finish_request();
-    let Ok(plan) = serde_json::from_value::<Plan>(plan.clone()) else {
+    let Ok(mut plan) = serde_json::from_value::<Plan>(plan.clone()) else {
         ui.status = "Unexpected attach plan".into();
         ui.status_error = true;
         return;
     };
+    // The trusted client connection owns this route, never a backend-provided
+    // host or a previous environment's local executable path.
+    plan.remote = ui.remote.clone();
     if let Some(mut old) = ui.embed.take() {
         old.detach();
     }
@@ -1103,6 +1186,14 @@ fn dialog_key(ui: &mut Ui, mut dialog: Dialog, key: KeyEvent, host: &mut Host) -
         return Ok(false);
     };
     let external = dialog.mode == "external" && value == "ready";
+    if external && ui.remote.is_some() {
+        host.send(json!({"op":"reply","id":dialog.id,"value":null}))?;
+        ui.status =
+            "Remote native viewers require a remote TTY. Use Attach or Watch inside Daedalus."
+                .into();
+        ui.status_error = true;
+        return Ok(false);
+    }
     if external {
         // The native client takes the real terminal; stop the embedded view first.
         leave_focus(ui);
@@ -1200,6 +1291,9 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
     if let Some(step) = focus_resize_key(ui, key) {
         return step;
     }
+    if matches!(key.code, KeyCode::Char('s' | 'S')) {
+        return quick_action(ui, "checkpoint.quick");
+    }
     if matches!(key.code, KeyCode::Char('n' | 'N')) {
         return quick_action(ui, "terminal.new");
     }
@@ -1272,6 +1366,78 @@ fn prefix_command(ui: &mut Ui, key: KeyEvent) -> Step {
 }
 
 fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
+    if ui.popup && key.code == KeyCode::F(12) {
+        return Step::Quit;
+    }
+    if key.code == KeyCode::Esc && map::cancel(ui) {
+        return Step::Continue;
+    }
+    if let Some(step) = context_menu::key(ui, key) {
+        return step;
+    }
+    if ui.page == WORKSPACES
+        && ui.dialog.is_none()
+        && ui.options.is_none()
+        && ui.binding_search.is_none()
+        && (key.code == KeyCode::Menu
+            || key.code == KeyCode::F(10) && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        context_menu::open_selected(ui);
+        return Step::Continue;
+    }
+    if ui.page == WORKSPACES
+        && ui.view == View::Tree
+        && key.code == KeyCode::Enter
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return switch_view(ui, View::Map);
+    }
+    // Function keys are reserved by Daedalus in every view, including attached input.
+    if ui.dialog.is_none() && ui.options.is_none() && ui.binding_search.is_none() && !ui.searching {
+        match key.code {
+            KeyCode::F(2) => {
+                context_menu::open_selected(ui);
+                return Step::Continue;
+            }
+            KeyCode::F(3) => {
+                return switch_view(
+                    ui,
+                    if ui.view == View::Focus {
+                        ui.previous
+                    } else {
+                        View::Focus
+                    },
+                );
+            }
+            KeyCode::F(4) => {
+                if ui.page != WORKSPACES {
+                    let selected = ui.last_selected.clone();
+                    ui.navigate(WORKSPACES);
+                    if !selected.is_empty() {
+                        ui.reveal(&selected);
+                    }
+                }
+                return switch_view(ui, View::Map);
+            }
+            KeyCode::F(5) => return quick_action(ui, "checkpoint.quick"),
+            KeyCode::F(6) => {
+                return Step::Send(terminal_request(
+                    ui,
+                    "project.review",
+                    &ui.selected_terminal().unwrap_or_default(),
+                ));
+            }
+            KeyCode::F(7) => {
+                return Step::Send(terminal_request(
+                    ui,
+                    "workspace.orchestrate",
+                    &ui.selected_terminal().unwrap_or_default(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
     if shortcuts::key(ui, key) {
         return Step::Continue;
     }
@@ -1515,6 +1681,9 @@ fn key_event(ui: &mut Ui, key: KeyEvent) -> Step {
             close_focus(ui);
             return Step::Continue;
         }
+        KeyCode::Esc if workspaces && ui.view == View::Map && ui.filter.is_empty() => {
+            return switch_view(ui, View::Tree);
+        }
         KeyCode::Esc => {
             ui.filter.clear();
             ui.select(0, true);
@@ -1718,6 +1887,9 @@ impl Drop for HerdrMenuGuard {
     }
 }
 fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
+    if let Some(step) = map::key(ui, key) {
+        return Some(step);
+    }
     let plain = !key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
@@ -1758,6 +1930,10 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
             })));
         }
         KeyCode::Char('m') if plain => {
+            if ui.view == View::Tree && ui.selected_terminal().is_none() {
+                context_menu::open_selected(ui);
+                return Some(Step::Continue);
+            }
             return Some(match ui.selected_terminal() {
                 Some(node) => Step::Send(terminal_request(ui, &node, &node)),
                 None => Step::Continue,
@@ -1809,7 +1985,7 @@ fn workspace_key(ui: &mut Ui, key: KeyEvent) -> Option<Step> {
     }
     match ui.view {
         View::Tree => None,
-        View::Tiles | View::Wall | View::Cube => {
+        View::Tiles | View::Wall | View::Cube | View::Map => {
             let row = ui.tile_columns.max(1) as isize;
             if matches!(ui.view, View::Tiles | View::Wall)
                 && key.modifiers.contains(KeyModifiers::ALT)
@@ -1957,7 +2133,42 @@ fn toggle_zoom(ui: &mut Ui) {
     };
 }
 
+fn open_map_scope(ui: &mut Ui, scope: &str) -> Step {
+    let Some(pane) = ui.terminal_in_scope(scope) else {
+        ui.status="This branch has no available pane. Refresh or select a live pane; no other workspace was opened.".into();
+        ui.status_error = true;
+        return Step::Continue;
+    };
+    if ui.embed.as_ref().is_some_and(|e| e.plan.node != pane) {
+        ui.detach_inline();
+    }
+    ui.filter.clear();
+    ui.searching = false;
+    ui.pinned_only = false;
+    ui.working_only = false;
+    ui.fullscreen_from = None;
+    ui.zoomed = false;
+    ui.set_view(View::Map);
+    map::choose(ui, &pane);
+    ui.last_preview = None;
+    ui.status = "Tetris opened for the selected branch · Esc returns to Tree".into();
+    ui.status_error = false;
+    ui.sizes_changed = Some(Instant::now());
+    Step::Continue
+}
 fn switch_view(ui: &mut Ui, target: View) -> Step {
+    if target == View::Map && ui.view == View::Tree {
+        let Some(scope) = ui
+            .selected_row()
+            .filter(|r| r.kind == Kind::Node)
+            .map(|r| r.id)
+        else {
+            ui.status = "Select a workspace, tab or pane, then press F4 to open its Tetris.".into();
+            ui.status_error = true;
+            return Step::Continue;
+        };
+        return open_map_scope(ui, &scope);
+    }
     if target != ui.view {
         ui.detach_inline();
     }
@@ -1983,40 +2194,43 @@ fn switch_view(ui: &mut Ui, target: View) -> Step {
     Step::Continue
 }
 
-/// F11 fills the screen with the selected terminal. The same key leaves it.
-/// From Wall, Tiles or Cube it opens Focus zoomed, and returns there afterwards.
-/// From Focus it only zooms, and the second press restores the whole tab.
+/// F11 expands the exact selected terminal, retaining its stream and Map geometry.
 fn toggle_fullscreen(ui: &mut Ui) -> Step {
     if let Some(origin) = ui.fullscreen_from.take() {
-        ui.zoomed = false;
-        ui.last_preview = None;
         if origin != View::Focus {
-            close_focus(ui);
+            ui.set_view(origin);
         }
-        ui.status = "Left fullscreen".into();
+        ui.zoomed = false;
+        ui.inline_screen = None;
+        if let Some(embed) = ui.embed.as_mut() {
+            embed.origin = None;
+            embed.prefix = false;
+        }
+        ui.last_preview = None;
+        ui.status = "Left fullscreen · returned to the same layout".into();
         ui.status_error = false;
         return Step::Continue;
     }
-    if ui.selected_terminal().is_none() {
+    let Some(selected) = ui.selected_terminal() else {
         ui.status = "Select a terminal to fill the screen".into();
         ui.status_error = true;
         return Step::Continue;
-    }
-    let origin = ui.view;
-    let step = if origin == View::Focus {
-        Step::Continue
-    } else {
-        switch_view(ui, View::Focus)
     };
-    if ui.view != View::Focus {
-        return step;
+    let origin = ui.view;
+    let keep_stream = ui.embed.as_ref().is_some_and(|e| e.plan.node == selected);
+    if origin != View::Focus {
+        ui.set_view(View::Focus);
     }
     ui.fullscreen_from = Some(origin);
     ui.zoomed = true;
     ui.last_preview = None;
-    ui.status = "Fullscreen · F11 returns".into();
+    ui.status = "Fullscreen · F11 or Back returns to the same layout".into();
     ui.status_error = false;
-    step
+    if keep_stream || origin == View::Focus {
+        Step::Continue
+    } else {
+        quick_action(ui, "terminal.watch")
+    }
 }
 
 fn wall_preset(ui: &mut Ui, scope: &str) -> Step {
@@ -2128,44 +2342,140 @@ fn quick_action(ui: &mut Ui, action: &str) -> Step {
     Step::Send(terminal_request(ui, action, &node))
 }
 
+fn terminal_scroll(ui: &mut Ui, mouse: MouseEvent) -> bool {
+    let up = match mouse.kind {
+        MouseEventKind::ScrollUp => true,
+        MouseEventKind::ScrollDown => false,
+        _ => return false,
+    };
+    if ui.page != WORKSPACES {
+        return false;
+    }
+    let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+    let tiles = ui.tiles();
+    let id = ui
+        .tile_hits
+        .iter()
+        .find(|(r, _)| r.contains(point))
+        .and_then(|(_, i)| tiles.get(*i).map(|t| t.id.clone()))
+        .or_else(|| {
+            ui.screens
+                .iter()
+                .rev()
+                .find(|(r, _, _)| r.contains(point))
+                .map(|(_, id, _)| id.clone())
+        })
+        .or_else(|| {
+            ui.pane_hits
+                .iter()
+                .find(|(r, _)| r.contains(point))
+                .map(|(_, id)| id.clone())
+        });
+    let Some(id) = id else {
+        return ui.view == View::Focus || (ui.view == View::Map && ui.map.area.contains(point));
+    };
+    if let Some(embed) = ui.embed.as_mut().filter(|e| e.plan.node == id)
+        && embed.mouse(mouse, ui.settings.terminal_scroll_rows)
+    {
+        return true;
+    }
+    let amount = ui.settings.terminal_scroll_rows.min(200) as u16;
+    let offset = ui.preview_offsets.entry(id).or_default();
+    *offset = if up {
+        offset.saturating_add(amount).min(200)
+    } else {
+        offset.saturating_sub(amount)
+    };
+    ui.last_preview = None;
+    ui.preview_sent.clear();
+    true
+}
+
 fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
     if mouse.kind == MouseEventKind::Down(event::MouseButton::Left) {
         ui.note_navigation();
+    }
+    if let Some(step) = hotkey_bar::mouse(ui, mouse) {
+        return step;
     }
     if ui.binding_search.is_some() {
         return Step::Continue;
     }
 
     ui.pointer = Some((mouse.column, mouse.row));
-    // Herdr's own menu is disabled for this pane. A right click stays here
-    // and, on Windows, pastes into the attached terminal.
-    if matches!(
-        mouse.kind,
-        MouseEventKind::Down(event::MouseButton::Right)
-            | MouseEventKind::Up(event::MouseButton::Right)
-            | MouseEventKind::Drag(event::MouseButton::Right)
-    ) {
-        #[cfg(windows)]
-        if mouse.kind == MouseEventKind::Down(event::MouseButton::Right)
-            && let Some((id, _)) = select::cell_at(ui, mouse.column, mouse.row)
-            && ui.inline_screen.is_some()
-            && ui.embed.as_ref().is_some_and(|embed| {
-                embed.plan.node == id && embed.mode == Mode::Control && embed.live()
-            })
+    if mouse.kind == MouseEventKind::Down(event::MouseButton::Right) {
+        if ui.dialog.is_none() && ui.options.is_none() {
+            context_menu::open(ui, mouse);
+        }
+        return Step::Continue;
+    }
+    if let Some(step) = context_menu::mouse(ui, mouse) {
+        return step;
+    }
+    if mouse.kind == MouseEventKind::Down(event::MouseButton::Left)
+        && ui.dialog.is_none()
+        && ui.options.is_none()
+    {
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if ui.view == View::Map
+            && let Some((_, action, target)) = ui
+                .map
+                .toolbar_hits
+                .iter()
+                .find(|(r, _, _)| r.contains(point))
+                .cloned()
         {
-            match clipboard::read(ui.settings.clipboard_read_limit_bytes as usize) {
-                Ok(text) => {
-                    if let Some(embed) = ui.embed.as_mut() {
-                        embed.paste(&text);
-                    }
-                    ui.status = "Pasted".into();
-                    ui.status_error = false;
-                }
-                Err(message) => {
-                    ui.status = message.into();
-                    ui.status_error = true;
-                }
+            if action == "actions" {
+                context_menu::show(ui, &target, mouse.column, mouse.row);
+                return Step::Continue;
             }
+            if ui.terminal_node(&target).is_none_or(|n| n.conflicted) {
+                ui.status = "Pane changed; refresh before using its controls.".into();
+                ui.status_error = true;
+                return Step::Continue;
+            }
+            map::choose(ui, &target);
+            return match action.as_str() {
+                "tree" => switch_view(ui, View::Tree),
+                "shell" => quick_action(ui, "terminal.shell-below"),
+                "fit" => {
+                    map::reset(ui);
+                    Step::Continue
+                }
+                _ => Step::Continue,
+            };
+        }
+        if ui.fullscreen_back.is_some_and(|r| r.contains(point)) {
+            return toggle_fullscreen(ui);
+        }
+        if ui.view == View::Map
+            && let Some((_, id)) = ui
+                .map
+                .fullscreen_hits
+                .iter()
+                .find(|(r, _)| r.contains(point))
+        {
+            let id = id.clone();
+            map::choose(ui, &id);
+            return toggle_fullscreen(ui);
+        }
+    }
+    let title_click = if mouse.kind == MouseEventKind::Up(event::MouseButton::Left) {
+        match ui.map.drag.as_ref() {
+            Some(map::Drag::Move { id, pointer, .. })
+                if pointer.0.abs_diff(mouse.column) <= 1 && pointer.1.abs_diff(mouse.row) <= 1 =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if map::mouse(ui, mouse) {
+        if let Some(id) = title_click {
+            ui.reveal(&id);
+            return quick_action(ui, "terminal.attach");
         }
         return Step::Continue;
     }
@@ -2256,6 +2566,9 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
         && let Some(step) = border_mouse(ui, mouse, position)
     {
         return step;
+    }
+    if terminal_scroll(ui, mouse) {
+        return Step::Continue;
     }
     if select::mouse(ui, mouse) {
         return Step::Continue;
@@ -2374,12 +2687,13 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                 if current.as_deref() != Some(id.as_str()) {
                     return focus_pane(ui, &id);
                 }
-            } else if let Some(&(_, index)) = ui.tile_hits.iter().find(|(r, _)| r.contains(p)) {
+            } else if let Some(&(_, index)) = ui.tile_hits.iter().rev().find(|(r, _)| r.contains(p))
+            {
                 if ui.view == View::Cube && index != ui.tile {
                     ui.cube_anchor = None;
                 }
                 ui.select_tile(index);
-                if ui.view == View::Cube {
+                if matches!(ui.view, View::Cube | View::Map) {
                     ui.clicked = None;
                     return quick_action(ui, "terminal.attach");
                 }
@@ -2389,6 +2703,20 @@ fn mouse_event(ui: &mut Ui, mouse: MouseEvent) -> Step {
                 ui.clicked = Some((index, Instant::now()));
                 if again {
                     return quick_action(ui, "terminal.attach");
+                }
+            } else if let Some((_, id)) = ui.tree_hits.iter().find(|(r, _)| r.contains(p)).cloned()
+            {
+                if !ui.select_id(&id) {
+                    ui.status = "This tree row changed. Refresh and select it again.".into();
+                    ui.status_error = true;
+                    return Step::Continue;
+                }
+                let twice = ui.tree_clicked.as_ref().is_some_and(|(old, at)| {
+                    old == &id && at.elapsed() < Duration::from_millis(ui.settings.double_click_ms)
+                });
+                ui.tree_clicked = Some((id, Instant::now()));
+                if twice {
+                    return switch_view(ui, View::Map);
                 }
             } else if let Some(&(_, row)) = ui.list_hits.iter().find(|(r, _)| r.contains(p)) {
                 ui.select(row, true);
@@ -2928,6 +3256,14 @@ fn change_option(ui: &mut Ui, item: Item, forward: bool) {
     match item {
         Item::Order => toggle_order(ui),
         Item::Sidebar => toggle_sidebar(ui),
+        Item::Palette => {
+            let all = theme::Palette::ALL;
+            let index = all.iter().position(|p| *p == ui.theme.palette).unwrap_or(0);
+            ui.theme.palette = all[(index as isize + if forward { 1 } else { -1 })
+                .rem_euclid(all.len() as isize) as usize];
+            ui.sizes_changed = Some(Instant::now());
+            ui.status = format!("Theme: {}", ui.theme.palette.name());
+        }
         Item::Look => cycle_look(ui, forward),
         Item::Saver => toggle_saver(ui),
         Item::Tiles => {
@@ -3120,6 +3456,181 @@ fn activate(ui: &mut Ui) -> Option<Value> {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    fn scope_tree() -> Ui {
+        let mut ui = Ui {
+            page: WORKSPACES,
+            view: View::Tree,
+            ..Default::default()
+        };
+        ui.snapshot.demo = true;
+        for (id, parent, kind, children, tile) in [
+            ("workspace-a", "", "workspace", true, false),
+            ("tab-a", "workspace-a", "tab", true, false),
+            ("pane-a", "tab-a", "pane", false, true),
+            ("workspace-b", "", "workspace", true, false),
+            ("tab-b", "workspace-b", "tab", true, false),
+            ("pane-b", "tab-b", "pane", true, true),
+            ("agent-b", "pane-b", "agent session", false, false),
+            ("empty", "", "workspace", false, false),
+        ] {
+            ui.snapshot.tree.push(crate::model::Node {
+                id: id.into(),
+                parent: parent.into(),
+                kind: kind.into(),
+                label: "Same label".into(),
+                backend: "herdr".into(),
+                children,
+                tile: tile.then(|| crate::model::Tile {
+                    title: id.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+        ui
+    }
+    #[test]
+    fn tree_groups_open_the_correct_map_by_f4_or_ctrl_enter_and_empty_groups_do_not_jump() {
+        for key in [
+            KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        ] {
+            let mut ui = scope_tree();
+            ui.select_id("workspace-b");
+            ui.last_selected = "agent-b".into();
+            ui.pinned_only = true;
+            ui.collapsed.insert("workspace-b".into());
+            assert!(matches!(key_event(&mut ui, key), Step::Continue));
+            assert_eq!(ui.view, View::Map);
+            assert_eq!(ui.selected_terminal().as_deref(), Some("pane-b"));
+            assert!(!ui.pinned_only);
+            assert!(matches!(
+                key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                Step::Continue
+            ));
+            assert_eq!(ui.view, View::Tree);
+            assert_eq!(ui.selected_terminal().as_deref(), Some("pane-b"));
+        }
+        let mut ui = scope_tree();
+        ui.select_id("empty");
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE));
+        assert_eq!(ui.view, View::Tree);
+        assert!(ui.status_error && ui.status.contains("no available pane"));
+        assert!(ui.within_scope("pane-b", "workspace-b"));
+        assert!(!ui.within_scope("pane-a", "workspace-b"));
+    }
+    #[test]
+    fn tree_double_click_uses_the_drawn_id_and_shift_f10_opens_group_actions() {
+        let mut ui = scope_tree();
+        ui.select_id("tab-b");
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(10), KeyModifiers::SHIFT));
+        assert_eq!(ui.context.as_ref().unwrap().target, "tab-b");
+        key_event(&mut ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let hit = ratatui::layout::Rect::new(3, 8, 30, 1);
+        ui.tree_hits = vec![(hit, "tab-b".into())];
+        ui.list_hits = vec![(hit, 0)];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: 4,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+        mouse_event(&mut ui, click);
+        mouse_event(&mut ui, click);
+        assert_eq!(ui.view, View::Map);
+        assert_eq!(ui.selected_terminal().as_deref(), Some("pane-b"));
+        assert!(ui.tree_hits.is_empty());
+    }
+    #[test]
+    fn hotkey_buttons_share_the_keyboard_actions_and_restore_hidden_controls() {
+        let mut ui = scope_tree();
+        ui.select_id("tab-b");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 40)).unwrap();
+        let click = |r: ratatui::layout::Rect| MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: r.x,
+            row: r.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let rect = ui
+            .quick_hits
+            .iter()
+            .find(|(_, id)| id == "bar:actions")
+            .unwrap()
+            .0;
+        mouse_event(&mut ui, click(rect));
+        assert_eq!(ui.context.as_ref().unwrap().target, "tab-b");
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(ui.context.is_none());
+        key_event(&mut ui, KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(ui.context.as_ref().unwrap().target, "tab-b");
+        ui.context = None;
+        let result = hotkey_bar::activate(&mut ui, "map");
+        assert!(matches!(result, Step::Continue));
+        assert_eq!(ui.view, View::Map);
+        assert_eq!(ui.selected_terminal().as_deref(), Some("pane-b"));
+        let Step::Send(request) = hotkey_bar::activate(&mut ui, "checkpoint") else {
+            panic!("checkpoint request")
+        };
+        assert_eq!(request["node"], "pane-b");
+        assert_eq!(request["action"], "checkpoint.quick");
+        ui.hide_keys = true;
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let rect = ui
+            .quick_hits
+            .iter()
+            .find(|(_, id)| id == "bar:hide")
+            .unwrap()
+            .0;
+        mouse_event(&mut ui, click(rect));
+        assert!(!ui.hide_keys);
+        ui.dialog = Some(Dialog {
+            mode: "choose".into(),
+            ..Dialog::default()
+        });
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let rect = ui
+            .quick_hits
+            .iter()
+            .find(|(_, id)| id == "bar:enter")
+            .unwrap()
+            .0;
+        let key = hotkey_bar::key_for_click(&ui, click(rect)).unwrap();
+        assert_eq!(key.code, KeyCode::Enter);
+        assert!(
+            ui.dialog.is_some(),
+            "a dialog click must follow the backend-aware keyboard path"
+        );
+    }
+    #[test]
+    fn map_toolbar_routes_shell_actions_to_its_half_and_returns_to_tree() {
+        let mut ui = scope_tree();
+        open_map_scope(&mut ui, "workspace-b");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 44)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let hits = ui.map.toolbar_hits.clone();
+        assert!(hits.iter().any(|(_, a, _)| a == "shell"));
+        let click = |r: ratatui::layout::Rect| MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: r.x,
+            row: r.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let (r, _, _) = hits.iter().find(|(_, a, _)| a == "shell").unwrap();
+        let Step::Send(request) = mouse_event(&mut ui, click(*r)) else {
+            panic!("shell must route to backend")
+        };
+        assert_eq!(request["node"], "pane-b");
+        assert_eq!(request["action"], "terminal.shell-below");
+        let (r, _, _) = hits.iter().find(|(_, a, _)| a == "tree").unwrap();
+        mouse_event(&mut ui, click(*r));
+        assert_eq!(ui.view, View::Tree);
+        assert_eq!(ui.selected_terminal().as_deref(), Some("pane-b"));
+        assert!(ui.map.toolbar_hits.is_empty());
+    }
     #[test]
     fn delayed_action_reply_keeps_a_newer_command_search_and_selection() {
         let mut ui = Ui {
@@ -4704,8 +5215,31 @@ mod cli_tests {
             assert!(
                 ui.quick_hits
                     .iter()
-                    .any(|(_, action)| action == "telegram.route")
+                    .any(|(_, action)| action == "bar:actions")
             );
+            ui.hide_keys = true;
+            terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+            let rect = ui
+                .quick_hits
+                .iter()
+                .find(|(_, id)| id == "bar:hide")
+                .unwrap()
+                .0;
+            mouse_event(
+                &mut ui,
+                MouseEvent {
+                    kind: MouseEventKind::Down(event::MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+            assert!(!ui.hide_keys);
+            assert!(
+                ui.embed.is_some(),
+                "showing controls cannot send input or detach"
+            );
+            terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
             key_event(
                 &mut ui,
                 KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
@@ -5231,7 +5765,7 @@ mod cli_tests {
         let expected_nodes = frame["tree"].as_array().unwrap().len();
         let snapshot: Snapshot = serde_json::from_value(frame).unwrap();
         assert_eq!(snapshot.sections.len(), 11);
-        assert_eq!(snapshot.terminal_actions.len(), 17);
+        assert_eq!(snapshot.terminal_actions.len(), 21);
         assert_eq!(snapshot.tree.len(), expected_nodes);
         assert!(expected_nodes > 0);
         assert!(!snapshot.catalog.is_empty());
@@ -5491,6 +6025,82 @@ mod cli_tests {
             assert!(ui.status.contains("Detached"));
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn map_maximize_and_back_keep_the_same_input_stream_and_split_geometry() {
+        let mut ui = workspace();
+        ui.view = View::Map;
+        ui.reveal("a");
+        let mut other = ui.terminal_node("a").unwrap().clone();
+        other.id = "other-pane".into();
+        other.parent = "other-tab".into();
+        ui.snapshot.tree.push(other);
+        ui.snapshot.tree.push(crate::model::Node {
+            id: "other-tab".into(),
+            kind: "tab".into(),
+            ..crate::model::Node::default()
+        });
+        map::arrangement(&mut ui, "columns");
+        ui.map.ratio = 65;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 44)).unwrap();
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let cards = ui.map.cards.clone();
+        let primary = ui.map.primary.clone();
+        let peer = ui.map.peer.clone();
+        let plan = embed::Plan {
+            adapter: "native-session".into(),
+            mode: "control".into(),
+            node: "a".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/cat".into()],
+            ..Default::default()
+        };
+        let mut stream = embed::Embed::start(plan, 20, 80).unwrap();
+        stream.phase = embed::Phase::Live;
+        stream.parser.process(b"SAME_STREAM");
+        ui.embed = Some(stream);
+        let button = ui
+            .map
+            .fullscreen_hits
+            .iter()
+            .find(|(_, id)| id == "a")
+            .unwrap()
+            .0;
+        let click = |r: ratatui::layout::Rect| MouseEvent {
+            kind: MouseEventKind::Down(event::MouseButton::Left),
+            column: r.x,
+            row: r.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            mouse_event(&mut ui, click(button)),
+            Step::Continue
+        ));
+        assert_eq!(ui.view, View::Focus);
+        assert_eq!(ui.fullscreen_from, Some(View::Map));
+        assert_eq!(ui.embed.as_ref().unwrap().mode, Mode::Control);
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        let back = ui.fullscreen_back.unwrap();
+        assert!(matches!(mouse_event(&mut ui, click(back)), Step::Continue));
+        assert_eq!(ui.view, View::Map);
+        assert_eq!(ui.selected_terminal().as_deref(), Some("a"));
+        assert_eq!(ui.embed.as_ref().unwrap().mode, Mode::Control);
+        assert!(
+            ui.embed
+                .as_ref()
+                .unwrap()
+                .parser
+                .screen()
+                .contents()
+                .contains("SAME_STREAM")
+        );
+        terminal.draw(|f| view::draw(f, &mut ui)).unwrap();
+        assert_eq!(ui.map.cards, cards);
+        assert_eq!(ui.map.split, "columns");
+        assert_eq!(ui.map.ratio, 65);
+        assert_eq!(ui.map.primary, primary);
+        assert_eq!(ui.map.peer, peer);
+    }
     #[test]
     fn f11_fills_the_screen_and_returns_to_the_wall() {
         let mut ui = workspace();
@@ -5577,5 +6187,52 @@ mod cli_tests {
         assert_eq!(request["node"], "b");
         assert_eq!(request["action"], "terminal.watch");
         assert_eq!(ui.focus_target, "b");
+    }
+    #[test]
+    fn one_click_enters_map_input_and_wheel_never_changes_selection() {
+        let mut ui = workspace();
+        ui.view = View::Map;
+        let tiles = ui.tiles();
+        assert!(tiles.len() > 1);
+        let clicked = tiles.iter().position(|t| t.id == "a").unwrap();
+        ui.tile_hits = vec![(ratatui::layout::Rect::new(0, 3, 50, 20), clicked)];
+        let event = |kind| MouseEvent {
+            kind,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        let Step::Send(request) = mouse_event(
+            &mut ui,
+            event(MouseEventKind::Down(event::MouseButton::Left)),
+        ) else {
+            panic!("single click should attach")
+        };
+        assert_eq!(request["action"], "terminal.attach");
+        assert_eq!(request["node"], tiles[clicked].id);
+        let selected = ui.selected_terminal();
+        assert!(terminal_scroll(&mut ui, event(MouseEventKind::ScrollUp)));
+        assert_eq!(ui.selected_terminal(), selected);
+        assert!(
+            ui.preview_offsets
+                .get(&tiles[clicked].id)
+                .is_some_and(|n| *n > 0)
+        );
+        assert!(terminal_scroll(&mut ui, event(MouseEventKind::ScrollDown)));
+        assert_eq!(ui.preview_offsets[&tiles[clicked].id], 0);
+    }
+    #[test]
+    fn theme_choice_is_immediate_and_round_trips_with_view_preferences() {
+        let mut ui = workspace();
+        let original = ui.theme.palette;
+        change_option(&mut ui, Item::Palette, true);
+        assert_ne!(ui.theme.palette, original);
+        let value = view_state(&ui);
+        let apply: model::Apply = serde_json::from_value(value).unwrap();
+        let mut restored = workspace();
+        restored.snapshot.workspace.apply = apply;
+        let state = std::mem::take(&mut restored.snapshot);
+        restored.update(state);
+        assert_eq!(restored.theme.palette, ui.theme.palette);
     }
 }

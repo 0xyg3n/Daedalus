@@ -37,6 +37,7 @@ const NO_SCREEN: Duration = Duration::from_secs(8);
 #[derive(Clone, Default, Deserialize, Debug)]
 #[serde(default)]
 pub struct Plan {
+    pub remote: Option<daedalus_tui::app::remote::Target>,
     pub adapter: String,
     pub argv: Vec<String>,
     /// Herdr: stream variants; the frontend appends --cols/--rows after the target.
@@ -248,14 +249,22 @@ struct Client {
     rx: Receiver<Stream>,
 }
 
-fn launch(argv: &[String]) -> io::Result<Client> {
+fn launch(
+    argv: &[String],
+    remote: Option<&daedalus_tui::app::remote::Target>,
+) -> io::Result<Client> {
     let Some((program, args)) = argv.split_first() else {
         return Err(io::Error::other("Empty stream command"));
     };
-    let mut command = Command::new(program);
+    let mut command = if let Some(remote) = remote {
+        remote.command(argv).map_err(io::Error::other)?
+    } else {
+        let mut command = Command::new(program);
+        command.args(args);
+        command
+    };
     daedalus_tui::platform::hide_console(&mut command);
     let mut child = command
-        .args(args)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
@@ -459,7 +468,7 @@ impl Embed {
         } else {
             sized(&base_argv, rows, cols)
         };
-        let client = launch(&argv)?;
+        let client = launch(&argv, plan.remote.as_ref())?;
         let mut embed = Self {
             argv: base_argv,
             retries: 0,
@@ -475,7 +484,7 @@ impl Embed {
             plan,
             mode,
             phase: Phase::Connecting,
-            parser: vt100::Parser::new(rows.max(2), cols.max(2), 0),
+            parser: vt100::Parser::new(rows.max(2), cols.max(2), 4096),
             prefix: false,
             fit: false,
             viewport: (rows, cols),
@@ -511,7 +520,7 @@ impl Embed {
         } else {
             sized(argv, rows, cols)
         };
-        match launch(&argv) {
+        match launch(&argv, self.plan.remote.as_ref()) {
             Ok(client) => {
                 self.client = Some(client);
                 self.argv = unsized_argv;
@@ -787,7 +796,7 @@ impl Embed {
                 }
                 let screen = lines.join(&b'\n');
                 let primary = self.primary.take();
-                self.parser = vt100::Parser::new(info.rows, info.cols, 0);
+                self.parser = vt100::Parser::new(info.rows, info.cols, 4096);
                 self.parser
                     .process(&info.restore(primary.as_deref(), &screen));
                 self.synced = true;
@@ -938,6 +947,12 @@ impl Embed {
         if event.column < x || event.row < y || event.column >= x + w || event.row >= y + h {
             return false;
         }
+        let (row, left) = self
+            .rows
+            .get(usize::from(event.row - y))
+            .copied()
+            .unwrap_or((event.row - y + self.scroll.0, self.scroll.1));
+        let col = (event.column - x).saturating_add(left);
         if !self.is_tmux() {
             // Herdr does not forward mouse modes; the wheel scrolls its history.
             let direction = match event.kind {
@@ -945,17 +960,14 @@ impl Embed {
                 MouseEventKind::ScrollDown => "down",
                 _ => return false,
             };
-            if (self.mode == Mode::Control || self.plan.adapter == "native-session") && self.live()
-            {
+            if self.live() {
                 self.herdr_line(&format!(
-                    r#"{{"type":"terminal.scroll","direction":"{direction}","lines":{scroll_rows}}}"#
+                    r#"{{"type":"terminal.scroll","direction":"{direction}","lines":{},"source":"wheel","column":{},"row":{},"modifiers":{}}}"#,scroll_rows.clamp(1,1000),col,row,event.modifiers.bits()
                 ));
             }
             return true;
         }
         let screen = self.parser.screen();
-        let col = event.column - x + self.scroll.1;
-        let row = event.row - y + self.scroll.0;
         match encode_mouse(
             event,
             col,
@@ -965,6 +977,22 @@ impl Embed {
         ) {
             Some(bytes) => {
                 self.send(&bytes);
+                true
+            }
+            None if matches!(
+                event.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) =>
+            {
+                let offset = self.parser.screen().scrollback();
+                let lines = scroll_rows.min(4096) as usize;
+                self.parser.screen_mut().set_scrollback(
+                    if event.kind == MouseEventKind::ScrollUp {
+                        offset.saturating_add(lines)
+                    } else {
+                        offset.saturating_sub(lines)
+                    },
+                );
                 true
             }
             None => false,
@@ -1910,6 +1938,48 @@ fn main() {
     }
 
     #[test]
+    fn herdr_observer_wheel_includes_pointer_coordinates_and_does_not_request_control() {
+        let dir = scratch("herdr-observer-wheel");
+        let fake = fake_herdr(&dir);
+        let plan = herdr_plan(&fake, "observe", &[]);
+        let mut embed = Embed::start(plan, 5, 40).unwrap();
+        assert!(pump_until(&mut embed, |e| e.live()));
+        embed.origin = Some((10, 5, 40, 5));
+        assert!(embed.mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 12,
+                row: 7,
+                modifiers: KeyModifiers::NONE
+            },
+            7
+        ));
+        assert!(pump_until(&mut embed, |_| std::fs::read_to_string(
+            dir.join("log")
+        )
+        .is_ok_and(|v| v.contains("terminal.scroll"))));
+        let text = std::fs::read_to_string(dir.join("log")).unwrap();
+        assert!(text.contains("\"column\":2"));
+        assert!(text.contains("\"row\":2"));
+        assert_eq!(embed.mode, Mode::Observe);
+        embed.detach();
+        // Detach reaps the mock client asynchronously. Windows can deny deletion
+        // of its executable until the process exits.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => break,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("Could not remove the Herdr test directory: {err}"),
+            }
+        }
+    }
+    #[test]
     fn native_observer_wheel_uses_saved_rows_and_keeps_history_notices_local() {
         let dir = scratch("native-wheel");
         let fake = fake_herdr(&dir);
@@ -2238,7 +2308,7 @@ fn main() {
     fn restore_rebuilds_alternate_screen_cursor_and_modes() {
         let info = PaneInfo::parse("42 20 4 3 1 1 0 3 1 1 0 1 0 0 1 0 0 0 1").unwrap();
         assert_eq!((info.rows, info.cols, info.cursor), (4, 20, (3, 1)));
-        let mut parser = vt100::Parser::new(info.rows, info.cols, 0);
+        let mut parser = vt100::Parser::new(info.rows, info.cols, 4096);
         parser.process(&info.restore(Some(b"primary"), b"line one\n\x1b[1malt\x1b[0m"));
         let screen = parser.screen();
         assert!(screen.alternate_screen());

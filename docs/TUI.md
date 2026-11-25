@@ -105,6 +105,9 @@ reported status, action badges and context below the list.
 
 ## Workspaces
 
+**F6** opens [Git review](#git-review), and **F7** opens [agent task plans](#agent-task-plans).
+Both are available in the [context menu](#context-menu).
+
 Daedalus lists its native workspaces and terminals alongside tmux (servers,
 sessions, windows, panes) and Herdr (servers, workspaces, tabs, panes), including
 Herdr clients running inside tmux. **New shell or workspace → Daedalus native terminal** starts
@@ -126,6 +129,7 @@ remain available.
 | Tiles | Selected workspace: a large terminal and companion previews |
 | Wall | Fleet overview, workspace badges and a selected terminal inspector |
 | Cube | One workspace per cube; rotate previews or type on the front face |
+| Tetris | Editable fitted panes, with optional comparison of two workspaces |
 | Focus | A terminal and its native tab layout beside the workspace tree |
 
 Workspace rows and terminal cards identify Codex, Claude, Grok, Hermes, Cursor,
@@ -513,8 +517,8 @@ Terminal status labels use green for working, amber for blocked, muted text for
 idle, rose for errors and faint text for unknown state. Status and recency are
 separate: a recently selected terminal is not necessarily working. Focus and
 sidebar entries show these labels, and terminal cards use the same state colors.
-The local action bar owns Attach/Watch shortcuts; the footer supplies navigation
-and only adds an action shortcut when it could not fit in the local bar.
+The contextual footer shows each primary action once, with Type and Watch
+shortcuts taken from the terminal action registry. F2 opens the remaining actions.
 
 Focus separates human session names from identity details. Workspace views label
 the observed agent conversation as **SID:**, independently of terminal, window
@@ -593,3 +597,205 @@ and brief glitch fragments. Reduced motion keeps the pattern stationary.
 Native command argument/model ID byte limits are editable in Configuration settings → Terminals and discovery → Native commands. These saved limits apply to command preparation before a native version probe; changing them does not bypass the audited version or command grammar. Native command confirmations put the observed version, verified conversation and potential model-work/context effects before the command preview.
 
 Native identity metadata settings also govern Linux OpenCode child/server discovery and hook-binding lookup for reconnect and Telegram. Limit errors name the saved setting to review. Direct discovery and reconnect share their allowance, and an exhausted scan never selects a partial match.
+
+## Tetris and Herdr popup
+
+Open Tetris with **F4**. In Tree, **Ctrl+Enter** or double-click also opens the
+selected workspace, tab or terminal. Groups reopen their last selected live pane
+when available. **Esc** detaches first and returns to Tree. **PageUp/PageDown**
+changes tabs and the arrow keys select panes.
+
+Tetris fits panes to Herdr's native split layout. Titles show exact pane IDs
+and distinct colors, and numbered workspace and pane badges show activity.
+Click a badge to navigate and hover for details. Drag a divider to resize its
+neighbors or drag a title to swap positions within the view. **Fit / reset
+Tetris panes** restores the backend layout or fits all panes. **Swap real
+Herdr panes** changes the underlying Herdr tab and verifies the resulting
+geometry. Tetris adopts observed native changes and retains local edits while
+the backend layout is unchanged.
+
+Click a pane or press **a** to attach. The mouse wheel scrolls that terminal.
+**F3** toggles Focus, and **F11** fills the screen with the selected pane and
+returns to its exact arrangement. Fullscreen preserves the input stream and
+mode. On Unix, **Open in native client** opens a separate viewer. **F11** or
+**Ctrl+] then D** closes the viewer and returns to Daedalus.
+
+The [context menu](#context-menu) can split Tetris into two workspaces, side by
+side or stacked. Click a half and a workspace badge to change that half. Drag
+the middle divider or use the menu to balance, rotate, swap or close the
+comparison. Save and reopen arrangements from either context menu. In Options,
+**Theme colors** cycles Midnight, Charcoal, Ocean, Forest and Violet.
+
+The control bar shows clickable shortcuts for the current view. Hover a
+shortcut for its explanation. **F1** opens the full shortcut search and **?**
+outside pane input hides the bar. Click **Show controls** to restore it.
+
+**F5** or **Ctrl+] then S** saves a quick private checkpoint. Use **Save
+checkpoint & open new pane** to save first, then review a fork, resume or
+handoff. **Open saved checkpoint here** creates a pane below the selected one.
+Cancelling the launch keeps the checkpoint. Resume and fork require a saved
+native session ID. Context-only checkpoints support handoff.
+
+`daedalus popup` starts in Tetris and selects the invoking Herdr pane when
+discovery resolves it. **F12** closes the popup. Preview and install the
+shortcut with:
+
+```sh
+daedalus herdr configure --file /absolute/path/to/herdr/config.toml
+daedalus herdr configure --file /absolute/path/to/herdr/config.toml --apply
+herdr config check
+herdr server reload-config
+```
+
+The default is F12. Use `--key prefix+LETTER` or another function key to open
+the popup. The installer keeps unrelated TOML settings and comments, refuses
+conflicting bindings and backs up the original file as
+`config.toml.daedalus-backup`. The shortcut runs `daedalus popup` from PATH.
+
+## Context menu
+
+Press **F2** or right-click a pane. In Tree, right-click a workspace or tab to
+open its workspace actions. **Shift+F10** and the **Menu** key work from the
+keyboard. Type to search action names and descriptions across categories.
+**Tab** and **Shift+Tab** cycle categories, **Enter** runs the selected action,
+and **Esc** closes the menu. Wide terminals show descriptions beside each row.
+The selected row's full description appears below the list. A pane action
+targets the selected terminal. Reopen the menu if that terminal changes.
+
+![Pane actions with inline descriptions](../assets/screenshots/beta62/pane-actions.png)
+
+### Pane actions
+
+| Action | What it does |
+| --- | --- |
+| Type in pane | Attaches keyboard input to the selected terminal. |
+| Watch read-only | Follows the terminal without forwarding input. |
+| Expand focused pane | Opens Focus for the selected pane. F3 returns to the previous view. |
+| Full screen this pane / Return from full screen | Expands the exact pane or restores its previous layout and stream. Also available with F11. |
+| Copy selected text | Copies text selected in this pane. Select with Shift+drag first. |
+| Quick checkpoint | Saves a private session reference and visible output. Also available with F5. |
+| Save checkpoint… | Names a checkpoint and lets you choose whether to include output. |
+| Save checkpoint & open new pane… | Saves the current session and opens the fork, resume or handoff picker for a new pane. |
+| Open saved checkpoint here… | Chooses an existing checkpoint and opens it beside the current terminal. |
+| New shell below / above / to the right / to the left | Creates a fresh shell in the selected direction where the backend supports it. |
+| New pane | Reviews a new shell or agent launch in this project. |
+| New workspace… | Chooses a backend, directory, and first shell or agent. |
+| Fork this agent | Starts an independent conversation from the supported agent's native history. |
+| Duplicate view | Opens another view of the same terminal and process. |
+| Choose a linked view | Selects which linked tmux session to use for a shared terminal. |
+| Project · Git review | Inspects working and staged diffs, stages paths, and reviews local commits or worktrees. Also available with F6. |
+| Agent orchestration | Builds a plan with exact agent destinations, dependencies and a parallel limit. Also available with F7. |
+| Swap with focused pane | Exchanges two positions in the Daedalus presentation for the same tab. |
+| Swap real Herdr panes | Exchanges two panes in the actual Herdr tab after rechecking their identities. |
+| Split workspaces side by side | Shows two workspaces across a vertical divider. |
+| Split workspaces above / below | Shows two workspaces across a horizontal divider. |
+| Rotate workspace split | Changes between side-by-side and stacked comparison. |
+| Swap workspace halves | Exchanges the positions of the two compared workspaces. |
+| Single workspace | Closes the comparison and keeps the saved arrangement of each workspace. |
+| Fit / reset Tetris panes | Fits every pane using the native tab layout when available. |
+| Open Tetris | Opens the fitted workspace view. Also available with F4. |
+| Reveal in Tree | Finds the selected pane in the workspace hierarchy. |
+| Equal workspace halves | Gives the two compared workspaces equal space. |
+| More space for this workspace | Increases the clicked workspace's share by ten percentage points within the allowed range. |
+| Less space for this workspace | Decreases the clicked workspace's share by ten percentage points within the allowed range. |
+| Save current layout… | Saves pane positions, comparison settings and view preferences under a name. |
+| Open saved layout… | Restores a named arrangement. |
+| Organize project | Opens workspace or tab organization commands for supported backends. |
+| Rename terminal | Gives the selected pane a recognizable label. |
+| Pin or unpin in Tiles | Keeps the selected terminal prominent in Tiles and saved layouts. |
+| Change theme colors | Cycles the five color palettes. |
+| Display options | Opens palette, motion, background, panels and control-bar settings. |
+| Full terminal menu | Opens the complete command menu for the exact terminal. |
+| View terminal output | Reads recent output from the selected terminal. |
+| Switch to this terminal | Focuses the terminal in its underlying window, workspace or tab. |
+| Open in native client (full screen) | Opens the native terminal viewer. F11 or Ctrl+] then D returns on supported hosts. |
+| Send text or a command | Reviews text to submit to the selected pane. |
+| Connect Telegram chat | Chooses which Telegram chat may control this terminal. |
+| Refresh workspaces | Reloads pane inventory, layout and measured agent status. |
+| Close terminal | Requests confirmation before ending the pane. |
+| Interrupt current command | Requests confirmation before sending Ctrl+C to the pane. |
+
+### Workspace and tab actions
+
+![Workspace actions in Tree](../assets/screenshots/beta62/workspace-actions.png)
+
+Actions shared with the pane menu use the selected branch or its captured
+pane. The table lists branch-specific actions.
+
+| Action | What it does |
+| --- | --- |
+| Open this branch in Tetris | Fits the selected workspace or tab to the screen. |
+| Reveal in Tree | Selects the branch in the workspace hierarchy. |
+| Expand / collapse branch | Shows or hides the selected branch. |
+| Expand all descendants | Opens the branch and each nested group. |
+| Collapse this branch | Folds the branch and keeps it selected. |
+| New shell here | Creates a shell beside the branch's captured pane. |
+| New shell or AI tool… | Chooses an installed tool and reviews a new pane in the branch. |
+| Manage workspace / tab… | Opens the branch's rename and organization controls. |
+| Compare workspaces side by side / above / below | Opens the branch beside or above another workspace. |
+
+Gray rows show why the action is unavailable. Availability depends on the
+backend, the selected pane, and the current layout.
+
+## Project workflows
+
+These controls were informed by
+[T3 Code](https://github.com/pingdotgg/t3code/tree/9441a7285c5f3466e743d6fa1489fbefed9043f1)
+(MIT, T3 Tools Inc.).
+
+### Git review
+
+Press **F6** on a pane whose working directory belongs to the checkout. Inspect
+working and staged diffs, changed paths, branches, worktrees and recent commits.
+Review one path to stage or unstage it, review the index before a local commit,
+or create a branch in a separate worktree at the reviewed HEAD. The new
+worktree needs an existing parent directory.
+
+Daedalus rechecks the terminal, checkout and reviewed Git state before
+applying. A changed HEAD, index or file requires a fresh review. Mutations can
+run Git hooks and clean filters. Inspection disables external diffs and text
+conversion. The preview covers up to 4,096 changed paths and 2 MiB of output.
+Untracked UTF-8 previews accept files up to 2 MiB. Staging covers regular files
+up to 64 MiB, symlinks and deletions. Use native Git for larger changes,
+conflicts, pushes and branch switching.
+
+### Agent task plans
+
+Press **F7** to add or edit tasks. Pick an exact live conversation for each
+prompt, set dependencies and set the parallel limit to 1, 2, 4 or 8. Review
+destinations and prompts before running. A plan accepts up to 32 tasks. A
+terminal runs one task at a time across plans. Native and tmux panes require
+live hooks and verified idle state. Herdr can report the conversation and
+activity directly.
+
+The instance worker persists task state and keeps running when the TUI closes.
+**Completed** records observed work followed by the end of the turn. Review
+the agent's output for the result. A lost conversation or unconfirmed send
+holds the pane and skips dependent tasks. Inspect the agent and choose
+**Mark inspected; release pane** once it is idle. **Resume queued work** restarts
+the worker without replaying uncertain sends. **Cancel queued task** applies to
+queued work, and **Interrupt current command** acts on the active pane.
+[CLI commands](COMMANDS.md#cli) show how to inspect plans and events.
+
+### Remote TUI
+
+Install Daedalus on the remote POSIX host, configure the instance there, and add
+the SSH alias and known host entry in OpenSSH. From the local terminal:
+
+```sh
+daedalus tui --remote devbox --remote-config-dir /srv/daedalus/config
+```
+
+The header shows **SSH devbox**. Git, task plans, checkpoints and terminal
+streams use the remote host. Use embedded **Attach** or **Watch** for remote
+panes. Reopen the same command to reconnect. See the [CLI reference](COMMANDS.md#cli)
+for `--remote-bin` and connection requirements.
+
+### Permission profiles
+
+Guided launches for new Codex and Claude panes can select **Native profile
+default**, **Supervised**, **Auto-accept edits**, **Automatic review** or
+**Full access** where supported. Review the launch before applying. An
+explicit choice replaces conflicting provider permission flags while retaining
+the selected account and model. The provider's version and policy determine
+availability.

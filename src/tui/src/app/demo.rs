@@ -69,6 +69,37 @@ impl Demo {
     }
 }
 impl Source for Demo {
+    fn project(
+        &mut self,
+        _: &ControlConfig,
+        request: super::project::Request,
+    ) -> Result<super::project::Reply> {
+        use super::project::{File, Reply, Repository, Request};
+        match request {
+            Request::Inspect(_) => Ok(Reply::Repository(Repository {
+                root: "/demo/atlas".into(),
+                git_dir: "/demo/atlas/.git".into(),
+                branch: "feature/export".into(),
+                head: "a170d3e".into(),
+                files: [
+                    (" M", "docs/EXPORT.md"),
+                    ("M ", "src/export.rs"),
+                    ("??", "tests/export.rs"),
+                ]
+                .into_iter()
+                .map(|(status, path)| File {
+                    status: status.into(),
+                    path: path.into(),
+                    original: None,
+                })
+                .collect(),
+                index: String::new(),
+                status: String::new(),
+            })),
+            _ => Err("Git effects are unavailable in the demonstration".into()),
+        }
+    }
+
     fn is_demo(&self) -> bool {
         true
     }
@@ -124,13 +155,20 @@ mod tests {
     use super::*;
     use std::path::Path;
     #[test]
-    fn demo_preserves_ten_terminal_previews_and_never_uses_native_source() {
+    fn demo_preserves_terminal_previews_and_never_uses_native_source() {
         let mut source = Demo::new().unwrap();
         let config =
             ControlConfig::fresh(Path::new(crate::test_support::path("/daedalus-demo"))).unwrap();
         let observations = source.refresh(&config).unwrap();
         let panes = observations.snapshot["panes"].as_array().unwrap();
-        assert_eq!(panes.len(), 10);
+        assert_eq!(panes.len(), 16);
+        assert_eq!(
+            observations.snapshot["layouts"][0]["panes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
         for pane in panes {
             assert!(!source.preview(pane, 200).unwrap().is_empty());
         }
@@ -143,7 +181,7 @@ mod tests {
         let frame: Value =
             serde_json::from_slice(bytes.split(|b| *b == b'\n').next().unwrap()).unwrap();
         assert_eq!(frame["demo"], true);
-        assert_eq!(frame["terminals"], 10);
+        assert_eq!(frame["terminals"], 16);
         assert_eq!(frame["sections"].as_array().unwrap().len(), 11);
     }
 }

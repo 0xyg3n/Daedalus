@@ -19,21 +19,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.51/daedalus-0.2.0-beta.51-x86_64-linux"><img src="assets/badges/download-linux.svg" width="260" height="120" alt="Download for Linux — x86-64 executable"></a>
-  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.51/Daedalus-0.2.0-beta.51-setup.exe"><img src="assets/badges/download-windows.svg" width="260" height="120" alt="Download for Windows — x64 installer"></a>
+  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.63/daedalus-0.2.0-beta.63-x86_64-linux"><img src="assets/badges/download-linux.svg" width="260" height="120" alt="Download for Linux — x86-64 executable"></a>
+  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.63/Daedalus-0.2.0-beta.63-setup.exe"><img src="assets/badges/download-windows.svg" width="260" height="120" alt="Download for Windows — x64 installer"></a>
 </p>
 <p align="center">
   SHA-256:
-  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.51/daedalus-0.2.0-beta.51-x86_64-linux.sha256">Linux</a> ·
-  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.51/Daedalus-0.2.0-beta.51-setup.exe.sha256">Windows</a>
+  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.63/daedalus-0.2.0-beta.63-x86_64-linux.sha256">Linux</a> ·
+  <a href="https://github.com/0xyg3n/Daedalus/releases/download/v0.2.0-beta.63/Daedalus-0.2.0-beta.63-setup.exe.sha256">Windows</a>
 </p>
 
 [Release notes and all downloads](https://github.com/0xyg3n/Daedalus/releases).
 
-<img src="assets/screenshots/demo.gif" alt="Daedalus tour: terminal tree, Tiles, Wall, Cube, resizing and workspace switching" width="100%">
+<img src="assets/screenshots/beta62/tetris.png" alt="Tetris workspace with ten differently sized terminal panes, pane IDs and color-coded activity" width="100%">
 
-[Watch the 30-second video](assets/screenshots/demo.mp4). The demo uses sample data;
-music and transition effects are part of the recording.
+[Screenshot tour](docs/SCREENSHOTS.md) · [Context menu reference](docs/TUI.md#context-menu) · [Video tour](assets/screenshots/demo.mp4)
 
 ## Why use it
 
@@ -43,6 +42,10 @@ music and transition effects are part of the recording.
   another Daedalus window. Built-in terminals need no separate multiplexer.
 - **Choose how to work.** Browse a tree, compare terminal previews or attach and
   type in place. Tree, Tiles, Wall, Cube and Focus share the same inventory.
+- **Arrange your workspace.** Press F4 for [Tetris](docs/TUI.md#tetris-and-herdr-popup).
+  Resize or swap panes, compare two workspaces, or press F11 to enlarge a pane.
+- **Review a project.** F6 shows Git changes, path staging, local commits and isolated worktrees.
+- **Coordinate agents.** F7 builds durable task plans with dependencies and parallel limits. Connect the same TUI to an SSH environment; [project controls](docs/TUI.md#project-workflows) explain the supported workflow.
 - **Continue a conversation.** Save checkpoints, resume or fork supported sessions,
   and pass reviewed context to another harness.
 - **Work through Telegram.** Assign a DM or group to an agent conversation. Send
@@ -63,8 +66,8 @@ setup file. It installs Daedalus and creates a Start Menu shortcut.
 then launch setup:
 
 ```sh
-chmod +x daedalus-0.2.0-beta.51-x86_64-linux
-./daedalus-0.2.0-beta.51-x86_64-linux setup
+chmod +x daedalus-0.2.0-beta.63-x86_64-linux
+./daedalus-0.2.0-beta.63-x86_64-linux setup
 ```
 
 To install from source on Linux:

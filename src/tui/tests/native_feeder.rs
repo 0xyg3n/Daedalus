@@ -70,6 +70,13 @@ fn native_hooks_feed_only_the_verified_idle_conversation() {
         run_fixture(&PathBuf::from(std::env::var_os("HOME").unwrap()));
         return;
     }
+    spawn_flow(false);
+}
+#[test]
+fn orchestration_dispatch_uses_native_idle_reservation_and_observed_hook_turn() {
+    spawn_flow(true);
+}
+fn spawn_flow(orchestration: bool) {
     let mut nonce = [0; 16];
     daedalus_tui::platform::random_bytes(&mut nonce).unwrap();
     let root = std::env::temp_dir().join(format!(
@@ -93,6 +100,9 @@ fn native_hooks_feed_only_the_verified_idle_conversation() {
         .env("PATH", "/usr/bin:/bin")
         .env("TERM", "xterm-256color")
         .env("DAEDALUS_NATIVE_FEEDER_FIXTURE", "1");
+    if orchestration {
+        command.env("DAEDALUS_ORCHESTRATION_FIXTURE", "1");
+    }
     let output = process::run(&mut command, Duration::from_secs(40), 128 * 1024).unwrap();
     assert!(
         output.status.success(),
@@ -227,6 +237,18 @@ fn run_fixture(root: &Path) {
         snapshot["panes"][0]["agent_session"]["value"],
         "fixture-session"
     );
+    if std::env::var("DAEDALUS_ORCHESTRATION_FIXTURE").as_deref() == Ok("1") {
+        run_orchestration(
+            &directory,
+            root,
+            &path,
+            &session,
+            &snapshot["panes"][0],
+            &hook,
+        );
+        native_terminal::close(&session.id, &session.generation).unwrap();
+        return;
+    }
     assert!(matches!(
         {
             let original_text = frame.text.clone();
@@ -269,4 +291,96 @@ fn run_fixture(root: &Path) {
     frame.terminal.generation = "0".repeat(64);
     assert_eq!(feeder.submit(&frame).unwrap(), Submission::Unavailable);
     native_terminal::close(&session.id, &session.generation).unwrap();
+}
+
+fn run_orchestration(
+    directory: &Path,
+    root: &Path,
+    _registration: &Path,
+    session: &SessionInfo,
+    pane: &serde_json::Value,
+    hook: &str,
+) {
+    use daedalus_tui::app::orchestration::{self, NativeExecutor, Plan, Store, Task};
+    let terminals = Terminals::default();
+    let executor = NativeExecutor {
+        terminals: &terminals,
+        directory,
+    };
+    let prompt = "printf 'ORCHESTRATION_FIXTURE\\n'";
+    let task = Task {
+        key: "task-1".into(),
+        label: "Native fixture turn".into(),
+        identity: terminals::identity(pane).unwrap(),
+        pane: pane.clone(),
+        agent: "codex".into(),
+        session: Some("fixture-session".into()),
+        prompt: prompt.into(),
+        dependencies: Vec::new(),
+    };
+    executor.validate_admission(&task).unwrap();
+    let plan = Plan {
+        id: orchestration::new_id(),
+        name: "Native queue fixture".into(),
+        parallel: 1,
+        tasks: vec![task],
+    };
+    let mut store = Store::open(directory).unwrap();
+    store.admit(&plan, &plan.fingerprint().unwrap()).unwrap();
+    orchestration::tick(&mut store, &executor, orchestration::now()).unwrap();
+    assert_eq!(store.rows().unwrap()[0].state, "submitted");
+    // The readiness reservation itself must not be treated as provider activity.
+    orchestration::tick(&mut store, &executor, orchestration::now()).unwrap();
+    assert_eq!(store.rows().unwrap()[0].state, "submitted");
+    for (name, event, wanted) in [
+        ("queue-begin", "UserPromptSubmit", "running"),
+        ("queue-end", "Stop", "completed"),
+    ] {
+        let payload = root.join(format!("{name}.json"));
+        private_file(&payload,&serde_json::to_vec(&json!({"session_id":"fixture-session","hook_event_name":event,"turn_id":"queue-turn","prompt":prompt,"last_assistant_message":"fixture turn done","transcript_path":null})).unwrap());
+        native_terminal::input(
+            &session.id,
+            &session.generation,
+            format!("{hook} < {}\r", quote(payload.to_str().unwrap())).as_bytes(),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            orchestration::tick(&mut store, &executor, orchestration::now()).unwrap();
+            if store.rows().unwrap()[0].state == wanted {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Expected {wanted}, got {}",
+                store.rows().unwrap()[0].state
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+    }
+    for _ in 0..3 {
+        assert!(!orchestration::tick(&mut store, &executor, orchestration::now()).unwrap());
+    }
+    assert_eq!(
+        store
+            .events()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["state"] == "dispatching")
+            .count(),
+        1
+    );
+    drop(store);
+    assert_eq!(
+        Store::open(directory).unwrap().rows().unwrap()[0].state,
+        "completed"
+    );
+    assert!(
+        native_terminal::capture(&session.id, &session.generation)
+            .unwrap()
+            .text
+            .contains("ORCHESTRATION_FIXTURE")
+    );
 }
