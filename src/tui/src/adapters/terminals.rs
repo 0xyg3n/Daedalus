@@ -997,17 +997,14 @@ fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
-    if !metadata.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
     }
     #[cfg(windows)]
     {
-        true
+        metadata.is_file()
     }
 }
 fn binary_in(name: &str, paths: &[PathBuf], home: Option<&Path>) -> Option<PathBuf> {
