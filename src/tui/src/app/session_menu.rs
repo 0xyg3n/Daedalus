@@ -107,6 +107,7 @@ pub struct View {
 }
 #[derive(Default, Debug)]
 pub struct Outcome {
+    pub open_terminal: Option<Value>,
     pub setup_directory: Option<std::path::PathBuf>,
     pub configuration: Option<ControlConfig>,
     pub frames: Vec<Value>,
@@ -123,6 +124,8 @@ struct Pending {
 }
 #[derive(Default)]
 pub struct SessionMenu {
+    orchestration: super::orchestration_menu::Menu,
+    project: super::project_menu::Menu,
     wizard: super::wizard_menu::Menu,
     workflows: super::workflow_menu::Menu,
     harness: super::harness_menu::Menu,
@@ -134,6 +137,7 @@ pub struct SessionMenu {
     control: super::control_menu::Menu,
     pending: Option<Pending>,
     view: Option<View>,
+    spawn_anchor: Option<Value>,
 }
 struct Launch {
     checkpoint: Checkpoint,
@@ -155,6 +159,7 @@ enum Commit {
     Save {
         pane: Value,
         request: SaveRequest,
+        open_after: bool,
     },
     Remove(String),
     Launch(Box<Launch>),
@@ -209,6 +214,7 @@ enum Stage {
         operation: String,
     },
     WorkspaceTool(Box<WorkspaceRequest>),
+    WorkspacePermission(Box<WorkspaceRequest>, String),
     Native(Value),
     Output(bool),
     Pick {
@@ -217,14 +223,20 @@ enum Stage {
     },
     Terminal(Value),
     LinkedViews(Vec<Value>),
-    SaveName(Value),
+    ChooseCheckpoint(Vec<String>),
+    SaveName {
+        pane: Value,
+        open_after: bool,
+    },
     SaveKind {
         pane: Value,
         name: String,
+        open_after: bool,
     },
     SaveSid {
         pane: Value,
         name: String,
+        open_after: bool,
     },
     Confirm(Box<Commit>),
     Checkpoint(CheckpointRow),
@@ -271,15 +283,26 @@ enum Stage {
         panes: Vec<Value>,
     },
     LayoutName,
+    PickLayout(Vec<String>),
     Layout(String),
 }
 pub fn available(id: &str) -> bool {
+    if matches!(id, "workspace.orchestrate" | "project.review") {
+        return true;
+    }
     super::telegram_menu::available(id)
         || super::harness_menu::available(id)
         || super::wizard_menu::available(id)
         || matches!(
             id,
             "checkpoint.save"
+                | "checkpoint.save-open"
+                | "checkpoint.open-here"
+                | "checkpoint.quick"
+                | "terminal.shell-above"
+                | "terminal.shell-below"
+                | "terminal.shell-left"
+                | "terminal.shell-right"
                 | "settings.interface"
                 | "settings.runtime"
                 | "settings.instance"
@@ -318,6 +341,7 @@ pub fn available(id: &str) -> bool {
                 | "terminal.interrupt"
                 | "terminal.close"
                 | "layout.save"
+                | "layout.open"
         )
 }
 fn field(value: &Value, key: &str) -> String {
@@ -358,7 +382,9 @@ fn host_pane(snapshot: &Value) -> Option<Value> {
 }
 impl SessionMenu {
     pub fn pending(&self) -> bool {
-        self.pending.is_some()
+        self.orchestration.pending()
+            || self.project.pending()
+            || self.pending.is_some()
             || self.wizard.pending()
             || self.workflows.pending()
             || self.harness.pending()
@@ -370,6 +396,8 @@ impl SessionMenu {
             || self.control.pending()
     }
     pub fn cancel(&mut self) {
+        self.orchestration.cancel();
+        self.project.cancel();
         self.telegram.cancel();
         self.memory.cancel();
         self.dashboard.cancel();
@@ -381,6 +409,7 @@ impl SessionMenu {
         self.workflows.cancel();
         self.pending = None;
         self.view = None;
+        self.spawn_anchor = None;
     }
     fn dialog(
         &mut self,
@@ -535,6 +564,7 @@ impl SessionMenu {
             .as_ref()
             .into_iter()
             .flat_map(|v| v.snapshot["panes"].as_array().into_iter().flatten())
+            .filter(|p| !crate::adapters::pane_observations::conflicted(p))
             .filter(|p| crate::adapters::terminals::identity(p).is_ok_and(|id| ids.insert(id)))
             .cloned()
             .collect()
@@ -569,6 +599,12 @@ impl SessionMenu {
     ) -> Result<Outcome> {
         if self.pending() {
             return Err("Finish the current dialog first".into());
+        }
+        if action == "workspace.orchestrate" {
+            return self.orchestration.start(view, seq);
+        }
+        if action == "project.review" {
+            return self.project.start(view, source, config, seq);
         }
         if super::telegram_menu::available(action) {
             if action == "telegram.route"
@@ -618,6 +654,7 @@ impl SessionMenu {
             self.wizard.detected = source.detect_harnesses(config);
             return self.wizard.start(action, config, seq);
         }
+        self.spawn_anchor = None;
         self.view = Some(view);
         if action == "settings.runtime" {
             return self.choose(
@@ -788,7 +825,7 @@ impl SessionMenu {
                 .map(|a| a.title.clone())
                 .unwrap_or_else(|| action.into());
             let text = match action {
-                "help.guide" => "Navigate with Tab or number keys; arrows select, Enter opens an action, Esc cancels. Ctrl+P searches commands. Workspaces groups servers, sessions, windows and exact terminals. Left/Right folds the tree. [ and ] switch Tree, Tiles, Wall, Cube and Focus views.\n\nSelect a terminal: a attaches, w watches, c saves a checkpoint, f forks, d duplicates its view, p pins. L saves the current layout. Ctrl+] then D detaches; the terminal keeps running. q checks for updates before exiting without stopping agents. Options → Application → Check for updates (Ctrl+U) checks on demand.\n\nSetup imports private configuration or starts fresh. Review dependency changes before installation. Account sign-in belongs to each native harness. Checkpoint resume/fork depends on the installed harness capabilities; cross-harness handoff supplies context to a new session. A duplicate view shares the original terminal.\n\nAvailable actions depend on the selected terminal backend and harness. Submitted operations are not proof of completed work. Configuration and credentials are stored privately.".into(),
+                "help.guide" => "Navigate with Tab or number keys; arrows select, Enter opens an action, Esc cancels. Ctrl+P searches commands. Workspaces groups servers, sessions, windows and exact terminals. Left/Right folds the tree. F2 opens pane actions, F3 toggles Focus, F4 opens Tetris, and F5 saves a private checkpoint with visible output. [ and ] switch layouts. Right click opens pane actions.\n\nSelect a terminal: a attaches, w watches, c saves a checkpoint, f forks, d duplicates its view, p pins. L saves the current layout. Ctrl+] then D detaches; the terminal keeps running. q checks for updates before exiting without stopping agents. Options → Application → Check for updates (Ctrl+U) checks on demand.\n\nSetup imports private configuration or starts fresh. Review dependency changes before installation. Account sign-in belongs to each native harness. Checkpoint resume/fork depends on the installed harness capabilities; cross-harness handoff supplies context to a new session. A duplicate view shares the original terminal.\n\nAvailable actions depend on the selected terminal backend and harness. Submitted operations are not proof of completed work. Configuration and credentials are stored privately.".into(),
                 "hooks.profile" => {
                     let roster=super::hook_install::capabilities().iter().map(|cap|format!("{} · {}\n{}\n{}",cap.harness,if cap.installable{"native profile installation available"}else{"installation unavailable"},cap.integration,cap.reference)).collect::<Vec<_>>().join("\n\n");
                     format!("Native hook profiles\n\nTelegram delivery publishes final responses. Progress reports tool activity. Notifications report attention and permission events. Optional Hindsight queues memory work. Exact process, conversation and terminal identities are verified for each registration. Hook installation preserves unrelated handlers and requires review; goal continuation is enabled only by adapters with a tested native continuation contract.\n\n{roster}")
@@ -867,25 +904,44 @@ impl SessionMenu {
         if let Some(key) = action.strip_prefix("checkpoint:") {
             return self.checkpoint_menu(key, source, config, seq);
         }
-        if let Some(name) = action.strip_prefix("layout:") {
+        if action == "layout.open" {
+            let names = self
+                .view
+                .as_ref()
+                .unwrap()
+                .layouts
+                .layouts
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            if names.is_empty() {
+                return self.output(
+                    seq,
+                    "Saved layouts",
+                    "No saved layouts yet. Use Save current layout or L to keep an arrangement.",
+                    false,
+                );
+            }
+            let options = names
+                .iter()
+                .map(|name| {
+                    json!([
+                        name,
+                        name,
+                        "Restore its view, panes, workspace halves and preferences."
+                    ])
+                })
+                .collect();
             return self.choose(
                 seq,
-                Stage::Layout(name.into()),
-                &format!("Layout “{name}”"),
-                vec![
-                    json!([
-                        "open",
-                        "Open",
-                        "Restore its view, pinned terminals and focus."
-                    ]),
-                    json!([
-                        "delete",
-                        "Delete",
-                        "Remove the saved layout; terminals are unaffected."
-                    ]),
-                ],
-                "",
+                Stage::PickLayout(names),
+                "Open saved layout",
+                options,
+                "Opening a layout changes the dashboard; it never restarts terminals.",
             );
+        }
+        if let Some(name) = action.strip_prefix("layout:") {
+            return self.layout_menu(name, seq);
         }
         if action == "layout.save" {
             return self.input(seq, Stage::LayoutName, "Name this layout");
@@ -964,6 +1020,36 @@ impl SessionMenu {
             )
         }
     }
+    fn layout_menu(&mut self, name: &str, seq: &mut u64) -> Result<Outcome> {
+        if !self
+            .view
+            .as_ref()
+            .unwrap()
+            .layouts
+            .layouts
+            .contains_key(name)
+        {
+            return Err("Saved layout changed or was removed; refresh and choose again".into());
+        }
+        self.choose(
+            seq,
+            Stage::Layout(name.into()),
+            &format!("Layout “{name}”"),
+            vec![
+                json!([
+                    "open",
+                    "Open",
+                    "Restore its view, pinned terminals and focus."
+                ]),
+                json!([
+                    "delete",
+                    "Delete",
+                    "Remove the saved layout; terminals are unaffected."
+                ]),
+            ],
+            "",
+        )
+    }
     fn checkpoint_menu<S: Source>(
         &mut self,
         key: &str,
@@ -974,8 +1060,42 @@ impl SessionMenu {
         let Answer::Saved(row) = source.session(config, Request::Load(key.into()))? else {
             return Err("Invalid checkpoint response".into());
         };
+        self.checkpoint_options(row, seq)
+    }
+    fn checkpoint_options(&mut self, row: CheckpointRow, seq: &mut u64) -> Result<Outcome> {
         let title = row.checkpoint.name.clone();
-        self.choose(seq,Stage::Checkpoint(row),&title,vec![json!(["details","View saved ID and source","Show the full session ID, project, profile, and context path."]),json!(["fork","Fork in the same harness","Create a separate native session from the saved history."]),json!(["resume","Resume in the same harness","Reopen the original session; shares its native history."]),json!(["handoff","Continue in another harness","Start a new session using the saved terminal excerpt."]),json!(["remove","Remove saved reference","Native session history and terminals are unaffected."])],"Native session IDs belong to their original harness. Cross-harness handoffs use context.")
+        let mut options = vec![json!([
+            "details",
+            "View saved ID and source",
+            "Show the full session ID, project, profile, and context path."
+        ])];
+        if !row.checkpoint.sid.is_empty() {
+            options.extend([
+                json!([
+                    "fork",
+                    "Fork into a new pane",
+                    "Create an independent native session from the saved history."
+                ]),
+                json!([
+                    "resume",
+                    "Resume in a new pane",
+                    "Reopen the original session; shares its native history."
+                ]),
+            ]);
+        }
+        if !row.checkpoint.context_file.is_empty() {
+            options.push(json!([
+                "handoff",
+                "Continue in another harness",
+                "Start a new session using the saved terminal excerpt."
+            ]));
+        }
+        options.push(json!([
+            "remove",
+            "Remove saved reference",
+            "Native session history and terminals are unaffected."
+        ]));
+        self.choose(seq,Stage::Checkpoint(row),&title,options,"Choose how to open this checkpoint. Native IDs belong to their original harness; context-only checkpoints use a handoff.")
     }
     fn workspace_tool(&mut self, seq: &mut u64, request: WorkspaceRequest) -> Result<Outcome> {
         let mut options = vec![json!([
@@ -1012,7 +1132,39 @@ impl SessionMenu {
     ) -> Result<Outcome> {
         match action {
             "telegram.route"=>self.telegram.for_pane(&pane,source,config,seq),
-            "checkpoint.save" => self.input(seq, Stage::SaveName(pane), "Name this checkpoint"),
+            "checkpoint.quick" => {
+                let name = format!("Quick {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid system time")?.as_secs());
+                let answer = source.session(config, Request::Save { pane, request: SaveRequest { name, sid: String::new(), include_output: true } })?;
+                let message = match answer {
+                    Answer::Saved(row) => format!("Checkpoint saved: {}", row.checkpoint.name),
+                    Answer::Text(text) => text,
+                    _ => return Err("Unexpected checkpoint response".into()),
+                };
+                Ok(Outcome { refresh: true, message, ..Outcome::default() })
+            }
+            "checkpoint.save" | "checkpoint.save-open" => {
+                let open_after = action == "checkpoint.save-open";
+                if open_after { self.spawn_anchor = Some(pane.clone()); }
+                self.input(seq, Stage::SaveName {pane,open_after}, "Name this checkpoint")
+            }
+            "checkpoint.open-here" => {
+                let view = self.view.as_ref().ok_or("Missing checkpoint view")?;
+                let rows = view.health["checkpoints"].as_array().into_iter().flatten()
+                    .filter_map(|value| serde_json::from_value::<CheckpointRow>(value.clone()).ok())
+                    .collect::<Vec<_>>();
+                if rows.is_empty() { return Err("No saved checkpoints available. Save a checkpoint first, then refresh.".into()); }
+                self.spawn_anchor = Some(pane);
+                let options = rows.iter().map(|row| json!([row.key, row.checkpoint.name,
+                    format!("{} · {}",row.checkpoint.harness,if row.checkpoint.sid.is_empty(){"context handoff"}else{"native session"})])).collect();
+                self.choose(seq,Stage::ChooseCheckpoint(rows.into_iter().map(|r|r.key).collect()),"Open saved checkpoint here",options,"Choose a checkpoint, then fork, resume or hand off into a NEW pane. Your clicked pane stays running.")
+            }
+            "terminal.shell-above"|"terminal.shell-below"|"terminal.shell-left"|"terminal.shell-right" => {
+                let direction=action.strip_prefix("terminal.shell-").ok_or("Missing split direction")?;
+                let answer=source.session(config,Request::Workspace(Box::new(WorkspaceRequest::Organize {pane,operation:format!("split-{direction}"),label:String::new(),tool:"shell".into()})))?;
+                let Answer::Receipt(receipt)=answer else {return Err("Unexpected shell creation response".into())};
+                let open_terminal=if receipt.state==crate::adapters::terminal_actions::ReceiptState::Unconfirmed{None}else{receipt.terminal};
+                Ok(Outcome { open_terminal,refresh:true,message:receipt.message,..Outcome::default() })
+            }
             "terminal.attach" | "terminal.watch" => {
                 let mode = if action == "terminal.attach" {
                     AttachMode::Control
@@ -1076,7 +1228,7 @@ impl SessionMenu {
                 }
                 self.choose(seq, Stage::Organize(pane), "Organize project", options, "")
             }
-            "terminal.native"=>self.confirm(seq,Commit::Native(pane),"Open this terminal full screen in its native client; detach to return to Daedalus. The original process stays running."),
+            "terminal.native"=>self.confirm(seq,Commit::Native(pane),"Open this terminal in its native client. F11 or Ctrl+] then D returns to Daedalus; the original process stays running."),
             "terminal.view" => {
                 let text = source.preview(&pane, 120)?;
                 self.output(seq, &description(&pane), &text, false)
@@ -1244,7 +1396,21 @@ impl SessionMenu {
         if panes.is_empty() {
             return Err("No live destination terminals".into());
         }
+        let mut panes = panes;
+        if let Some(anchor) = &self.spawn_anchor {
+            let expected = crate::adapters::terminals::identity(anchor)?;
+            let index = panes.iter().position(|p| crate::adapters::terminals::identity(p).is_ok_and(|id|id==expected))
+                .ok_or("The clicked destination pane changed; checkpoint remains saved. Refresh and choose a destination again.")?;
+            let anchor = panes.remove(index);
+            panes.insert(0, anchor);
+        }
         let mut options = Self::picker_options(&panes);
+        if self.spawn_anchor.is_some() {
+            options[0][1] = json!(format!("Here · below {}", tree::title(&panes[0], "")));
+            options[0][2] = json!(
+                "Create a NEW pane beside the terminal you right-clicked; preserve its process."
+            );
+        }
         let mut sessions = std::collections::BTreeSet::new();
         for (index, pane) in panes.iter().enumerate() {
             if pane["backend"] == "tmux"
@@ -1333,6 +1499,12 @@ impl SessionMenu {
         config: &ControlConfig,
         seq: &mut u64,
     ) -> Result<Outcome> {
+        if self.orchestration.pending() {
+            return self.orchestration.reply(request, source, config, seq);
+        }
+        if self.project.pending() {
+            return self.project.reply(request, source, config, seq);
+        }
         if self.telegram.pending() {
             return self.telegram.answer(source, config, request, seq);
         }
@@ -1642,7 +1814,25 @@ impl SessionMenu {
                 }
             }
             Stage::WorkspaceTool(mut request) => {
+                if matches!(text, "codex" | "claude") {
+                    let options = super::permissions::choices(text)
+                        .iter()
+                        .map(|c| json!([c.0, c.1, c.2]))
+                        .collect::<Vec<_>>();
+                    return self.choose(seq,Stage::WorkspacePermission(request,text.into()),"Permissions for this new thread",options,
+                        "This choice affects only the new agent. Existing panes keep their policy. Full access permits unrestricted commands and edits. Your native account, sign-in and administrator policy remain authoritative.");
+                }
                 request.set_tool(text);
+                self.workspace_confirm(seq, *request)
+            }
+            Stage::WorkspacePermission(mut request, tool) => {
+                let selection = if text == "native" {
+                    tool
+                } else {
+                    format!("{tool}@{text}")
+                };
+                super::permissions::parse(&selection)?;
+                request.set_tool(&selection);
                 self.workspace_confirm(seq, *request)
             }
 
@@ -1681,7 +1871,13 @@ impl SessionMenu {
                 },
                 "Focus selected linked view",
             ),
-            Stage::SaveName(pane) => {
+            Stage::ChooseCheckpoint(keys) => {
+                if !keys.iter().any(|key| key == text) {
+                    return Err("Checkpoint selection changed".into());
+                }
+                self.checkpoint_menu(text, source, config, seq)
+            }
+            Stage::SaveName { pane, open_after } => {
                 if text.is_empty() || text.chars().count() > 100 {
                     return Err("Use a checkpoint name between 1 and 100 characters".into());
                 }
@@ -1690,6 +1886,7 @@ impl SessionMenu {
                     Stage::SaveKind {
                         pane,
                         name: text.into(),
+                        open_after,
                     },
                     "What should be saved?",
                     vec![
@@ -1712,15 +1909,28 @@ impl SessionMenu {
                     "",
                 )
             }
-            Stage::SaveKind { pane, name } => {
+            Stage::SaveKind {
+                pane,
+                name,
+                open_after,
+            } => {
                 if text == "manual" {
-                    self.input(seq, Stage::SaveSid { pane, name }, "Native session ID")
+                    self.input(
+                        seq,
+                        Stage::SaveSid {
+                            pane,
+                            name,
+                            open_after,
+                        },
+                        "Native session ID",
+                    )
                 } else {
                     let label = format!("Save private checkpoint for {}", description(&pane));
                     self.confirm(
                         seq,
                         Commit::Save {
                             pane,
+                            open_after,
                             request: SaveRequest {
                                 name,
                                 sid: String::new(),
@@ -1731,12 +1941,17 @@ impl SessionMenu {
                     )
                 }
             }
-            Stage::SaveSid { pane, name } => {
+            Stage::SaveSid {
+                pane,
+                name,
+                open_after,
+            } => {
                 let label = format!("Save private checkpoint for {}", description(&pane));
                 self.confirm(
                     seq,
                     Commit::Save {
                         pane,
+                        open_after,
                         request: SaveRequest {
                             name,
                             sid: text.into(),
@@ -2016,6 +2231,12 @@ impl SessionMenu {
                 },
                 "Link this window into the selected tmux session. Nothing is moved or restarted.",
             ),
+            Stage::PickLayout(names) => {
+                if !names.iter().any(|name| name == text) {
+                    return Err("Saved layout choice changed".into());
+                }
+                self.layout_menu(text, seq)
+            }
             Stage::LayoutName => {
                 let mut layouts = self.view.as_ref().unwrap().layouts.clone();
                 layouts.save_layout(text, layouts.current.clone())?;
@@ -2054,6 +2275,25 @@ impl SessionMenu {
         config: &ControlConfig,
         seq: &mut u64,
     ) -> Result<Outcome> {
+        let open_saved = matches!(
+            &commit,
+            Commit::Save {
+                open_after: true,
+                ..
+            }
+        );
+        let opens_terminal = match &commit {
+            Commit::Launch(_) => true,
+            Commit::Workspace(request) => match &**request {
+                WorkspaceRequest::Create { .. } => true,
+                WorkspaceRequest::Organize { operation, .. } => {
+                    operation == "new-group"
+                        || operation == "split"
+                        || operation.starts_with("split-")
+                }
+            },
+            _ => false,
+        };
         let request = match commit {
             Commit::Workspace(request) => Request::Workspace(request),
             Commit::Native(pane) => {
@@ -2062,11 +2302,11 @@ impl SessionMenu {
                     Stage::Native(pane),
                     "external",
                     "Open native tool",
-                    json!({"description":"The dashboard will return when the program exits."}),
+                    json!({"description":"F11 or Ctrl+] then D returns to Daedalus. Only the viewer closes; the source terminal and its agent keep running."}),
                 );
             }
             Commit::Configure { expected, updated } => Request::Configure { expected, updated },
-            Commit::Save { pane, request } => Request::Save { pane, request },
+            Commit::Save { pane, request, .. } => Request::Save { pane, request },
             Commit::Remove(key) => Request::Remove(key),
             Commit::Launch(launch) => Request::Launch {
                 checkpoint: Box::new(launch.checkpoint),
@@ -2120,6 +2360,14 @@ impl SessionMenu {
                 refresh: true,
                 ..Outcome::default()
             }),
+            Answer::Saved(row) if open_saved => {
+                let name = row.checkpoint.name.clone();
+                let mut outcome = self.checkpoint_options(row, seq)?;
+                outcome.refresh = true;
+                outcome.message =
+                    format!("Checkpoint saved: {name}. Choose how to open it in a new pane.");
+                Ok(outcome)
+            }
             Answer::Saved(row) => self.output(
                 seq,
                 "Checkpoint saved",
@@ -2135,6 +2383,19 @@ impl SessionMenu {
                 ),
                 true,
             ),
+            Answer::Receipt(receipt)
+                if opens_terminal
+                    && receipt.state
+                        != crate::adapters::terminal_actions::ReceiptState::Unconfirmed
+                    && receipt.terminal.is_some() =>
+            {
+                Ok(Outcome {
+                    open_terminal: receipt.terminal,
+                    refresh: true,
+                    message: receipt.message,
+                    ..Outcome::default()
+                })
+            }
             Answer::Receipt(receipt) => self.output(seq, "Result", &receipt.message, true),
             Answer::Text(text) => self.output(seq, "Result", &text, true),
             _ => Err("Unexpected session operation response".into()),
@@ -2158,6 +2419,9 @@ mod tests {
 
     #[derive(Default)]
     struct Mock {
+        shell_receipt: Option<Receipt>,
+        save_reply: Option<CheckpointRow>,
+        launch_receipt: Option<Receipt>,
         configuration_directory: Option<std::path::PathBuf>,
         requests: Vec<Request>,
         layouts: Vec<Layouts>,
@@ -2241,10 +2505,19 @@ mod tests {
         }
         fn session(&mut self, _: &ControlConfig, request: Request) -> Result<Answer> {
             let answer = match &request {
+                Request::Workspace(_) if self.shell_receipt.is_some() => {
+                    Answer::Receipt(self.shell_receipt.take().unwrap())
+                }
                 Request::Configure { updated, .. } => Answer::Configured {
                     configuration: updated.clone(),
                     message: "Configured".into(),
                 },
+                Request::Save { .. } if self.save_reply.is_some() => {
+                    Answer::Saved(self.save_reply.take().unwrap())
+                }
+                Request::Launch { .. } if self.launch_receipt.is_some() => {
+                    Answer::Receipt(self.launch_receipt.take().unwrap())
+                }
                 Request::Load(_) => {
                     let mut row = row();
                     if self.codex {
@@ -2339,6 +2612,226 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn saved_layout_picker_opens_existing_layout_without_terminal_mutations_and_empty_picker_explains_saving()
+     {
+        let mut menu = SessionMenu::default();
+        let mut source = Mock::default();
+        let mut seq = 0;
+        let empty = menu
+            .start("layout.open", view(), &mut source, &config(), &mut seq)
+            .unwrap();
+        assert!(
+            empty.frames[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("No saved layouts")
+        );
+        menu.cancel();
+        let mut selected = view();
+        selected
+            .layouts
+            .save_layout(
+                "Desk",
+                crate::core::layouts::View {
+                    mode: crate::core::layouts::ViewMode::Map,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let options = menu
+            .start("layout.open", selected, &mut source, &config(), &mut seq)
+            .unwrap();
+        assert_eq!(options.frames[0]["options"][0][0], "Desk");
+        reply(&mut menu, &mut source, &mut seq, json!("Desk")).unwrap();
+        let restored = reply(&mut menu, &mut source, &mut seq, json!("open")).unwrap();
+        assert!(restored.restore);
+        assert_eq!(
+            restored.layouts.unwrap().current.mode,
+            crate::core::layouts::ViewMode::Map
+        );
+        assert!(source.requests.is_empty());
+        assert_eq!(source.layouts.len(), 1);
+    }
+    #[test]
+    fn save_and_open_commits_once_keeps_the_checkpoint_and_targets_the_clicked_pane() {
+        for cancel_launch in [false, true] {
+            let mut source = Mock {
+                supported: true,
+                save_reply: Some(row()),
+                launch_receipt: Some(Receipt {
+                    state: crate::adapters::terminal_actions::ReceiptState::Submitted,
+                    message: "Launch submitted; readiness unconfirmed".into(),
+                    terminal: Some(
+                        json!({"backend":"tmux","socket":crate::test_support::path("/tmp/mock.sock"),"pane_id":"%9","terminal_id":"new-generation"}),
+                    ),
+                }),
+                ..Mock::default()
+            };
+            let mut menu = SessionMenu::default();
+            let mut seq = 0;
+            let mut selected = view();
+            let clicked = pane();
+            let mut other = pane();
+            other["pane_id"] = json!("%0");
+            other["terminal_id"] = json!("other-generation");
+            selected.snapshot["panes"] = json!([other, clicked]);
+            menu.start(
+                "checkpoint.save-open",
+                selected,
+                &mut source,
+                &config(),
+                &mut seq,
+            )
+            .unwrap();
+            reply(&mut menu, &mut source, &mut seq, json!("Saved session")).unwrap();
+            reply(&mut menu, &mut source, &mut seq, json!("context")).unwrap();
+            assert!(source.requests.is_empty());
+            let saved = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+            assert!(saved.refresh && saved.message.contains("Checkpoint saved"));
+            assert_eq!(source.requests.len(), 1);
+            assert!(
+                matches!(&source.requests[0],Request::Save {pane:actual,request} if actual==&clicked && request.name=="Saved session" && request.include_output)
+            );
+            let destinations = reply(&mut menu, &mut source, &mut seq, json!("fork")).unwrap();
+            assert!(
+                destinations.frames[0]["options"][0][1]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Here · below")
+            );
+            reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+            let confirmation = seq;
+            let result = reply(
+                &mut menu,
+                &mut source,
+                &mut seq,
+                json!(if cancel_launch { "cancel" } else { "yes" }),
+            )
+            .unwrap();
+            assert_eq!(
+                source
+                    .requests
+                    .iter()
+                    .filter(|r| matches!(r, Request::Save { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                source
+                    .requests
+                    .iter()
+                    .filter(|r| matches!(r, Request::Launch { .. }))
+                    .count(),
+                usize::from(!cancel_launch)
+            );
+            if !cancel_launch {
+                assert!(
+                    matches!(source.requests.last().unwrap(),Request::Launch {parent,key,operation,source,..} if parent==&clicked && key.as_deref()==Some("checkpoint:stable") && *operation==Operation::NativeFork && source.is_none())
+                );
+                assert_eq!(result.open_terminal.unwrap()["pane_id"], "%9");
+            } else {
+                assert!(result.open_terminal.is_none());
+            }
+            assert!(
+                menu.reply(
+                    &json!({"op":"reply","id":confirmation,"value":"yes"}),
+                    &mut source,
+                    &config(),
+                    &mut seq
+                )
+                .is_err()
+            );
+            assert!(
+                !source
+                    .requests
+                    .iter()
+                    .any(|r| matches!(r, Request::Remove(_)))
+            );
+        }
+    }
+    #[test]
+    fn saved_picker_loads_exact_key_and_context_only_saves_offer_handoff_without_native_resume() {
+        let mut source = Mock {
+            supported: true,
+            ..Mock::default()
+        };
+        let mut menu = SessionMenu::default();
+        let mut seq = 0;
+        let mut selected = view();
+        selected.health = json!({"checkpoints":[row()]});
+        menu.start(
+            "checkpoint.open-here",
+            selected,
+            &mut source,
+            &config(),
+            &mut seq,
+        )
+        .unwrap();
+        assert!(source.requests.is_empty());
+        assert!(reply(&mut menu, &mut source, &mut seq, json!("checkpoint:other")).is_err());
+        reply(&mut menu, &mut source, &mut seq, json!("checkpoint:stable")).unwrap();
+        assert!(matches!(&source.requests[0],Request::Load(key) if key=="checkpoint:stable"));
+        menu.cancel();
+        assert!(menu.spawn_anchor.is_none());
+        let mut context = row();
+        context.checkpoint.sid.clear();
+        context.checkpoint.context_file = "/fixture/private-context.txt".into();
+        let choices = menu.checkpoint_options(context, &mut seq).unwrap();
+        let ids = choices.frames[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[0].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"handoff"));
+        assert!(!ids.contains(&"fork") && !ids.contains(&"resume"));
+    }
+    #[test]
+    fn uncertain_launch_never_attaches_or_retries_and_conflicted_destinations_are_excluded() {
+        let mut source = Mock {
+            supported: true,
+            launch_receipt: Some(Receipt {
+                state: crate::adapters::terminal_actions::ReceiptState::Unconfirmed,
+                message: "Outcome uncertain; inspect".into(),
+                terminal: Some(pane()),
+            }),
+            ..Mock::default()
+        };
+        let mut menu = SessionMenu::default();
+        let mut seq = 0;
+        start(
+            &mut menu,
+            &mut source,
+            &mut seq,
+            "checkpoint:checkpoint:stable",
+        );
+        reply(&mut menu, &mut source, &mut seq, json!("fork")).unwrap();
+        reply(&mut menu, &mut source, &mut seq, json!("0")).unwrap();
+        let result = reply(&mut menu, &mut source, &mut seq, json!("yes")).unwrap();
+        assert!(result.open_terminal.is_none());
+        assert!(
+            result.frames[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("uncertain")
+        );
+        assert_eq!(
+            source
+                .requests
+                .iter()
+                .filter(|r| matches!(r, Request::Launch { .. }))
+                .count(),
+            1
+        );
+        menu.cancel();
+        let mut selected = view();
+        let mut conflict = pane();
+        conflict["observation_conflict"] = json!(true);
+        selected.snapshot["panes"] = json!([conflict]);
+        menu.view = Some(selected);
+        assert!(menu.panes().is_empty());
+    }
     #[test]
     fn runtime_edit_validates_reviews_cancels_and_commits_once() {
         for apply in [false, true] {
@@ -2465,6 +2958,16 @@ mod tests {
         assert_eq!(choices.iter().any(|row| row[0] == "viewer"), !cfg!(windows));
         assert!(choices.iter().any(|row| row[0] == "pin"));
         assert!(source.requests.is_empty());
+    }
+    #[test]
+    fn quick_checkpoint_saves_private_context_once_without_dialog() {
+        let (mut menu, mut source, mut seq) = (SessionMenu::default(), Mock::default(), 0);
+        let outcome = start(&mut menu, &mut source, &mut seq, "checkpoint.quick");
+        assert!(outcome.refresh && outcome.frames.is_empty() && !menu.pending());
+        assert_eq!(source.requests.len(), 1);
+        assert!(
+            matches!(&source.requests[0], Request::Save {request,..} if request.include_output && request.sid.is_empty() && request.name.starts_with("Quick "))
+        );
     }
     #[test]
     fn checkpoint_save_invalid_reply_cancel_and_confirmation_are_single_use() {
@@ -2750,8 +3253,8 @@ mod tests {
             assert_eq!(outcome.frames[0]["plan"]["node"], "synthetic-node");
         }
         let outcome = start(&mut menu, &mut source, &mut seq, "synthetic-node");
-        assert_eq!(outcome.frames[0]["options"].as_array().unwrap().len(), 17);
-        assert_eq!(outcome.frames[0]["icons"].as_array().unwrap().len(), 17);
+        assert_eq!(outcome.frames[0]["options"].as_array().unwrap().len(), 21);
+        assert_eq!(outcome.frames[0]["icons"].as_array().unwrap().len(), 21);
         assert!(
             outcome.frames[0]["options"]
                 .as_array()
@@ -3228,5 +3731,51 @@ mod tests {
                 .contains("Watch in another Daedalus window")
         );
         assert!(source.requests.is_empty());
+    }
+    #[test]
+    fn shell_actions_keep_returned_identity_and_only_attach_confirmed_creations() {
+        for (direction, state) in [
+            (
+                "above",
+                crate::adapters::terminal_actions::ReceiptState::Accepted,
+            ),
+            (
+                "below",
+                crate::adapters::terminal_actions::ReceiptState::Accepted,
+            ),
+            (
+                "left",
+                crate::adapters::terminal_actions::ReceiptState::Unconfirmed,
+            ),
+        ] {
+            let mut source = Mock {
+                shell_receipt: Some(Receipt {
+                    state: state.clone(),
+                    message: "Created".into(),
+                    terminal: Some(json!({"pane_id":"new","terminal_id":"new-generation"})),
+                }),
+                ..Mock::default()
+            };
+            let mut menu = SessionMenu::default();
+            let mut seq = 0;
+            let outcome = start(
+                &mut menu,
+                &mut source,
+                &mut seq,
+                &format!("terminal.shell-{direction}"),
+            );
+            assert!(outcome.refresh);
+            assert_eq!(source.requests.len(), 1);
+            let Request::Workspace(request) = &source.requests[0] else {
+                panic!("workspace request expected")
+            };
+            assert!(
+                matches!(request.as_ref(),WorkspaceRequest::Organize{operation,tool,..} if operation==&format!("split-{direction}") && tool=="shell")
+            );
+            assert_eq!(
+                outcome.open_terminal.is_some(),
+                state != crate::adapters::terminal_actions::ReceiptState::Unconfirmed
+            );
+        }
     }
 }

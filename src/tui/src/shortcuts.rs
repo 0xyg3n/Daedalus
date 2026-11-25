@@ -22,6 +22,93 @@ pub fn bindings(ui: &Ui) -> Vec<Binding> {
         ui.settings.details_page_rows
     );
     let mut rows = [
+        (
+            "Workspaces",
+            "F2 / right click",
+            "Open actions for the selected pane or branch",
+        ),
+        (
+            "Control bar",
+            "Hover / click",
+            "Read an explanation / run the displayed shortcut",
+        ),
+        (
+            "Workspaces",
+            "F3",
+            "Focus selected pane / return to previous view",
+        ),
+        ("Workspaces", "F4", "Open editable Tetris"),
+        (
+            "Workspaces",
+            "F6",
+            "Project Git review: diffs, staging, commits and worktrees",
+        ),
+        (
+            "Workspaces",
+            "F7",
+            "Agent task plans, dependencies and run history",
+        ),
+        (
+            "Tree",
+            "F4 / Ctrl+Enter / double click",
+            "Open Tetris for the selected workspace, tab or pane",
+        ),
+        (
+            "Workspaces",
+            "Shift+F10 / Menu key",
+            "Open actions for the selected pane or branch",
+        ),
+        ("Tetris", "Esc", "Detach / clear search / return to Tree"),
+        (
+            "Workspaces",
+            "F5",
+            "Quick private checkpoint, including visible output",
+        ),
+        (
+            "Herdr popup",
+            "F12",
+            "Close Daedalus and return to original pane",
+        ),
+        (
+            "Tetris",
+            "Drag title / shared divider",
+            "Swap panes / resize neighboring panes without overlap",
+        ),
+        (
+            "Attached terminal",
+            "Ctrl+] then S",
+            "Quick private checkpoint",
+        ),
+        (
+            "Tetris",
+            "PageUp / PageDown",
+            "Switch tab; mouse buttons also switch tabs",
+        ),
+        (
+            "Tetris",
+            "Click / wheel in pane",
+            "Type in / scroll this pane without changing the layout",
+        ),
+        (
+            "Tetris",
+            "Workspace / pane numbers",
+            "Click the top badges to switch",
+        ),
+        (
+            "Pane menu",
+            "Type / wheel / Enter",
+            "Filter, browse and run pane actions",
+        ),
+        (
+            "Pane menu",
+            "Tab / Shift+Tab",
+            "Next / previous category; typing searches all categories",
+        ),
+        (
+            "Appearance",
+            "Options → Theme colors",
+            "Choose Midnight, Charcoal, Ocean, Forest or Violet",
+        ),
         ("Dashboard", "F1", "Search all keyboard shortcuts"),
         ("Dashboard", "Ctrl+P", "Search commands and actions"),
         ("Dashboard", "Ctrl+K", "Find and switch terminals"),

@@ -70,12 +70,12 @@
         "backend": "herdr",
         "session": "project-beta",
         "workspace_id": "w1",
-        "tab_id": "w1:t2",
+        "tab_id": "w1:t1",
         "pane_id": "w1:p3",
         "terminal_id": "demo-migrate",
         "agent": "codex",
         "agent_status": "blocked",
-        "label": "migration-agent",
+        "label": "migration",
         "activity_at": 1000000,
         "activity": "blocked"
       },
@@ -83,7 +83,7 @@
         "backend": "herdr",
         "session": "project-beta",
         "workspace_id": "w1",
-        "tab_id": "w1:t2",
+        "tab_id": "w1:t1",
         "pane_id": "w1:p4",
         "terminal_id": "demo-api",
         "agent": "opencode",
@@ -130,6 +130,84 @@
         "active": "0",
         "activity_at": 999980,
         "activity": "output"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p5",
+        "terminal_id": "demo-checks",
+        "agent": "bash",
+        "agent_status": "idle",
+        "label": "test-shell",
+        "activity_at": 999984,
+        "activity": "output"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p6",
+        "terminal_id": "demo-logs",
+        "agent": "bash",
+        "agent_status": "idle",
+        "label": "logs",
+        "activity_at": 999998,
+        "activity": "output"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p7",
+        "terminal_id": "demo-tetris-7",
+        "agent": "bash",
+        "agent_status": "idle",
+        "label": "preview",
+        "activity_at": 999995,
+        "activity": "output"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p8",
+        "terminal_id": "demo-tetris-8",
+        "agent": "hermes",
+        "agent_status": "idle",
+        "label": "research",
+        "activity_at": 999995,
+        "activity": "status"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p9",
+        "terminal_id": "demo-tetris-9",
+        "agent": "pi",
+        "agent_status": "working",
+        "label": "refactor",
+        "activity_at": 999995,
+        "activity": "working"
+      },
+      {
+        "backend": "herdr",
+        "session": "project-beta",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p10",
+        "terminal_id": "demo-tetris-10",
+        "agent": "cursor",
+        "agent_status": "idle",
+        "label": "frontend",
+        "activity_at": 999995,
+        "activity": "status"
       }
     ],
     "layouts": [
@@ -150,18 +228,98 @@
             "rect": {
               "x": 0,
               "y": 0,
-              "width": 96,
-              "height": 48
+              "width": 70,
+              "height": 24
             },
             "focused": true
           },
           {
             "pane_id": "w1:p2",
             "rect": {
-              "x": 96,
+              "x": 70,
               "y": 0,
-              "width": 64,
-              "height": 48
+              "width": 54,
+              "height": 18
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p3",
+            "rect": {
+              "x": 124,
+              "y": 0,
+              "width": 36,
+              "height": 18
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p4",
+            "rect": {
+              "x": 70,
+              "y": 18,
+              "width": 90,
+              "height": 16
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p5",
+            "rect": {
+              "x": 0,
+              "y": 24,
+              "width": 37,
+              "height": 12
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p6",
+            "rect": {
+              "x": 37,
+              "y": 24,
+              "width": 33,
+              "height": 24
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p7",
+            "rect": {
+              "x": 0,
+              "y": 36,
+              "width": 37,
+              "height": 12
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p8",
+            "rect": {
+              "x": 70,
+              "y": 34,
+              "width": 30,
+              "height": 14
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p9",
+            "rect": {
+              "x": 100,
+              "y": 34,
+              "width": 30,
+              "height": 14
+            },
+            "focused": false
+          },
+          {
+            "pane_id": "w1:p10",
+            "rect": {
+              "x": 130,
+              "y": 34,
+              "width": 30,
+              "height": 14
             },
             "focused": false
           }
@@ -180,6 +338,12 @@
     "demo-api": "\u001b[1m> \u001b[0madd pagination to the jobs endpoint\n\n\u001b[36m◇\u001b[0m Edit \u001b[34msrc/api/jobs.ts\u001b[0m\u001b[2m +38 −6\u001b[0m\n\u001b[36m◇\u001b[0m Bash \u001b[2mnpm test -- jobs\u001b[0m\n\u001b[32m✓ 31 passed\u001b[0m",
     "demo-research": "\u001b[1m❯ \u001b[0msummarise this week's incident notes\n\n\u001b[38;5;215m⚕\u001b[0m Read 4 files in \u001b[36mnotes/incidents\u001b[0m\n  Two outages, both from expired certificates.\n\u001b[2m  Suggested: renew 30 days before expiry.\u001b[0m",
     "demo-refactor": "\u001b[1m> \u001b[0mrename the config loader to load_settings\n\n\u001b[32medit\u001b[0m src/config.py \u001b[2m(4 call sites)\u001b[0m\n\u001b[32mbash\u001b[0m\u001b[2m pytest -q\u001b[0m\n\u001b[32m✓ 27 passed\u001b[0m\u001b[2m · π working\u001b[0m",
-    "demo-3": "\u001b[2m12:04:31\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m\n\u001b[2m12:04:36\u001b[0m GET /api/jobs \u001b[32m200\u001b[0m\u001b[2m 14ms\u001b[0m\n\u001b[2m12:04:41\u001b[0m POST /api/jobs \u001b[31m429\u001b[0m\u001b[2m rate limited\u001b[0m\n\u001b[2m12:04:46\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m"
+    "demo-3": "\u001b[2m12:04:31\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m\n\u001b[2m12:04:36\u001b[0m GET /api/jobs \u001b[32m200\u001b[0m\u001b[2m 14ms\u001b[0m\n\u001b[2m12:04:41\u001b[0m POST /api/jobs \u001b[31m429\u001b[0m\u001b[2m rate limited\u001b[0m\n\u001b[2m12:04:46\u001b[0m GET /health \u001b[32m200\u001b[0m\u001b[2m 2ms\u001b[0m",
+    "demo-checks": "\u001b[36m$\u001b[0m cargo test --quiet\n\n\u001b[32m✓\u001b[0m unit tests       94 passed\n\u001b[32m✓\u001b[0m integration     18 passed\n\n\u001b[2mFinished in 2.4s\u001b[0m",
+    "demo-logs": "\u001b[2m12:04:31\u001b[0m \u001b[32mINFO\u001b[0m health 200\n\u001b[2m12:04:36\u001b[0m \u001b[32mINFO\u001b[0m jobs 200\n\u001b[2m12:04:41\u001b[0m \u001b[33mWARN\u001b[0m retry 1\n\u001b[2m12:04:42\u001b[0m \u001b[32mINFO\u001b[0m jobs 200",
+    "demo-tetris-7": "\u001b[36m$\u001b[0m npm run dev\n\n\u001b[32m✓\u001b[0m Ready on :5173\n  HMR watching src/",
+    "demo-tetris-8": "\u001b[36m❯\u001b[0m Compare retry policies\n\n\u001b[32m✓\u001b[0m Backoff settings reviewed\n  Notes ready for handoff.",
+    "demo-tetris-9": "\u001b[36m>\u001b[0m Split the parser tests\n\n\u001b[33m●\u001b[0m Editing parser.test.ts\n  7 cases updated",
+    "demo-tetris-10": "\u001b[36m❯\u001b[0m Review the settings form\n\n\u001b[32m✓\u001b[0m Validation is consistent\n  3 components checked"
   }
 }

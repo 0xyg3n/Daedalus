@@ -11,6 +11,8 @@ pub mod codex_state;
 pub mod config;
 pub mod control_audit;
 pub mod control_menu;
+#[cfg(test)]
+mod control_port_tests;
 pub mod control_settings;
 pub mod cutover;
 pub mod dashboard;
@@ -51,10 +53,16 @@ pub mod memory_config;
 pub mod memory_menu;
 pub mod memory_status;
 pub mod migration;
+pub mod orchestration;
+pub mod orchestration_menu;
 pub mod pane_launch;
+pub mod permissions;
 pub mod presentation;
+pub mod project;
+pub mod project_menu;
 pub mod public_cli;
 pub mod registry;
+pub mod remote;
 pub mod route_cli;
 pub mod runtime_settings;
 pub mod session_actions;
@@ -102,3 +110,8 @@ pub mod workspace_api;
 pub mod native_terminal;
 
 pub mod harness_detection;
+
+pub mod herdr_integration;
+
+#[cfg(unix)]
+pub mod native_client;

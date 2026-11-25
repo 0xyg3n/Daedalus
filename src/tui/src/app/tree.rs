@@ -810,6 +810,7 @@ impl Tree {
                     .insert("split".into(), group.order.len().into());
             }
         }
+        let mut workspace_numbers = BTreeMap::<String, usize>::new();
         for (collection, kind) in [("workspaces", "workspace"), ("tabs", "tab")] {
             for item in array(snapshot, collection) {
                 let server = first(item, &["session"]);
@@ -842,6 +843,17 @@ impl Tree {
                     "workspace",
                     None,
                 );
+                if collection == "workspaces"
+                    && !tree.nodes[project_node]
+                        .attributes
+                        .contains_key("workspace_number")
+                {
+                    let number = workspace_numbers.entry(server.clone()).or_default();
+                    *number += 1;
+                    tree.nodes[project_node]
+                        .attributes
+                        .insert("workspace_number".into(), json!(*number));
+                }
                 if kind == "tab" && truth(&item["tab_id"]) {
                     tree.add(
                         extend(&key, ["group".into(), v(item, "tab_id")]),
@@ -1670,6 +1682,9 @@ impl Tree {
                     json!({"title":title(pane,&context.hostname),"place":place,"project":first(pane,&["session"]),"harness":first(pane,&["agent"]),"state":attr("state","".into()),"views":node.attr_ref("views").and_then(|views|views.get("count")).cloned().unwrap_or(1.into()),"pinned":pin,"viewer":truth(&node.attr("viewer")),"split":attr("split",0.into())})
                 });
                 let mut row = json!({"id":id,"parent":node.parent.map(|p|tree.nodes[p].id()).unwrap_or_default(),"label":node.label,"parts":attr("parts",json!([])),"branch":format!("{prefix}{}",if last{"└─ "}else{"├─ "}),"kind":node.kind,"backend":node.key.first().map(text).unwrap_or_default(),"children":!node.children.is_empty(),"count":attr("pane_count",0.into()),"state":attr("state","".into()),"active_at":attr("activity_at",json!(0.0)),"activity":attr("activity","".into()),"linked":attr("linked",0.into()),"viewed":attr("viewed",false.into()),"server_focused":attr("server_focused",false.into()),"actionable":node.pane.as_ref().is_some_and(|pane|!crate::adapters::pane_observations::conflicted(pane))||truth(&node.attr("checkpoint")),"fields":tree.fields(index,context),"tile":tile,"layout":node.attr("layout")});
+                if let Some(number) = node.attributes.get("workspace_number") {
+                    row["workspace_number"] = number.clone();
+                }
                 if let Some(pane) = node.pane.as_ref() {
                     row["agent"] = json!(is_agent(pane));
                     row["conflicted"] = json!(crate::adapters::pane_observations::conflicted(pane));
@@ -1748,6 +1763,31 @@ impl Tree {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_numbers_follow_native_endpoint_order_including_empty_workspaces() {
+        let context = ProjectionContext::default();
+        let pane = |workspace: &str, id: &str| json!({"backend":"herdr","session":"fixture","server":"fixture","workspace_id":workspace,"tab_id":format!("{workspace}:t1"),"pane_id":id,"terminal_id":format!("generation-{id}")});
+        let tree = Tree::build(
+            &json!({
+                "panes":[pane("wZ","wZ:p1"),pane("wA","wA:p1")],
+                "workspaces":[
+                    {"session":"fixture","workspace_id":"wZ","label":"First"},
+                    {"session":"fixture","workspace_id":"wEmpty","label":"Empty"},
+                    {"session":"fixture","workspace_id":"wA","label":"Third"}
+                ]
+            }),
+            &json!({}),
+            &context,
+        );
+        let rows = tree.filtered_rows(&context, &BTreeSet::new(), "");
+        for (label, number) in [("First", 1), ("Empty", 2), ("Third", 3)] {
+            let row = rows
+                .iter()
+                .find(|r| r["kind"] == "workspace" && r["label"] == label)
+                .unwrap();
+            assert_eq!(row["workspace_number"], number);
+        }
+    }
     #[test]
     fn agy_is_a_terminal_harness_without_inventing_lifecycle_capabilities() {
         assert!(super::is_agent(
@@ -2246,9 +2286,16 @@ mod tests {
         let mut actual =
             Tree::build(&fixture["snapshot"], &fixture["health"], &context).rows(&context);
         // Preserve the entire historical projection contract. Additive activity
-        // metadata is verified by the linked-terminal test below.
+        // metadata is verified by the linked-terminal test below; native workspace
+        // numbering is checked independently against endpoint order.
         for row in &mut actual {
-            for key in ["agent", "conflicted", "terminal_key", "agent_activity"] {
+            for key in [
+                "agent",
+                "conflicted",
+                "terminal_key",
+                "agent_activity",
+                "workspace_number",
+            ] {
                 row.as_object_mut().unwrap().remove(key);
             }
         }

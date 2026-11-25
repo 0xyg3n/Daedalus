@@ -51,6 +51,15 @@ impl Ui {
         graphics: bool,
         preferences: Option<&[u8]>,
     ) -> Self {
+        Self::with_remote(demo, configured, graphics, preferences, None)
+    }
+    fn with_remote(
+        demo: bool,
+        configured: bool,
+        graphics: bool,
+        preferences: Option<&[u8]>,
+        remote: Option<bool>,
+    ) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-ui-startup-{}-{}",
             std::process::id(),
@@ -145,6 +154,70 @@ impl Ui {
             .stderr(Stdio::from(stderr.try_clone().unwrap()));
         if demo {
             command.arg("--demo");
+        }
+        if let Some(fail) = remote {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = directory.join("bin");
+            fs::create_dir(&bin).unwrap();
+            let remote_home = directory.join("remote-home");
+            fs::create_dir(&remote_home).unwrap();
+            let state = directory.join("remote 'state");
+            let mut config = daedalus_tui::app::config::ControlConfig::fresh(&remote_home).unwrap();
+            config.discovery.automatic = false;
+            config.discovery.native = Some(true);
+            if !fail {
+                let output = Command::new(env!("CARGO_BIN_EXE_daedalus-tui"))
+                    .env_clear()
+                    .env("HOME", &remote_home)
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("TERM", "xterm-256color")
+                    .current_dir(&remote_home)
+                    .args([
+                        "terminal-native",
+                        "start",
+                        "--name",
+                        "Remote fixture",
+                        "--workspace",
+                        "Remote project",
+                        "--",
+                        "/bin/sh",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            private_dashboard_file(
+                &state.join("control.json"),
+                &serde_json::to_vec(&config).unwrap(),
+            )
+            .unwrap();
+            private_dashboard_file(
+                &state.join("dashboard.json"),
+                br#"{"discovery":{"scan_processes":false,"scan_default_roots":false}}"#,
+            )
+            .unwrap();
+            let ssh = bin.join("ssh");
+            let script = if fail {
+                "#!/bin/sh\nexit 255\n".to_string()
+            } else {
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}/ssh-argv'\nfor last do :; done\nexport HOME='{}/remote-home'\nexec /bin/sh -c \"$last\"\n",
+                    directory.display(),
+                    directory.display()
+                )
+            };
+            fs::write(&ssh, script).unwrap();
+            fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+            command
+                .env("PATH", &bin)
+                .args(["--remote", "fixture-host", "--remote-config-dir"])
+                .arg(&state)
+                .arg("--remote-bin")
+                .arg(env!("CARGO_BIN_EXE_daedalus-tui"));
         }
         unsafe {
             command.pre_exec(|| {
@@ -249,12 +322,95 @@ impl Ui {
         self.child = self.command.spawn().unwrap();
     }
 }
+
+#[test]
+fn remote_tui_routes_real_protocol_to_the_owning_environment_and_shows_its_host() {
+    let mut ui = Ui::with_remote(false, false, false, None, Some(false));
+    ui.wait_text("SSH fixture-host");
+    ui.master.write_all(b"1").unwrap();
+    ui.master.write_all(b"\x1b[18~").unwrap(); // F7
+    ui.wait_text("Agent orchestration");
+    ui.master.write_all(b"\x1b").unwrap();
+    ui.wait_presence("Agent orchestration", false);
+    ui.quit();
+    let argv = fs::read_to_string(ui.directory.join("ssh-argv")).unwrap();
+    assert!(argv.contains("StrictHostKeyChecking=yes"));
+    assert!(argv.contains("'--stdio'"));
+    assert!(argv.contains("remote '\\''state"));
+    assert!(!ui.directory.join(".config/daedalus/control.json").exists());
+}
+
+#[test]
+fn failed_remote_connection_exits_without_falling_back_to_local_setup() {
+    let mut ui = Ui::with_remote(false, false, false, None, Some(true));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let mut bytes = [0; 16384];
+        if let Ok(n) = ui.master.read(&mut bytes) {
+            ui.screen.process(&bytes[..n]);
+        }
+        if let Some(status) = ui.child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Failed SSH did not close the TUI"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ui.stderr_text().contains("Backend stopped"));
+    assert!(!ui.screen.screen().contents().contains("Guided setup"));
+    assert!(!ui.directory.join(".config/daedalus/control.json").exists());
+}
+#[test]
+fn remote_embedded_terminal_stream_and_keyboard_input_use_the_ssh_transport() {
+    let mut ui = Ui::with_remote(false, false, false, None, Some(false));
+    ui.wait_text("SSH fixture-host");
+    ui.master.write_all(b"2").unwrap();
+    ui.wait_text("Remote fixture");
+    ui.master.write_all(b"\x1b[B\x1b[B\x1b[B\x1bOS").unwrap();
+    ui.wait_text("Workspaces > Tetris");
+    ui.master.write_all(b"a").unwrap();
+    ui.wait_text("Typing");
+    ui.master
+        .write_all(b"printf 'REMOTE_EMBED_FIXTURE\\n'\r")
+        .unwrap();
+    ui.wait_text("REMOTE_EMBED_FIXTURE");
+    ui.master.write_all(b"\x1dd").unwrap();
+    ui.wait_presence("Typing", false);
+    ui.quit();
+    let argv = fs::read_to_string(ui.directory.join("ssh-argv")).unwrap();
+    assert!(argv.contains("'terminal-native'"));
+    assert!(argv.contains("'stream'"));
+}
 impl Drop for Ui {
     fn drop(&mut self) {
         unsafe {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
         let _ = self.child.wait();
+        let remote_home = self.directory.join("remote-home");
+        if remote_home.is_dir()
+            && let Ok(output) = Command::new(env!("CARGO_BIN_EXE_daedalus-tui"))
+                .env_clear()
+                .env("HOME", &remote_home)
+                .env("PATH", "/usr/bin:/bin")
+                .args(["terminal-native", "list"])
+                .output()
+            && let Ok(sessions) = serde_json::from_slice::<
+                Vec<daedalus_tui::app::native_terminal::SessionInfo>,
+            >(&output.stdout)
+        {
+            for session in sessions {
+                let _ = Command::new(env!("CARGO_BIN_EXE_daedalus-tui"))
+                    .env_clear()
+                    .env("HOME", &remote_home)
+                    .env("PATH", "/usr/bin:/bin")
+                    .args(["terminal-native", "close", &session.id, &session.generation])
+                    .output();
+            }
+        }
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -921,6 +1077,157 @@ fn real_ui_reports_agent_work_wait_idle_and_reviewed_feedback_visibility() {
 }
 
 #[test]
+fn map_tracks_native_swaps_from_refresh_with_changed_reading_order_in_the_real_ui() {
+    use daedalus_tui::app::config::ControlConfig;
+    use std::os::unix::fs::PermissionsExt;
+    let mut ui = Ui::configured(false, true);
+    ui.wait_text("LIVE TOPOLOGY");
+    ui.quit();
+    let config_dir = ui.directory.join(".config/daedalus");
+    let config_file = config_dir.join("control.json");
+    let mut config = ControlConfig::parse(&fs::read(&config_file).unwrap()).unwrap();
+    config.discovery.herdr_sessions = vec!["fixture".into()];
+    private_dashboard_file(&config_file, &config.encode().unwrap()).unwrap();
+    let snapshot_path = ui.directory.join("swap-snapshot.json");
+    let mut snapshot = serde_json::json!({"result":{
+        "panes":[
+            {"pane_id":"pane-a","terminal_id":"generation-a","workspace_id":"work","tab_id":"tab","title":"LEFT_SENTINEL","agent":"bash","cwd":ui.directory},
+            {"pane_id":"pane-b","terminal_id":"generation-b","workspace_id":"work","tab_id":"tab","title":"RIGHT_SENTINEL","agent":"bash","cwd":ui.directory}
+        ],
+        "workspaces":[{"workspace_id":"work","label":"Workspace"}],"tabs":[{"workspace_id":"work","tab_id":"tab","label":"Fixture tab"}],
+        "layouts":[{"workspace_id":"work","tab_id":"tab","area":{"width":200,"height":40},"panes":[
+            {"pane_id":"pane-a","rect":{"x":0,"y":0,"width":80,"height":40}},
+            {"pane_id":"pane-b","rect":{"x":80,"y":0,"width":120,"height":40}}
+        ]}]
+    }});
+    fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let script = ui.directory.join("inert-swap-herdr");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+exec /bin/cat "$SWAP_UI_SNAPSHOT"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    ui.command
+        .env("DAEDALUS_HERDR_BIN", &script)
+        .env("SWAP_UI_SNAPSHOT", &snapshot_path);
+    ui.restart();
+    ui.wait_text("2 terminals");
+    ui.master.write_all(b"2").unwrap();
+    ui.wait_text("Fixture tab");
+    let click_label = |ui: &mut Ui, label: &str| {
+        let screen = ui.screen.screen();
+        let (row, column) = (0..48)
+            .rev()
+            .flat_map(|row| (0..160).map(move |column| (row, column)))
+            .find(|&(row, column)| {
+                (column..160)
+                    .take(label.len())
+                    .filter_map(|x| screen.cell(row, x))
+                    .map(|cell| cell.contents())
+                    .collect::<String>()
+                    == label
+            })
+            .unwrap_or_else(|| panic!("Missing clickable {label}: {}", screen.contents()));
+        write!(
+            ui.master,
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            column + 1,
+            row + 1,
+            column + 1,
+            row + 1
+        )
+        .unwrap();
+    };
+    click_label(&mut ui, "Fixture tab");
+    ui.master.write_all(b"\x1b[21;2~").unwrap();
+    ui.wait_text("Workspace actions");
+    ui.master
+        .write_all(b"\tOpen this branch in Tetris")
+        .unwrap();
+    ui.wait_text("Open this branch in Tetris_");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("[+]");
+    ui.wait_text("[Tree]");
+    click_label(&mut ui, "[Tree]");
+    ui.wait_presence("[+]", false);
+    ui.wait_text("Fixture tab");
+    click_label(&mut ui, "Fixture tab");
+    ui.master.write_all(b"\x1b[14~").unwrap();
+    ui.wait_text("[+]");
+    // Footer controls remain clickable around modal overlays and share their
+    // keyboard paths, including backend-owned dialog replies.
+    ui.wait_text("Esc  Tree");
+    click_label(&mut ui, "F2");
+    ui.wait_text("Pane actions");
+    ui.wait_text("Run action");
+    click_label(&mut ui, "Close");
+    ui.wait_presence("Pane actions", false);
+    ui.wait_text("Esc  Tree");
+    click_label(&mut ui, "All keys");
+    ui.wait_text("Keyboard shortcuts");
+    ui.wait_text("PgDn  Next");
+    click_label(&mut ui, "Close");
+    ui.wait_presence("Keyboard shortcuts", false);
+    ui.wait_text("Esc  Tree");
+    click_label(&mut ui, "F2");
+    ui.wait_text("Pane actions");
+    ui.wait_text("Run action");
+    ui.master.write_all(b"Open saved layout\r").unwrap();
+    ui.wait_text("No saved layouts yet");
+    ui.wait_text("Esc  Close");
+    click_label(&mut ui, "Close");
+    ui.wait_presence("No saved layouts yet", false);
+    ui.wait_text("Esc  Tree");
+    let columns = |ui: &Ui| {
+        let text = ui.screen.screen().contents();
+        text.lines()
+            .find(|line| {
+                line.contains("[+]")
+                    && line.contains("LEFT_SENTINEL")
+                    && line.contains("RIGHT_SENTINEL")
+            })
+            .map(|line| {
+                (
+                    line.find("LEFT_SENTINEL").unwrap(),
+                    line.find("RIGHT_SENTINEL").unwrap(),
+                )
+            })
+    };
+    let (left, right) = columns(&ui).unwrap();
+    assert!(left < right);
+    snapshot["result"]["layouts"][0]["panes"][0]["rect"]["x"] = serde_json::json!(120);
+    snapshot["result"]["layouts"][0]["panes"][1]["rect"]["x"] = serde_json::json!(0);
+    snapshot["result"]["layouts"][0]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    snapshot["result"]["panes"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    let staged = ui.directory.join("swap-snapshot-next.json");
+    fs::write(&staged, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    fs::rename(staged, &snapshot_path).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        ui.wait_text("Panes");
+        if columns(&ui).is_some_and(|(left, right)| right < left) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Native pane swap did not reach Tetris: {}",
+            ui.screen.screen().contents()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    ui.quit();
+}
+
+#[test]
 fn codex_fork_license_picker_reaches_review_in_real_ui_without_launching() {
     use daedalus_tui::app::config::ControlConfig;
     use std::os::unix::fs::PermissionsExt;
@@ -971,7 +1278,7 @@ fn codex_fork_license_picker_reaches_review_in_real_ui_without_launching() {
     ui.master.write_all(b"3").unwrap();
     ui.wait_text("Fixture conversation");
     ui.master.write_all(b"/Fixture conversation\r\r").unwrap();
-    ui.wait_text("Fork in the same harness");
+    ui.wait_text("Fork into a new pane");
     ui.master.write_all(b"\x1b[B\r").unwrap();
     ui.wait_text("Fork with which license?");
     ui.wait_text("Fixture account");
@@ -980,6 +1287,34 @@ fn codex_fork_license_picker_reaches_review_in_real_ui_without_launching() {
     ui.master.write_all(b"\r").unwrap();
     ui.wait_text("License: Fixture account");
     ui.wait_text("Native profile:");
+    ui.master.write_all(b"\x1b").unwrap();
+    ui.wait_text("Cancelled");
+    assert_eq!(
+        fs::read(directory.join("dashboard-checkpoints.json")).unwrap(),
+        checkpoints
+    );
+    assert!(!selected.join("sessions").exists());
+    // Exercise the mouse context-menu entry into the same checked launch flow.
+    ui.master.write_all(b"2\x1b[14~").unwrap();
+    ui.wait_text("Panes");
+    ui.wait_text("[+]");
+    ui.master
+        .write_all(b"\x1b[<2;20;12M\x1b[<2;20;12m")
+        .unwrap();
+    ui.wait_text("Pane actions");
+    ui.master.write_all(b"Open saved checkpoint here").unwrap();
+    ui.wait_text("Open saved checkpoint here_");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Choose a checkpoint, then fork");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Fork into a new pane");
+    ui.master.write_all(b"\x1b[B\r").unwrap();
+    ui.wait_text("Fork with which license?");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("Open a new pane below which terminal?");
+    ui.wait_text("Here");
+    ui.master.write_all(b"\r").unwrap();
+    ui.wait_text("NEW split pane");
     ui.master.write_all(b"\x1b").unwrap();
     ui.wait_text("Cancelled");
     assert_eq!(
@@ -1111,15 +1446,15 @@ fn saved_local_navigation_and_search_limits_reach_real_ui_and_survive_restart() 
     ui.master.write_all(b"\x1b").unwrap();
     ui.wait_presence("abcdefg_", false);
     ui.master.write_all(b",").unwrap();
-    ui.wait_text("1/16");
+    ui.wait_text("1/17");
     ui.master.write_all(b"\x1b[6~").unwrap();
-    ui.wait_text("3/16");
+    ui.wait_text("3/17");
     ui.master.write_all(b"\x1b[<65;80;20M").unwrap();
-    ui.wait_text("6/16");
+    ui.wait_text("6/17");
     ui.master.write_all(b"\x1b[<64;80;20M").unwrap();
-    ui.wait_text("3/16");
+    ui.wait_text("3/17");
     ui.master.write_all(b"\x1b").unwrap();
-    ui.wait_presence("3/16", false);
+    ui.wait_presence("3/17", false);
     ui.quit();
     ui.restart();
     ui.wait_text("0 terminals");

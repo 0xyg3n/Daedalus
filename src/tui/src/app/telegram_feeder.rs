@@ -30,6 +30,37 @@ pub fn encode_prompt(frame: &Frame) -> Result<(String, String)> {
 /// user text, arbitrary prompts and other providers retain exact hashing.
 pub(super) fn prompt_sha256(harness: super::hooks::Harness, prompt: &str) -> String {
     let canonical = || -> Option<&str> {
+        if harness == super::hooks::Harness::Claude {
+            if !prompt.contains("<pasted_content id=") || !prompt.contains("</pasted_content") {
+                return None;
+            }
+            let prefix = "/usr/bin/false -- '";
+            let start = prompt.find(prefix)?;
+            for (offset, _) in prompt[start + prefix.len()..].match_indices('\'') {
+                let end = start + prefix.len() + offset + 1;
+                let candidate = &prompt[start..end];
+                let encoded = candidate
+                    .strip_prefix(prefix)?
+                    .strip_suffix('\'')?
+                    .replace("'\"'\"'", "'");
+                let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&encoded) else {
+                    continue;
+                };
+                let Some(frame) = envelope
+                    .get("frame")
+                    .and_then(|value| serde_json::from_value::<Frame>(value.clone()).ok())
+                else {
+                    continue;
+                };
+                if encode_prompt(&frame)
+                    .ok()
+                    .is_some_and(|(expected, _)| expected == candidate)
+                {
+                    return Some(candidate);
+                }
+            }
+            return None;
+        }
         if !matches!(
             harness,
             super::hooks::Harness::Opencode | super::hooks::Harness::Hermes
@@ -205,6 +236,15 @@ mod prompt_tests {
         };
         let (text, correlation) = encode_prompt(&frame).unwrap();
         let exact = prompt_sha256(Harness::Opencode, &text);
+        let claude_exact = prompt_sha256(Harness::Claude, &text);
+        let wrapped = format!(
+            "local text\n\n<pasted_content id=\"abc\">\n{text}\n</pasted_content id=\"abc\">"
+        );
+        assert_eq!(prompt_sha256(Harness::Claude, &wrapped), claude_exact);
+        assert_ne!(
+            prompt_sha256(Harness::Claude, &wrapped.replace(&correlation, "changed")),
+            claude_exact
+        );
         assert_eq!(prompt_sha256(Harness::Opencode, &format!("{text} ")), exact);
         assert_eq!(prompt_sha256(Harness::Hermes, &format!("{text} ")), exact);
         for changed in [

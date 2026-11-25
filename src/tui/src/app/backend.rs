@@ -54,6 +54,24 @@ impl Default for Observations {
 }
 
 pub trait Source {
+    fn project(
+        &mut self,
+        _config: &ControlConfig,
+        _request: super::project::Request,
+    ) -> Result<super::project::Reply> {
+        Err("Project Git operations are unavailable for this source".into())
+    }
+    fn orchestrate(
+        &mut self,
+        _config: &ControlConfig,
+        _run: super::orchestration_menu::Run,
+    ) -> Result<super::orchestration_menu::Reply> {
+        Err("Orchestration is unavailable for this source".into())
+    }
+    fn swap_terminals(&mut self, _source: &Value, _target: &Value) -> Result<String> {
+        Err("Pane swapping is unavailable for this source".into())
+    }
+
     fn resize_terminal(
         &mut self,
         _config: &ControlConfig,
@@ -800,6 +818,9 @@ impl<S: Source> Backend<S> {
                 .and_then(|node| node.pane.as_ref())
                 .and_then(|pane| reference(pane).ok())
         };
+        if let Some(map) = object.get("map") {
+            current.map = serde_json::from_value(map.clone()).map_err(|_| "Invalid map layout")?;
+        }
         if let Some(sizes) = object.get("sizes") {
             current.sizes = Some(
                 serde_json::from_value::<layouts::Sizes>(sizes.clone())
@@ -808,7 +829,7 @@ impl<S: Source> Backend<S> {
             );
         }
         for (key, value) in object {
-            if !matches!(key.as_str(), "mode" | "selected" | "sizes") {
+            if !matches!(key.as_str(), "mode" | "selected" | "sizes" | "map") {
                 current.preferences.insert(key.clone(), value.clone());
             }
         }
@@ -995,6 +1016,43 @@ impl<S: Source> Backend<S> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let selected = topology.find(selected_id);
+        if let Some(raw) = action.strip_prefix("armonia:terminal:") {
+            let identity: crate::core::identity::TerminalId =
+                serde_json::from_str(raw).map_err(|_| "Invalid live terminal identity")?;
+            identity.validate().map_err(str::to_owned)?;
+            let matches = topology
+                .nodes
+                .iter()
+                .filter(|n| n.kind == "pane")
+                .filter(|n| {
+                    n.pane
+                        .as_ref()
+                        .and_then(|p| crate::adapters::terminals::identity(p).ok())
+                        .as_ref()
+                        == Some(&identity)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err("Terminal identity changed or is ambiguous; refresh Armonia".into());
+            }
+            let mut selected = request.clone();
+            selected["action"] = json!(matches[0].id());
+            selected["node"] = json!(matches[0].id());
+            return self.action(&selected);
+        }
+
+        if action == "terminal.swap" {
+            let peer = request["peer"].as_str().ok_or("Missing swap peer")?;
+            let source = selected
+                .and_then(|n| n.pane.as_ref())
+                .ok_or("Source pane disappeared")?;
+            let target = topology
+                .find(peer)
+                .and_then(|n| n.pane.as_ref())
+                .ok_or("Target pane disappeared")?;
+            let message = self.source.swap_terminals(source, target)?;
+            return Ok(vec![self.refresh_with_message(&message)?]);
+        }
         if action == "terminal.resize" {
             if selected
                 .and_then(|node| node.pane.as_ref())
@@ -1077,6 +1135,55 @@ impl<S: Source> Backend<S> {
         }
         if !outcome.message.is_empty() {
             self.message = outcome.message.clone();
+        }
+        if let Some(pane) = outcome.open_terminal {
+            let mut state = self.refresh_with_message(&outcome.message)?;
+            let expected = crate::adapters::terminals::identity(&pane)?;
+            let topology = self.topology();
+            let matches = topology
+                .nodes
+                .iter()
+                .filter(|n| n.kind == "pane")
+                .filter(|n| {
+                    n.pane
+                        .as_ref()
+                        .and_then(|p| crate::adapters::terminals::identity(p).ok())
+                        .as_ref()
+                        == Some(&expected)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                state["message"] = json!(format!(
+                    "Pane {} created; refresh to resolve its unique identity before attaching",
+                    expected.pane
+                ));
+                return Ok(vec![state]);
+            }
+            let node = matches[0].id();
+            state["workspace"]["apply"]["mode"] =
+                serde_json::to_value(self.observations.layouts.current.mode)
+                    .map_err(|_| "Cannot encode layout")?;
+            state["workspace"]["apply"]["selected"] = json!(node);
+            let attach = self.source.session(
+                &self.config,
+                session_menu::Request::Attach {
+                    pane,
+                    mode: super::session_actions::AttachMode::Control,
+                    node,
+                },
+            );
+            return Ok(match attach {
+                Ok(session_menu::Answer::Frame(plan)) => {
+                    vec![state, json!({"version":2,"kind":"attach","plan":plan})]
+                }
+                _ => {
+                    state["message"] = json!(format!(
+                        "Pane {} created; input is not connected. Select it to attach.",
+                        expected.pane
+                    ));
+                    vec![state]
+                }
+            });
         }
         if !outcome.frames.is_empty() {
             let mut frames = outcome.frames;
@@ -1519,6 +1626,127 @@ impl NativeSource {
     }
 }
 impl Source for NativeSource {
+    fn project(
+        &mut self,
+        config: &ControlConfig,
+        request: super::project::Request,
+    ) -> Result<super::project::Reply> {
+        use super::project::{Plan, Reply, Repository, Request};
+        self.terminals.apply_settings(&config.runtime)?;
+        let pane = match &request {
+            Request::Inspect(p)
+            | Request::Diff { pane: p, .. }
+            | Request::Report { pane: p, .. }
+            | Request::Preview { pane: p, .. }
+            | Request::Prepare { pane: p, .. } => p,
+            Request::Apply { plan, .. } => &plan.pane,
+        };
+        let actual = self.terminals.verify(pane)?;
+        let cwd = actual["cwd"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or("Selected pane has no project directory")?;
+        let repository = Repository::inspect(std::path::Path::new(cwd))?;
+        match request {
+            Request::Inspect(_) => Ok(Reply::Repository(repository)),
+            Request::Diff { path, staged, .. } => {
+                Ok(Reply::Text(repository.diff(path.as_deref(), staged)?))
+            }
+            Request::Report { kind, .. } => Ok(Reply::Text(repository.report(&kind)?)),
+            Request::Preview { path, .. } => Ok(Reply::Text(repository.preview(&path)?)),
+            Request::Prepare { pane, change } => Ok(Reply::Plan(Box::new(Plan::prepare(
+                pane, repository, change,
+            )?))),
+            Request::Apply { plan, approval } => {
+                self.require_configuration()?;
+                if repository != plan.repository {
+                    return Err("The selected pane's repository changed; review again".into());
+                }
+                let text = super::control_audit::perform(
+                    &self.directory,
+                    super::control_audit::Action::Workspace,
+                    || plan.apply(&approval),
+                    |_| super::control_audit::State::Completed,
+                )?;
+                Ok(Reply::Text(text))
+            }
+        }
+    }
+    fn orchestrate(
+        &mut self,
+        config: &ControlConfig,
+        run: super::orchestration_menu::Run,
+    ) -> Result<super::orchestration_menu::Reply> {
+        use super::{
+            orchestration::{self, Store},
+            orchestration_menu::{Reply, Run},
+        };
+        self.terminals.apply_settings(&config.runtime)?;
+        let mut store = Store::open(&self.directory)?;
+        let message = match run {
+            Run::List => String::new(),
+            Run::Admit { plan, approval } => {
+                self.require_configuration()?;
+                plan.validate()?;
+                let executor = orchestration::NativeExecutor {
+                    terminals: &self.terminals,
+                    directory: &self.directory,
+                };
+                for task in &plan.tasks {
+                    executor.validate_admission(task)?;
+                }
+                super::control_audit::perform(
+                    &self.directory,
+                    super::control_audit::Action::Workspace,
+                    || store.admit(&plan, &approval),
+                    |_| super::control_audit::State::Completed,
+                )?;
+                orchestration::spawn_worker(&self.directory)?;
+                "Plan saved; worker launch requested. Inspect task history for submission, progress and uncertainty. No saved or uncertain task is replayed.".into()
+            }
+            Run::Cancel { plan, key } => {
+                self.require_configuration()?;
+                super::control_audit::perform(
+                    &self.directory,
+                    super::control_audit::Action::Workspace,
+                    || store.cancel_queued(&plan, &key),
+                    |_| super::control_audit::State::Completed,
+                )?;
+                "Queued task cancelled".into()
+            }
+            Run::Wake => {
+                self.require_configuration()?;
+                orchestration::spawn_worker(&self.directory)?;
+                "Worker launch requested; its exclusive instance lock prevents duplicate dispatch."
+                    .into()
+            }
+            Run::Resolve { plan, key } => {
+                self.require_configuration()?;
+                let row = store.uncertain(&plan, &key)?;
+                orchestration::NativeExecutor {
+                    terminals: &self.terminals,
+                    directory: &self.directory,
+                }
+                .validate_release(&row.task)?;
+                super::control_audit::perform(
+                    &self.directory,
+                    super::control_audit::Action::Workspace,
+                    || store.resolve(&plan, &key),
+                    |_| super::control_audit::State::Completed,
+                )?;
+                "Uncertain task marked inspected and cancelled. Its prompt was not replayed.".into()
+            }
+        };
+        Ok(Reply {
+            rows: store.rows()?,
+            message,
+        })
+    }
+    fn swap_terminals(&mut self, source: &Value, target: &Value) -> Result<String> {
+        self.require_configuration()?;
+        crate::adapters::pane_swap::apply(&self.terminals, source, target)
+    }
+
     fn resize_terminal(
         &mut self,
         config: &ControlConfig,
@@ -2887,6 +3115,11 @@ mod tests {
                     self.effects += 1;
                     Ok(session_menu::Answer::Text("Checkpoint saved".into()))
                 }
+                session_menu::Request::Attach { node, mode, .. } => {
+                    Ok(session_menu::Answer::Frame(
+                        json!({"node":node,"mode":if mode == super::super::session_actions::AttachMode::Control {"control"} else {"observe"},"argv":["mock","attach"]}),
+                    ))
+                }
                 _ => Err("Unsupported mock operation".into()),
             }
         }
@@ -2910,6 +3143,83 @@ mod tests {
             },
         )
         .unwrap()
+    }
+    #[test]
+    fn native_map_baselines_are_persisted_and_restored_without_becoming_terminal_identity() {
+        let mut backend = backend();
+        backend.refresh().unwrap();
+        let baseline = json!({"tab":"a".repeat(64)});
+        backend
+            .observe_view(
+                &json!({"mode":"map","selected":"","map":[],"map_native":baseline}),
+                true,
+            )
+            .unwrap();
+        assert_eq!(backend.source.saves, 1);
+        assert_eq!(
+            backend.observations.layouts.current.preferences["map_native"],
+            baseline
+        );
+        backend.restore_pending = true;
+        let state = backend.state().unwrap();
+        assert_eq!(state["workspace"]["apply"]["map_native"], baseline);
+        assert!(
+            state["workspace"]["apply"]["selected"]
+                .as_str()
+                .unwrap_or("")
+                .is_empty()
+        );
+        assert!(
+            backend
+                .observe_view(
+                    &json!({"mode":"map","selected":"","map_native":{"tab":"bad"}}),
+                    true
+                )
+                .is_err()
+        );
+        assert_eq!(backend.source.saves, 1);
+    }
+    #[test]
+    fn newly_launched_agent_resolves_one_terminal_despite_its_agent_child_and_armonia_alias() {
+        let mut backend = backend();
+        backend.source.observation.snapshot["panes"][0]["agent"] = json!("codex");
+        backend.refresh().unwrap();
+        let pane = backend.observations.snapshot["panes"][0].clone();
+        let topology = backend.topology();
+        let node = topology
+            .nodes
+            .iter()
+            .find(|n| n.kind == "pane")
+            .unwrap()
+            .id();
+        assert!(
+            topology
+                .nodes
+                .iter()
+                .any(|n| n.kind == "agent session" && n.pane.is_some())
+        );
+        let frames = backend
+            .menu_outcome(session_menu::Outcome {
+                open_terminal: Some(pane.clone()),
+                message: "Launch submitted".into(),
+                refresh: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["workspace"]["apply"]["selected"], node);
+        assert_eq!(frames[1]["kind"], "attach");
+        assert_eq!(frames[1]["plan"]["node"], node);
+        let identity = crate::adapters::terminals::identity(&pane).unwrap();
+        let action = format!(
+            "armonia:terminal:{}",
+            serde_json::to_string(&identity).unwrap()
+        );
+        let (frames, _) = backend
+            .handle(&json!({"version":2,"op":"action","page":registry::ARMONIA,"action":action}))
+            .unwrap();
+        assert_eq!(frames[0]["kind"], "dialog");
+        assert_eq!(frames[0]["mode"], "choose");
     }
     #[test]
     fn invalid_layout_is_partial_preserves_stale_and_clears_on_recovery() {
@@ -3300,7 +3610,7 @@ mod tests {
         assert_eq!(first["version"], 2);
         assert_eq!(first["kind"], "state");
         assert_eq!(first["sections"].as_array().unwrap().len(), 11);
-        assert_eq!(first["terminal_actions"].as_array().unwrap().len(), 17);
+        assert_eq!(first["terminal_actions"].as_array().unwrap().len(), 21);
         assert_eq!(first["terminals"], 1);
         assert!(first["catalog"].as_array().unwrap().len() > 42);
         assert_eq!(first["workspace"]["apply"]["mode"], "tree");
@@ -3521,7 +3831,7 @@ mod tests {
     #[test]
     fn unavailable_actions_are_marked_without_removing_menu_entries() {
         let frame = backend().refresh().unwrap();
-        assert_eq!(frame["terminal_actions"].as_array().unwrap().len(), 17);
+        assert_eq!(frame["terminal_actions"].as_array().unwrap().len(), 21);
         assert!(
             frame["terminal_actions"]
                 .as_array()

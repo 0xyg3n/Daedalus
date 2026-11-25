@@ -5513,7 +5513,9 @@ fn transcript_proves_reply(
                     .and_then(Value::as_str)
             });
             assistant = None;
-            if text.is_some_and(|s| format!("{:x}", Sha256::digest(s.as_bytes())) == prompt_sha) {
+            if text.is_some_and(|s| {
+                super::telegram_feeder::prompt_sha256(Harness::Claude, s) == prompt_sha
+            }) {
                 user = Some(id.to_owned());
             } else if !content.and_then(Value::as_array).is_some_and(|blocks| {
                 !blocks.is_empty() && blocks.iter().all(|block| block["type"] == "tool_result")

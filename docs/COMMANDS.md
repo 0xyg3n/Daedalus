@@ -17,10 +17,25 @@ the selected project. While attached, use **Ctrl+] then N**. Setup and **Detecte
 harnesses** discover installed tools, reuse configured profiles and let you review
 or deselect automatic selections before saving. See [the TUI guide](TUI.md).
 
+**F6** opens Git review and **F7** opens agent task plans. See the
+[project workflows guide](TUI.md#project-workflows) for controls and limits.
+
 ## CLI
+
+Connect to an already configured remote POSIX instance with
+`daedalus tui --remote SSH_ALIAS --remote-config-dir /absolute/remote/state`
+and optional `--remote-bin /path/to/daedalus`. SSH authentication is noninteractive;
+known host verification is required. Use an SSH alias for custom ports, jump
+hosts or IPv6. `--remote-bin` defaults to `daedalus`. Execution is on the named host.
+
+`daedalus orchestrate list|events|worker --config-dir ABS` inspects private task
+state/events or starts the exclusive persistent worker. Plans are created and
+reviewed in the TUI. Workers never replay uncertain sends after restarting.
 
 | Command | Operations |
 | --- | --- |
+| `popup [--config-dir ABS]` | Open the workspace Tetris in a Herdr popup; F12 closes it |
+| `herdr configure --file ABS [--key f12\|prefix+LETTER] [--apply]` | Preview or install the global Herdr popup shortcut, preserving unrelated settings |
 | `daedalus` | Open the control panel; `setup` opens setup (`setup --cli` for prompts) |
 | `shell [--config-dir ABS] [--workspace NAME] [--name NAME] [--cwd ABS] [-- COMMAND ARGS…]` | Start and attach a persistent native terminal; Ctrl+] then D detaches |
 | `terminal-native` | Native terminal `start`, `list`, `capture`, `input`, `resize`, `rename`, `close`, `attach`, `stream` |
@@ -713,3 +728,9 @@ Native model selection is shown as potentially billable: the audited validation 
 Native controls require the registration instance to match the selected configuration identity. A saved registration is not silently adopted after changing that identity. The verified instance is included in the review.
 
 Workspace selection recording is controlled by `ui.workspace_usage_recording` (default `true`). Turning it off stops sampling without deleting existing aggregates; re-enabling starts a fresh interval. The read-only `workspace-usage` API can still read retained history and reports whether recording is enabled in the saved configuration. Native inventory uses the saved discovery policy; aggregate projection/SQL uses the Workspace usage policy. Retention defaults to zero (keep all); a positive number expires old aggregate rows during a successful sample and does not compact the database file or delete native session history. Budget exhaustion refuses the complete sample/projection; unfinished sampling writes are rolled back.
+
+In the pane context menu, save a named checkpoint, save and open it in a new pane, or open an existing checkpoint beside the clicked pane. Launches use the existing fork/resume/handoff checks and an exact destination confirmation. F11 or a Tetris pane’s [+] button expands it; [Tetris] returns with its layout and input stream retained.
+
+In Tree, F4, Ctrl+Enter or a row double-click opens Tetris for that workspace, tab or pane. Shift+F10 and the Menu key open the selected row's context menu. Menu categories support Tab / Shift+Tab; typing searches every category. Tetris includes Tree, Actions, Shell+ and Fit controls where space allows, workspace half sizing, and saved-layout selection. Esc returns to Tree after detaching or clearing search as needed.
+
+The contextual bottom bar provides clickable shortcuts and hover explanations. F2 and right-click open the same action menu. F1 All keys stays visible when narrow windows hide secondary buttons. Dialog controls share the keyboard reply path; Show controls restores a hidden bar without sending text to an attached pane.

@@ -15,3 +15,5 @@ pub mod standalone;
 
 pub mod native;
 pub(crate) mod pane_observations;
+
+pub mod pane_swap;

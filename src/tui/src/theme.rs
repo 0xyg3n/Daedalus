@@ -76,8 +76,49 @@ impl Tone {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Palette {
+    #[default]
+    Midnight,
+    Charcoal,
+    Ocean,
+    Forest,
+    Violet,
+}
+impl Palette {
+    pub const ALL: [Self; 5] = [
+        Self::Midnight,
+        Self::Charcoal,
+        Self::Ocean,
+        Self::Forest,
+        Self::Violet,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Midnight => "midnight",
+            Self::Charcoal => "charcoal",
+            Self::Ocean => "ocean",
+            Self::Forest => "forest",
+            Self::Violet => "violet",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == s)
+    }
+    fn colors(self) -> (Rgb, Rgb, Rgb, Rgb) {
+        match self {
+            Self::Midnight => (BG, SURFACE, SCREEN, CYAN),
+            Self::Charcoal => ((18, 18, 20), (25, 25, 28), (12, 12, 14), (191, 197, 207)),
+            Self::Ocean => ((10, 20, 30), (16, 29, 42), (6, 14, 22), (115, 181, 232)),
+            Self::Forest => ((12, 22, 19), (18, 32, 27), (7, 15, 12), (139, 198, 159)),
+            Self::Violet => ((20, 16, 29), (29, 24, 40), (13, 10, 20), (190, 166, 232)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
+    pub palette: Palette,
     pub color: bool,
     pub truecolor: bool,
     pub ascii: bool,
@@ -96,6 +137,7 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
+            palette: Palette::default(),
             color: true,
             truecolor: true,
             ascii: false,
@@ -147,6 +189,7 @@ impl Theme {
                 || get("WT_SESSION").is_some()
                 || cfg!(windows));
         Self {
+            palette: Palette::default(),
             color,
             truecolor,
             ascii,
@@ -178,7 +221,11 @@ impl Theme {
     }
     pub fn fg(&self, tone: Tone) -> Style {
         if self.color {
-            return Style::default().fg(self.rgb(tone.rgb()));
+            return Style::default().fg(self.rgb(if tone == Tone::Accent {
+                self.palette.colors().3
+            } else {
+                tone.rgb()
+            }));
         }
         match tone {
             Tone::Muted | Tone::Faint => Style::default().add_modifier(Modifier::DIM),
@@ -190,13 +237,35 @@ impl Theme {
         self.rgb(mix(a, b, t))
     }
     pub fn surface(&self) -> Style {
-        Style::default().bg(self.rgb(SURFACE)).fg(self.rgb(TEXT))
+        Style::default()
+            .bg(self.rgb(self.palette.colors().1))
+            .fg(self.rgb(TEXT))
     }
     pub fn base(&self) -> Style {
-        Style::default().bg(self.rgb(BG)).fg(self.rgb(TEXT))
+        Style::default()
+            .bg(self.rgb(self.palette.colors().0))
+            .fg(self.rgb(TEXT))
     }
     pub fn screen(&self) -> Style {
-        Style::default().bg(self.rgb(SCREEN)).fg(self.rgb(TEXT))
+        Style::default()
+            .bg(self.rgb(self.palette.colors().2))
+            .fg(self.rgb(TEXT))
+    }
+    /// Pane focus is distinct from provider/name colors and the palette accent.
+    pub fn focus_frame(&self) -> Style {
+        self.fg(Tone::Warn)
+            .fg(self.rgb((255, 198, 74)))
+            .add_modifier(Modifier::BOLD)
+    }
+    pub fn focus_label(&self) -> Style {
+        if self.color {
+            Style::default()
+                .fg(self.rgb((255, 232, 170)))
+                .bg(self.rgb((64, 43, 12)))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        }
     }
     /// Selection bar. Without color it must still be visible, so it reverses.
     pub fn selected(&self, fade: f32) -> Style {

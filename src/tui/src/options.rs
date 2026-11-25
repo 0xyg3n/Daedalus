@@ -13,6 +13,7 @@ pub enum Item {
     Recent,
     Badges,
     Vitals,
+    Palette,
     Look,
     Saver,
     Motion,
@@ -34,7 +35,7 @@ impl Item {
             _ => "Change",
         }
     }
-    pub const ALL: [Item; 16] = [
+    pub const ALL: [Item; 17] = [
         Item::Settings,
         Item::Order,
         Item::Details,
@@ -45,6 +46,7 @@ impl Item {
         Item::Recent,
         Item::Badges,
         Item::Vitals,
+        Item::Palette,
         Item::Look,
         Item::Saver,
         Item::Motion,
@@ -57,7 +59,7 @@ impl Item {
         match self {
             Item::Order | Item::Details | Item::Screen | Item::Tiles => "Workspaces",
             Item::Sidebar | Item::Pinned | Item::Recent | Item::Badges | Item::Vitals => "Sidebar",
-            Item::Look | Item::Saver | Item::Motion | Item::Keys => "Look and feel",
+            Item::Palette | Item::Look | Item::Saver | Item::Motion | Item::Keys => "Look and feel",
             Item::Reset => "",
             Item::Updates => "Application",
             Item::Settings => "Configuration",
@@ -74,6 +76,7 @@ impl Item {
             Item::Recent => "Recent terminals",
             Item::Badges => "Counts beside sections",
             Item::Vitals => "Totals",
+            Item::Palette => "Theme colors",
             Item::Look => "Background",
             Item::Saver => "Screensaver",
             Item::Motion => "Neon motion and glitches",
@@ -94,6 +97,7 @@ impl Item {
             Item::Recent => "recent",
             Item::Badges => "counts",
             Item::Vitals => "totals",
+            Item::Palette => "background",
             Item::Look => "background",
             Item::Saver => "saver",
             Item::Motion => "motion",
@@ -117,6 +121,9 @@ impl Item {
             Item::Recent => "Show recently visited terminals for quick switching.",
             Item::Badges => "Show section counts beside navigation labels.",
             Item::Vitals => "Show terminal and connection totals in the sidebar.",
+            Item::Palette => {
+                "Choose Midnight, Charcoal, Ocean, Forest or Violet. Terminal programs keep their own ANSI colors."
+            }
             Item::Look => {
                 "Choose the dashboard background. Terminal previews keep their own colors."
             }
@@ -193,6 +200,7 @@ pub fn value(ui: &Ui, item: Item) -> String {
         Item::Tiles => format!("{}%", ui.sizes.get(Split::Tiles)),
         Item::Sidebar if ui.sizes.sidebar == 0 => "Icons only".into(),
         Item::Sidebar => format!("Open · {} columns", ui.sizes.sidebar),
+        Item::Palette => ui.theme.palette.name().into(),
         Item::Look if !ui.theme.color || !ui.theme.truecolor => "Plain · needs true color".into(),
         Item::Look if ui.theme.ascii => "Plain · Unicode artwork disabled".into(),
         Item::Look if !ui.theme.backdrop => "Plain · background disabled".into(),

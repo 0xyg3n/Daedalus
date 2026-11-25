@@ -233,14 +233,17 @@ pub(crate) fn cube_workspace(ui: &Ui, row: &TileRow) -> (String, usize, String) 
             break;
         };
         if matches!(node.kind.as_str(), "workspace" | "tmux session") {
-            let number = ui
-                .snapshot
-                .tree
-                .iter()
-                .filter(|n| matches!(n.kind.as_str(), "workspace" | "tmux session"))
-                .position(|n| n.id == node.id)
-                .unwrap_or(0)
-                + 1;
+            let number = if node.workspace_number > 0 {
+                node.workspace_number
+            } else {
+                ui.snapshot
+                    .tree
+                    .iter()
+                    .filter(|n| matches!(n.kind.as_str(), "workspace" | "tmux session"))
+                    .position(|n| n.id == node.id)
+                    .unwrap_or(0)
+                    + 1
+            };
             return (node.id.clone(), number, node.label.clone());
         }
         current = ui.snapshot.tree.iter().find(|n| n.id == node.parent);
@@ -1185,7 +1188,13 @@ pub(super) fn grid_shape(
 }
 
 /// One tile. Returns how many preview rows it can show.
-fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bool) -> u16 {
+pub(crate) fn draw_tile(
+    f: &mut Frame,
+    rect: Rect,
+    ui: &mut Ui,
+    row: &TileRow,
+    selected: bool,
+) -> u16 {
     let theme = ui.theme;
     let title_style = if selected {
         theme.selected(1.0)
@@ -1383,10 +1392,12 @@ fn draw_tile(f: &mut Frame, rect: Rect, ui: &mut Ui, row: &TileRow, selected: bo
 }
 
 /// A terminal's last read screen, drawn as a dark inset; read-only.
-pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str) {
+pub(crate) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str) {
     let theme = ui.theme;
     f.render_widget(Block::default().style(theme.screen()), screen);
-    let wall = ui.view == View::Wall && ui.selected_terminal().as_deref() == Some(id);
+    let offset = ui.preview_offsets.get(id).copied().unwrap_or(0);
+    let wall =
+        offset == 0 && ui.view == View::Wall && ui.selected_terminal().as_deref() == Some(id);
     let recorded = match ui.previews.get(id) {
         Some(preview) if preview.error.is_empty() && wall => {
             // Read-only snapshots cannot resize the source terminal. Wrap
@@ -1408,7 +1419,10 @@ pub(super) fn preview_screen(f: &mut Frame, screen: Rect, ui: &mut Ui, id: &str)
         }
         Some(preview) if preview.error.is_empty() => {
             // Bottom-aligned: the latest lines matter most.
-            let top = preview.lines.saturating_sub(screen.height);
+            let top = preview
+                .lines
+                .saturating_sub(screen.height)
+                .saturating_sub(offset);
             let shown = Rect {
                 height: screen.height.min(preview.lines),
                 ..screen
@@ -1734,11 +1748,7 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme.border())
-            .border_style(theme.fg(if chip == "CONTROL" {
-                Tone::Warn
-            } else {
-                Tone::Faint
-            }))
+            .border_style(theme.focus_frame())
             .style(theme.surface())
             .title_top(
                 Line::from(Span::styled(format!(" {chip} "), theme.fg(tone))).right_aligned(),
@@ -1800,36 +1810,71 @@ pub(super) fn focus_panel(f: &mut Frame, area: Rect, ui: &mut Ui) -> Option<(u16
         .agent_session_ids
         .then(|| node.as_ref().and_then(agent_session_label))
         .flatten();
-    let screen = if !provider.is_empty() || (full && identity.is_some()) {
-        let primary = identity
-            .clone()
-            .unwrap_or_else(|| harness_icons::label(ui, harness, ""));
-        let primary = if ui.snapshot.freshness.starts_with("STALE") {
-            format!("STALE · {primary}")
+    // The pane's name always owns a row outside its terminal, including zoomed
+    // shells and sessions whose conversation-ID display is disabled.
+    let screen = if let Some(node) = &node {
+        let id = crate::map::pane_identity(node);
+        let name = session_name(node);
+        let name = if name.starts_with(&id) {
+            name
         } else {
-            primary
+            format!("{id} · {name}")
         };
-        let mut line = format!("{provider}{primary}");
-        let tail = format!(
-            " · {} · {chip}",
-            node.as_ref().map(session_name).unwrap_or_default()
-        );
-        if width(&line) + width(&tail) <= inner.width as usize {
-            line.push_str(&tail);
+        let primary = if ui.snapshot.freshness.starts_with("STALE") {
+            format!("STALE · {name}")
+        } else {
+            name
+        };
+        let mut line = format!("{provider}{primary} · {chip}");
+        let separate_identity = identity.as_ref().is_some_and(|id| {
+            width(&line) + width(id) + 3 + usize::from(ui.fullscreen_from.is_some()) * 7
+                > inner.width as usize
+        }) && inner.height >= 6;
+        if !separate_identity && let Some(id) = &identity {
+            line.push_str(&format!(" · {id}"));
         }
+        let rows = if separate_identity { 2 } else { 1 };
+        let back = ui.fullscreen_from.map(|origin| {
+            if origin == crate::model::View::Map {
+                "[Tetris]"
+            } else {
+                "[Back]"
+            }
+        });
+        let title_width = inner
+            .width
+            .saturating_sub(back.map_or(0, |text| text.len() as u16 + 1));
+        let heading = Rect::new(inner.x, inner.y, inner.width, rows);
+        ui.focus_heading = Some(heading);
         f.render_widget(
-            Paragraph::new(fit(&line, inner.width as usize, &theme)).style(theme.fg(Tone::Info)),
+            Paragraph::new(fit(&line, title_width as usize, &theme)).style(theme.focus_label()),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         harness_icons::mark(ui, harness, Rect::new(inner.x, inner.y, inner.width, 1));
-        if hovered(ui, Rect::new(inner.x, inner.y, inner.width, 1)) {
-            ui.tooltip = Some(detail_tip(inner, primary));
+        if let Some(text) = back {
+            let button = Rect::new(
+                inner.right() - text.len() as u16,
+                inner.y,
+                text.len() as u16,
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(text).style(theme.fg(Tone::Accent).add_modifier(Modifier::BOLD)),
+                button,
+            );
+            ui.fullscreen_back = Some(button);
+        }
+        if separate_identity && let Some(id) = identity {
+            f.render_widget(
+                Paragraph::new(fit(&id, inner.width as usize, &theme)).style(theme.fg(Tone::Info)),
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            );
         }
         Rect::new(
             inner.x,
-            inner.y + 1,
+            inner.y + rows,
             inner.width,
-            inner.height.saturating_sub(1),
+            inner.height.saturating_sub(rows),
         )
     } else {
         inner

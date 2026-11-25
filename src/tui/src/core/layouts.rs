@@ -170,6 +170,7 @@ pub enum ViewMode {
     Tiles,
     Wall,
     Cube,
+    Map,
     Focus,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +208,8 @@ impl Sizes {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct View {
     #[serde(default)]
+    pub map: Vec<super::map_layout::Card>,
+    #[serde(default)]
     pub mode: ViewMode,
     #[serde(default)]
     pub pins: Vec<TerminalRef>,
@@ -219,6 +222,7 @@ pub struct View {
 }
 impl View {
     pub fn validate(&self) -> Result<()> {
+        super::map_layout::validate(&self.map)?;
         if self.pins.len() > 64 {
             return Err("At most 64 terminals may be pinned".into());
         }
@@ -233,6 +237,27 @@ impl View {
         }
         for (key, value) in &self.preferences {
             let allowed: &[&str] = match key.as_str() {
+                "map_native" => {
+                    super::map_layout::native_baselines(value)?;
+                    continue;
+                }
+                "map_split" => &["off", "columns", "rows"],
+                "map_primary" | "map_peer" => {
+                    if !value
+                        .as_str()
+                        .is_some_and(|v| v.len() <= 4096 && !v.chars().any(char::is_control))
+                    {
+                        return Err("Invalid Tetris pane reference".into());
+                    }
+                    continue;
+                }
+                "map_ratio" => {
+                    if !value.as_u64().is_some_and(|v| (10..=90).contains(&v)) {
+                        return Err("Invalid workspace divider ratio".into());
+                    }
+                    continue;
+                }
+                "palette" => &["midnight", "charcoal", "ocean", "forest", "violet"],
                 "backdrop" => &["glow", "art", "art-bright", "off"],
                 "order" => &["activity", "layout"],
                 "saver" | "details" | "screen" | "pinned" | "recent" | "badges" | "vitals"
