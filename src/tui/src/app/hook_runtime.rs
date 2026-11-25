@@ -224,20 +224,15 @@ fn private_directory(path: &Path) -> Result<()> {
 fn private_directory(path: &Path) -> Result<()> {
     crate::platform::validate_private_dir(path).map_err(|_| Error::PrivateState)
 }
+#[cfg(not(windows))]
+pub(crate) fn same_local_path(left: &Path, right: &Path) -> bool {
+    left == right
+}
 /// Windows paths can differ by case, slash, or a verbatim `\\?\` prefix and
 /// still name one file. This does not resolve reparse points or `..`.
+#[cfg(windows)]
 pub(crate) fn same_local_path(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        windows_path_key(left).is_some_and(|key| windows_path_key(right) == Some(key))
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    left == right || windows_path_key(left).is_some_and(|key| windows_path_key(right) == Some(key))
 }
 #[cfg(windows)]
 fn windows_path_key(path: &Path) -> Option<String> {

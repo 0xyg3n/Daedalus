@@ -518,6 +518,7 @@ mod tests {
                 ("user.name", "Fixture"),
                 ("user.email", "fixture@example.invalid"),
                 ("commit.gpgSign", "false"),
+                ("core.autocrlf", "false"),
                 ("core.hooksPath", "disabled-fixture-hooks"),
             ] {
                 git(&root, &["config", "--local", k, v]).unwrap();

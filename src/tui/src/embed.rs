@@ -1963,7 +1963,21 @@ fn main() {
         assert!(text.contains("\"row\":2"));
         assert_eq!(embed.mode, Mode::Observe);
         embed.detach();
-        std::fs::remove_dir_all(dir).unwrap();
+        // Detach reaps the mock client asynchronously. Windows can deny deletion
+        // of its executable until the process exits.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => break,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("Could not remove the Herdr test directory: {err}"),
+            }
+        }
     }
     #[test]
     fn native_observer_wheel_uses_saved_rows_and_keeps_history_notices_local() {

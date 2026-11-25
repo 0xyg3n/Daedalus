@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0-beta.63 (unreleased)
+## 0.2.0-beta.63
 
 Changes since the public 0.2.0-beta.51 prerelease.
 
