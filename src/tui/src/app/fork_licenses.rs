@@ -131,10 +131,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-license-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let catalog = root.join("codex-licenses.json");
         layouts::write_private(&catalog,&serde_json::to_vec(&json!({"default":"first","licenses":{"first":{"home":root,"email":"fixture@example.invalid","no_failover":true},"second":{"home":root}},"seats":{"fixture":"first"}})).unwrap()).unwrap();
@@ -158,10 +155,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-license-invalid-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let catalog = root.join("codex-licenses.json");
         let environment = [(

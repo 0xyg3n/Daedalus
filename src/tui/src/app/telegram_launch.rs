@@ -403,10 +403,7 @@ mod tests {
         let file = std::env::temp_dir().join(format!(
             "daedalus-launch-identity-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         std::fs::write(&file, b"v1").unwrap();
         let first = daemon_identity_of(&file).unwrap();

@@ -73,6 +73,9 @@ daedalus telegram status --config-dir /absolute/private/instance
 The TUI offers reviewed start and stop actions. Local automation can preview
 `daedalus telegram start|stop`, then apply with the returned approval digest.
 These actions request a transition; check status to confirm the result.
+On Linux, stop signals the pinned process through `pidfd`. On macOS and Windows,
+stop writes a private request naming the service's exact process incarnation; the
+service consumes it at its next stop poll and then releases ownership.
 `daedalus telegram serve --config-dir ABS` runs the service in the foreground.
 See [the command reference](COMMANDS.md#telegram) for complete syntax.
 

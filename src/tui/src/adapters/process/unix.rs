@@ -64,22 +64,30 @@ fn drain(stream: &mut impl Read, bytes: &mut Vec<u8>, remaining: &mut usize) -> 
 /// ETXTBSY means exec did not start. Retry only that pre-execution race,
 /// within both the caller's timeout and a 50 ms ceiling. Never retry a child.
 fn spawn_with_busy_retry<T>(
-    mut spawn: impl FnMut() -> io::Result<T>,
+    spawn: impl FnMut() -> io::Result<T>,
     budget: Duration,
 ) -> io::Result<T> {
     let start = Instant::now();
+    busy_retry(spawn, budget, || start.elapsed(), thread::sleep)
+}
+/// The retry policy with an injected clock, so tests do not depend on how
+/// precisely a loaded host honours short sleeps.
+fn busy_retry<T>(
+    mut spawn: impl FnMut() -> io::Result<T>,
+    budget: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> io::Result<T> {
     let budget = budget.min(Duration::from_millis(50));
     loop {
         match spawn() {
-            Err(error)
-                if error.raw_os_error() == Some(libc::ETXTBSY) && start.elapsed() < budget =>
-            {
-                let remaining = budget.saturating_sub(start.elapsed());
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && elapsed() < budget => {
+                let remaining = budget.saturating_sub(elapsed());
                 if remaining.is_zero() {
                     return Err(error);
                 }
-                thread::sleep(remaining.min(Duration::from_millis(5)));
-                if start.elapsed() >= budget {
+                sleep(remaining.min(Duration::from_millis(5)));
+                if elapsed() >= budget {
                     return Err(error);
                 }
             }
@@ -284,8 +292,10 @@ mod tests {
     }
     #[test]
     fn spawn_retry_is_limited_to_not_started_text_busy() {
+        // A simulated clock that advances only by the requested sleeps.
+        let clock = std::cell::Cell::new(Duration::ZERO);
         let mut calls = 0;
-        let result = spawn_with_busy_retry(
+        let result = busy_retry(
             || {
                 calls += 1;
                 if calls < 3 {
@@ -295,10 +305,27 @@ mod tests {
                 }
             },
             Duration::from_secs(1),
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
         )
         .unwrap();
         assert_eq!(result, 42);
         assert_eq!(calls, 3);
+        // The window is capped at 50 ms however long the caller allows.
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut calls = 0;
+        let result: io::Result<()> = busy_retry(
+            || {
+                calls += 1;
+                Err(io::Error::from_raw_os_error(libc::ETXTBSY))
+            },
+            Duration::from_secs(1),
+            || clock.get(),
+            |step| clock.set(clock.get() + step),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 10);
+        assert_eq!(clock.get(), Duration::from_millis(50));
         let mut calls = 0;
         let result: io::Result<()> = spawn_with_busy_retry(
             || {

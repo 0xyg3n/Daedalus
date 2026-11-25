@@ -232,6 +232,16 @@ coverage. No hosted workflow is required.
 `scripts/check.sh` runs `cargo fmt --check`, `cargo test --locked --all-targets`,
 `cargo clippy -D warnings` and a release build for `src/tui`.
 
+GitHub CI (`native-checks.yml`) runs these checks on Linux, Windows and macOS and
+uploads each platform's release files with checksums. macOS uploads a universal
+DMG and thin `daedalus-<version>-<arch>-macos` update executables. They are
+ad-hoc signed unless a push to `main` has the `MACOS_CERTIFICATE_P12`,
+`MACOS_CERTIFICATE_PASSWORD` and `MACOS_SIGNING_IDENTITY` secrets (Developer ID
+Application); `MACOS_NOTARY_KEY` (App Store Connect API key, base64),
+`MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER` also notarize and staple the
+DMG. Pull requests from forks never receive these secrets.
+`./scripts/homebrew-cask.sh` prints a cask for the published universal DMG.
+
 Tests use isolated state, synthetic hook events, local HTTP fixtures for Telegram
 and Hindsight, and private tmux and shell fixtures. They never start a real bot,
 send messages, touch user sessions or make paid model requests.

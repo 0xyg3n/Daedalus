@@ -607,10 +607,7 @@ pub(crate) mod fixtures {
             let root = std::env::temp_dir().join(format!(
                 "daedalus-dashboard-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&root.join("marker"), b"fixture").unwrap();
             Self(root)

@@ -141,10 +141,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "daedalus-usage-api-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             crate::core::layouts::write_private(&path.join("fixture"), b"fixture").unwrap();
             Self(path)

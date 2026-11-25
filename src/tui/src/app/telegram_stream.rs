@@ -1271,18 +1271,11 @@ mod tests {
     }
     #[test]
     fn restart_preserves_cursor_and_stop_epochs_without_replay() {
-        use std::{
-            fs,
-            os::unix::fs::PermissionsExt,
-            time::{SystemTime, UNIX_EPOCH},
-        };
+        use std::{fs, os::unix::fs::PermissionsExt};
         let directory = std::env::temp_dir().join(format!(
             "daedalus-stream-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         fs::create_dir(&directory).unwrap();
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();

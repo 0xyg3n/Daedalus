@@ -188,10 +188,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!(
                 "daedalus-agent-activity-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             let registration:Registration=serde_json::from_value(json!({"version":1,"id":"fixture","directory":root,
                 "scope":{"instance":"fixture","terminal":{"backend":"herdr","endpoint":"fixture","pane":"pane","generation":"generation"},"harness":"claude","conversation":"12345678-abcd-4000-8000-123456789abc"},

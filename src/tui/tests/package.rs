@@ -1,11 +1,16 @@
 #![cfg(unix)]
 //! Repository and installation acceptance without a Python runtime or network.
+#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::symlink;
+#[cfg(target_os = "linux")]
+use std::process::Output;
 use std::{
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -209,6 +214,7 @@ impl Fixture {
         fs::create_dir(&path).unwrap();
         Self(path)
     }
+    #[cfg(target_os = "linux")]
     fn install(&self, arguments: &[&str]) -> Output {
         Command::new("/bin/bash")
             .arg(root().join("install.sh"))
@@ -223,6 +229,7 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    #[cfg(target_os = "linux")]
     fn binary(&self) -> (PathBuf, String) {
         let binary = self.0.join("binary");
         fs::copy(env!("CARGO_BIN_EXE_daedalus-tui"), &binary).unwrap();
@@ -235,6 +242,8 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+// install.sh is the Linux native installer.
+#[cfg(target_os = "linux")]
 #[test]
 fn installer_preview_rejects_retired_runtime_and_writes_nothing() {
     let fixture = Fixture::new();
@@ -254,6 +263,8 @@ fn installer_preview_rejects_retired_runtime_and_writes_nothing() {
     );
     assert!(!fixture.0.join("prefix with spaces").exists());
 }
+// install.sh is the Linux native installer.
+#[cfg(target_os = "linux")]
 #[test]
 fn installer_checks_hash_architecture_symlinks_and_existing_ownership() {
     let fixture = Fixture::new();
@@ -415,6 +426,8 @@ fn source_wrappers_always_use_native_binary_and_fail_closed_without_it() {
     }
 }
 
+// install.sh is the Linux native installer.
+#[cfg(target_os = "linux")]
 #[test]
 fn committed_source_install_uses_locked_release_and_never_calls_python() {
     let fixture = Fixture::new();
@@ -496,4 +509,27 @@ cp "$FIXTURE_ELF" "$target/release/daedalus-tui"
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("daedalus "));
     assert_eq!(fs::read_dir(prefix.join("bin")).unwrap().count(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cli_installer_plan_writes_nothing() {
+    let fixture = Fixture::new();
+    let prefix = fixture.0.join("prefix");
+    let output = Command::new("/bin/bash")
+        .arg(root().join("scripts/install-macos.sh"))
+        .args(["--plan", "--prefix"])
+        .arg(&prefix)
+        .env_clear()
+        .env("HOME", &fixture.0)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("macOS"));
+    assert!(!prefix.exists());
 }

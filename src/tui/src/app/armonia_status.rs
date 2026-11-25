@@ -140,6 +140,83 @@ fn incarnation(bytes: &[u8]) -> Option<String> {
     }
     Some(fields.get(19)?.to_string())
 }
+/// Process IDs to observe: procfs entries, or libproc on macOS's real root.
+#[cfg(unix)]
+fn process_ids(proc_root: &Path) -> Result<Vec<u32>> {
+    #[cfg(target_os = "macos")]
+    if proc_root == Path::new("/proc") {
+        let pids = crate::platform::process_list(proc_root);
+        if pids.is_empty() {
+            return Err("Process observation unavailable".into());
+        }
+        return Ok(pids);
+    }
+    let entries = fs::read_dir(proc_root).map_err(|_| "Process observation unavailable")?;
+    let mut pids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "Process observation incomplete")?;
+        if let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+/// An owned, live process running the image `want` (device, inode): its image
+/// metadata, incarnation and NUL-joined arguments. Other processes are skipped
+/// before their arguments are read.
+#[cfg(unix)]
+fn observe(
+    proc_root: &Path,
+    pid: u32,
+    want: (u64, u64),
+) -> Result<Option<(fs::Metadata, String, Vec<u8>)>> {
+    #[cfg(target_os = "macos")]
+    if proc_root == Path::new("/proc") {
+        use crate::platform::{process_argv, process_executable, process_info};
+        let Some(info) = process_info(proc_root, pid) else {
+            return Ok(None);
+        };
+        if info.uid != unsafe { libc::geteuid() } || matches!(info.state, 'Z' | 'X') {
+            return Ok(None);
+        }
+        let Some(exe) = process_executable(proc_root, pid).and_then(|p| fs::metadata(p).ok())
+        else {
+            return Ok(None);
+        };
+        if (exe.dev(), exe.ino()) != want {
+            return Ok(None);
+        }
+        let Some(argv) = process_argv(proc_root, pid) else {
+            return Ok(None);
+        };
+        let command = argv.join("\0").into_bytes();
+        if command.len() > 65536 {
+            return Err("Process record oversized".into());
+        }
+        return Ok(Some((exe, info.start.to_string(), command)));
+    }
+    let process = proc_root.join(pid.to_string());
+    let Ok(owner) = fs::metadata(&process) else {
+        return Ok(None);
+    };
+    if owner.uid() != unsafe { libc::geteuid() } {
+        return Ok(None);
+    }
+    let Ok(exe) = fs::metadata(process.join("exe")) else {
+        return Ok(None);
+    };
+    if (exe.dev(), exe.ino()) != want {
+        return Ok(None);
+    }
+    let Some(start) = incarnation(&bounded(&process.join("stat"))?) else {
+        return Ok(None);
+    };
+    Ok(Some((exe, start, bounded(&process.join("cmdline"))?)))
+}
 #[cfg(unix)]
 fn services(directory: &Path, proc_root: &Path) -> Result<Value> {
     let Some(value) = document(&directory.join("armonia-observer.json"))? else {
@@ -165,37 +242,15 @@ fn services(directory: &Path, proc_root: &Path) -> Result<Value> {
         .map_err(|_| "Observer script unavailable")?;
     let config = fs::canonicalize(directory).map_err(|_| "Configuration unavailable")?;
     let mut rows = Vec::new();
-    let entries = fs::read_dir(proc_root).map_err(|_| "Process observation unavailable")?;
-    for (index, entry) in entries.enumerate() {
+    let pids = process_ids(proc_root)?;
+    for (index, pid) in pids.into_iter().enumerate() {
         if index >= 8192 {
             return Err("Process observation limit exceeded".into());
         }
-        let entry = entry.map_err(|_| "Process observation incomplete")?;
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
+        let want = (executable.dev(), executable.ino());
+        let Some((exe, start, command)) = observe(proc_root, pid, want)? else {
             continue;
         };
-        let process = entry.path();
-        let Ok(owner) = fs::metadata(&process) else {
-            continue;
-        };
-        if owner.uid() != unsafe { libc::geteuid() } {
-            continue;
-        }
-        let Ok(exe) = fs::metadata(process.join("exe")) else {
-            continue;
-        };
-        if (exe.dev(), exe.ino()) != (executable.dev(), executable.ino()) {
-            continue;
-        }
-        let before = bounded(&process.join("stat"))?;
-        let Some(start) = incarnation(&before) else {
-            continue;
-        };
-        let command = bounded(&process.join("cmdline"))?;
         let args = command
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())
@@ -255,12 +310,12 @@ fn services(directory: &Path, proc_root: &Path) -> Result<Value> {
             .ok()
             .filter(|n| n.is_finite() && *n > 0.0);
         let Some(interval) = interval else { continue };
-        let after = fs::metadata(process.join("exe")).map_err(|_| "Process disappeared")?;
-        if incarnation(&bounded(&process.join("stat"))?).as_ref() != Some(&start)
-            || bounded(&process.join("cmdline"))? != command
-            || (exe.dev(), exe.ino()) != (after.dev(), after.ino())
-        {
-            return Err("Process changed during observation".into());
+        match observe(proc_root, pid, want)? {
+            Some((after, again, current))
+                if again == start
+                    && current == command
+                    && (exe.dev(), exe.ino()) == (after.dev(), after.ino()) => {}
+            _ => return Err("Process changed during observation".into()),
         }
         rows.push(json!({"pid":pid,"start":start,"mine":true,"session":options.get("--session").unwrap_or(&"unknown (environment not read)"),"interval":interval,"once":once}));
     }
@@ -310,13 +365,12 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "daedalus-armonia-{}-{}",
+                "daedalus-armonia-{}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             write_private(&path.join("marker"), b"").unwrap();
             fs::create_dir(path.join("proc")).unwrap();

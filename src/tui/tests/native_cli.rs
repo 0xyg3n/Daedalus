@@ -1191,12 +1191,12 @@ fn whole_discovery_deadline_stops_owned_queries_without_accepting_late_results()
     config.discovery.automatic = false;
     config.discovery.herdr_sessions = vec!["b".into(), "a".into()];
     config.runtime.discovery_workers = 1;
-    config.runtime.discovery_timeout_ms = 150;
-    config.runtime.terminal_query_timeout_ms = 2000;
+    config.runtime.discovery_timeout_ms = 1000;
+    config.runtime.terminal_query_timeout_ms = 5000;
     fs::write(&path, config.encode().unwrap()).unwrap();
     let executable = f.0.join("inert-herdr");
     let calls = f.0.join("calls");
-    fs::write(&executable, "#!/bin/sh\nprintf '%s:start\\n' \"$2\" >>\"$FIXTURE_CALLS\"\n/bin/sleep 0.2\nprintf '{\"result\":{\"panes\":[{\"pane_id\":\"%s\",\"terminal_id\":\"generation\"}]}}\\n' \"$2\"\nprintf '%s:done\\n' \"$2\" >>\"$FIXTURE_CALLS\"\n").unwrap();
+    fs::write(&executable, "#!/bin/sh\nprintf '%s:start\\n' \"$2\" >>\"$FIXTURE_CALLS\"\n/bin/sleep 2\nprintf '{\"result\":{\"panes\":[{\"pane_id\":\"%s\",\"terminal_id\":\"generation\"}]}}\\n' \"$2\"\nprintf '%s:done\\n' \"$2\" >>\"$FIXTURE_CALLS\"\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let run = || {
         let output = Command::new(env!("CARGO_BIN_EXE_daedalus-tui"))
@@ -1224,7 +1224,7 @@ fn whole_discovery_deadline_stops_owned_queries_without_accepting_late_results()
     assert!(partial["errors"].to_string().contains("deadline"));
     assert_eq!(fs::read_to_string(&calls).unwrap(), "a:start\n");
     assert_eq!(fs::read(&path).unwrap(), before);
-    config.runtime.discovery_timeout_ms = 2000;
+    config.runtime.discovery_timeout_ms = 8000;
     fs::write(&path, config.encode().unwrap()).unwrap();
     fs::write(&calls, []).unwrap();
     let complete = run();
@@ -2734,10 +2734,10 @@ fn offline_cutover_cli_keeps_producer_attachments_metadata_and_uncertain_rows_un
     config.tmux_sockets.clear();
     SetupPlan::fresh(&source, config).unwrap().apply().unwrap();
     let bot = 8_100_000_000_000_000i64 + std::process::id() as i64;
-    let owner = PathBuf::from(format!(
-        "/tmp/daedalus-service-{}/telegram-{bot}.lock",
-        unsafe { libc::geteuid() }
-    ));
+    let owner_root = std::fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    let owner = owner_root
+        .join(format!("daedalus-service-{}", unsafe { libc::geteuid() }))
+        .join(format!("telegram-{bot}.lock"));
     assert!(
         !owner.exists(),
         "Fixture refuses to touch an existing owner identity"
@@ -2838,6 +2838,15 @@ fn offline_cutover_cli_keeps_producer_attachments_metadata_and_uncertain_rows_un
             .env_clear()
             .env("PATH", "/nonexistent")
             .env("HOME", &f.0)
+            // The child cannot inherit the macOS resolved temp root.
+            .env(
+                "TMPDIR",
+                if cfg!(target_os = "macos") {
+                    "/private/tmp"
+                } else {
+                    "/tmp"
+                },
+            )
             .current_dir(&f.0)
             .args(args)
             .output()
@@ -3351,6 +3360,8 @@ fn gateway_exec_reads_private_key_only_inside_verified_fake_harness_process() {
     assert!(!String::from_utf8_lossy(&result.stderr).contains("PRIVATE-GATEWAY-KEY"));
 }
 
+// install.sh is the Linux native installer; macOS has no release installer yet.
+#[cfg(target_os = "linux")]
 #[test]
 fn native_package_installs_one_binary_and_fresh_config_without_python() {
     use sha2::{Digest, Sha256};

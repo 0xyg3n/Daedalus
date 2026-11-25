@@ -93,6 +93,47 @@ AGY (`agy`) shows up in the inventory and can be watched, attached, previewed an
 controlled in a native Daedalus, tmux or Herdr terminal. Start it with its own CLI.
 It has no Daedalus sign-in, hooks, readiness or resume/fork support.
 
+## macOS boundaries
+
+macOS uses POSIX PTYs and the native Daedalus terminals backend. Homebrew installs
+system tools, npm installs Node harnesses into `~/.local`, and `npx` bootstraps npm
+when only the runner is present. The TUI, CLI, configuration, routes, native PTYs,
+agent identity, fresh instance import, tmux/Herdr process identity, and hook
+invocation/ancestry work through the macOS process backend (`libproc`/`sysctl`).
+
+The same backend provides:
+
+- Read-only discovery of external terminals owned by the current user.
+- Native terminal foreground command and working directory.
+- Codex profile-wide hook binding and Codex/Grok open-file readiness, using the
+  descriptor table from `libproc` in place of `/proc/PID/fd`. These are covered
+  by fixture and current-process tests; live Codex and Grok sessions on macOS
+  have not been verified yet.
+- Telegram service start, status and stop. macOS has no `pidfd`, so stop never
+  signals a PID: it writes a private request naming the service's exact process
+  incarnation, which only that process consumes before shutting down. Like any
+  stop, it is submitted, not complete, until ownership is released.
+- OpenCode guided local-server enrollment: the server is the one direct child
+  of the verified UI with the same executable and `serve --service`, found through
+  `proc_listchildpids`. Tested with a live process tree, not a live OpenCode.
+- Legacy cutover process checks. Some macOS releases hide the environment of
+  Apple platform binaries; a matching legacy process whose `CONFIG_DIR` cannot be
+  read counts as belonging to the instance and blocks cutover until its
+  supervisor stops it. A process of this user that `libproc` cannot describe
+  also blocks cutover; other users' processes are out of scope, as on Linux.
+- In-app updates for command-line installs (`daedalus-<version>-<arch>-macos`).
+  `Daedalus.app` updates through a newer DMG.
+
+- Native-terminal Telegram feeding: `tests/native_feeder.rs` runs a real native
+  terminal, hook lifecycle and feeder on macOS with a private shell fixture and no
+  bot. Session metadata, dashboard self-terminal detection, guided launch and the
+  Claude command adapter also read processes through `libproc`.
+
+The following remain unverified on macOS:
+
+- Live Codex, Grok, OpenCode and Claude sessions, and a live Telegram bot.
+- `install.sh`; use `scripts/install-macos.sh` or the DMG instead.
+
 ## Native Windows boundaries
 
 Windows x64 uses built-in ConPTY terminals by default. Herdr is optional. Configure
@@ -110,8 +151,11 @@ Terminal controls and harness hooks have separate feature support:
 | Herdr duplicate attachment view | Unavailable; use read-only Watch |
 | Native session resume/fork | Available where the installed harness exposes the required session operation |
 
-Linux and Windows have automated tests and native terminal checks. See
-[installation](INSTALL.md#native-windows-install) for setup and
+Linux, Windows and macOS have automated tests and native terminal checks.
+Tests that read Linux `/proc` fixtures directly stay Linux-only; macOS tests use the
+same fixtures through the process backend or the live current process. See
+[installation](INSTALL.md#macos-install) for macOS setup,
+[Windows setup](INSTALL.md#native-windows-install) and
 [testing](ARCHITECTURE.md#testing) for the contributor workflow.
 
 OpenCode local-server enrollment and saved-binding reconnect share the native identity metadata policy in **Terminals and discovery**. Linux reads child lists, command arguments and process stability metadata through bounded streams; exhausted process, scan, entry, byte or time budgets refuse enrollment. Reconnect and Telegram registration lookup count ignored files and parse registration JSON within the cumulative budget. A partial or ambiguous scan cannot choose a server or conversation. Windows subtree process admission is cumulative across repeated scans.

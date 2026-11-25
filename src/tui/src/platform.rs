@@ -4,6 +4,10 @@
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+#[cfg(unix)]
+mod process;
+#[cfg(unix)]
+pub use process::*;
 
 /// Pipe-based helpers must not allocate a Windows console or take desktop focus.
 /// Interactive terminals and the installer keep their own launch policy.

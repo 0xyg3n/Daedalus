@@ -1184,10 +1184,10 @@ impl Drop for ServiceSignals {
 pub(crate) fn global_directory() -> Result<std::path::PathBuf> {
     #[cfg(unix)]
     {
-        Ok(std::path::PathBuf::from(format!(
-            "/tmp/daedalus-service-{}",
-            unsafe { libc::geteuid() }
-        )))
+        // Resolve the platform temp root: macOS /tmp is a symlink to /private/tmp,
+        // and state-path checks reject symlinked components.
+        let root = std::fs::canonicalize("/tmp").unwrap_or_else(|_| "/tmp".into());
+        Ok(root.join(format!("daedalus-service-{}", unsafe { libc::geteuid() })))
     }
     #[cfg(windows)]
     {
@@ -1258,10 +1258,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "daedalus-reload-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let registration = Registration {
             version: 1,
@@ -1431,10 +1428,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-cutover-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         crate::core::layouts::write_private(
             &root.join("migration.json"),
@@ -1655,10 +1649,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-owner-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let global = root.join("global");
         let one = root.join("one");
@@ -1973,10 +1964,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-start-config-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         struct Cleanup(std::path::PathBuf);
         impl Drop for Cleanup {

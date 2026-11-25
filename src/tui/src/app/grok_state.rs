@@ -95,42 +95,14 @@ mod unix {
         }
         Ok(file)
     }
-    fn fd_matches(proc_dir: &Path, meta: &Metadata) -> bool {
-        let directory = proc_dir.join("fd");
-        let Ok(info) = fs::symlink_metadata(&directory) else {
-            return false;
-        };
-        if !info.is_dir() || info.uid() != unsafe { libc::geteuid() } {
-            return false;
-        }
-        let Ok(entries) = fs::read_dir(directory) else {
-            return false;
-        };
-        let mut found = false;
-        for (index, entry) in entries.enumerate() {
-            if index >= 4096 {
-                return false;
-            }
-            let Ok(entry) = entry else {
-                return false;
-            };
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
-            }
-            // Following /proc/PID/fd/N is intentional: kernel-held inode evidence.
-            if let Ok(open) = fs::metadata(entry.path())
-                && open.is_file()
-                && open.dev() == meta.dev()
-                && open.ino() == meta.ino()
-            {
-                found = true;
-            }
-        }
-        found
+    /// The process holds this exact inode open (Linux `/proc/PID/fd`, macOS
+    /// `libproc`); an unreadable or oversized descriptor table is not proof.
+    fn fd_matches(proc_root: &Path, pid: u32, meta: &Metadata) -> bool {
+        crate::platform::open_files(proc_root, pid, 4096).is_some_and(|files| {
+            files
+                .iter()
+                .any(|f| f.device == meta.dev() && f.inode == meta.ino())
+        })
     }
     pub(super) fn proof(
         r: &Registration,
@@ -159,16 +131,16 @@ mod unix {
         }
         r.validate()
             .map_err(|_| "Invalid native proof registration")?;
-        let proc_dir = proc_root.join(process.pid.to_string());
-        let info = fs::symlink_metadata(&proc_dir).map_err(|_| "Native process unavailable")?;
-        if !info.is_dir() || info.uid() != unsafe { libc::geteuid() } {
+        let owner = crate::platform::process_info(proc_root, process.pid)
+            .ok_or("Native process unavailable")?;
+        if owner.uid != unsafe { libc::geteuid() } {
             return Ok(None);
         }
         hook_runtime::verify_process(process, proc_root)
             .map_err(|_| "Native process incarnation changed")?;
         let mut events = private(path)?;
         let before = events.metadata().map_err(|_| "Native log unavailable")?;
-        if before.len() == 0 || !fd_matches(&proc_dir, &before) {
+        if before.len() == 0 || !fd_matches(proc_root, process.pid, &before) {
             return Ok(None);
         }
         let summary_path = path
@@ -249,7 +221,7 @@ mod unix {
         if stamp(&before) != stamp(&event_now)
             || stamp(&summary_before) != stamp(&summary_now)
             || stamp(&before) != stamp(&events.metadata().map_err(|_| "Native log unavailable")?)
-            || !fd_matches(&proc_dir, &event_now)
+            || !fd_matches(proc_root, process.pid, &event_now)
         {
             return Ok(None);
         }
@@ -295,10 +267,7 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = crate::test_support::unique_nanos();
             let root =
                 std::env::temp_dir().join(format!("dd-grok-proof-{}-{unique}", std::process::id()));
             let transcript = root.join("native/session/events.jsonl");

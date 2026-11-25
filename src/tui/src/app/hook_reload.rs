@@ -297,10 +297,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-reload-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let a = root.join("a.json");
         let b = root.join("b.json");

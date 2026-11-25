@@ -237,10 +237,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-route-cli-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         super::super::setup::SetupPlan::fresh(
             &root,

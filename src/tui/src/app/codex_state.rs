@@ -3,18 +3,19 @@
 use super::hook_runtime::Registration;
 use std::path::Path;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn idle_proof(_: &Registration, _: &Path) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn idle_proof(r: &Registration, proc_root: &Path) -> Result<Option<String>, String> {
-    linux::proof(r, proc_root)
+    held::proof(r, proc_root)
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+/// Open-file evidence: Linux `/proc/PID/fd`, macOS `libproc` descriptors.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod held {
     use super::*;
     use crate::app::{
         hook_runtime,
@@ -107,23 +108,16 @@ mod linux {
             return Ok(None);
         };
         hook_runtime::verify_process(process, proc_root).map_err(|_| "Native process changed")?;
-        let fd_dir = proc_root.join(process.pid.to_string()).join("fd");
-        let entries = fs::read_dir(&fd_dir).map_err(|_| "Native open files unavailable")?;
+        let Some(files) = crate::platform::open_files(proc_root, process.pid, 4096) else {
+            return Ok(None);
+        };
+        let holds = |device: u64, inode: u64| {
+            crate::platform::open_files(proc_root, process.pid, 4096)
+                .is_some_and(|files| files.iter().any(|f| (f.device, f.inode) == (device, inode)))
+        };
         let mut found = None;
-        for (index, entry) in entries.enumerate() {
-            if index >= 4096 {
-                return Ok(None);
-            }
-            let entry = entry.map_err(|_| "Native open files unavailable")?;
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .bytes()
-                .all(|b| b.is_ascii_digit())
-            {
-                continue;
-            }
-            let Ok(path) = fs::read_link(entry.path()) else {
+        for held_file in files {
+            let Some(path) = held_file.path else {
                 continue;
             };
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
@@ -137,10 +131,7 @@ mod linux {
             }
             let Ok(mut f) = open(&path) else { continue };
             let before = f.metadata().map_err(|_| "Native rollout unavailable")?;
-            let Ok(fd) = fs::metadata(entry.path()) else {
-                continue;
-            };
-            if (before.dev(), before.ino()) != (fd.dev(), fd.ino()) {
+            if (before.dev(), before.ino()) != (held_file.device, held_file.inode) {
                 continue;
             }
             let mut head = Vec::new();
@@ -177,10 +168,9 @@ mod linux {
             let current = open(&path)?
                 .metadata()
                 .map_err(|_| "Native rollout unavailable")?;
-            let held = fs::metadata(entry.path()).map_err(|_| "Native rollout closed")?;
             if stamp(&before) != stamp(&current)
                 || stamp(&before) != stamp(&f.metadata().map_err(|_| "Native rollout unavailable")?)
-                || (held.dev(), held.ino()) != (before.dev(), before.ino())
+                || !holds(before.dev(), before.ino())
             {
                 return Ok(None);
             }

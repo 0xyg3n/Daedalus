@@ -237,10 +237,7 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let unique = crate::test_support::unique_nanos();
             let directory = std::env::temp_dir().join(format!(
                 "daedalus-telegram-cli-{}-{unique}-{}",
                 std::process::id(),

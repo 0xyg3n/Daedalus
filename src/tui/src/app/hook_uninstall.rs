@@ -276,10 +276,7 @@ pub(crate) mod tests {
             let directory = std::env::temp_dir().join(format!(
                 "daedalus-uninstall-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             let profile = directory.join("native/settings.json");
             let registration: hook_runtime::Registration = serde_json::from_value(json!({

@@ -337,10 +337,7 @@ mod tests {
                 "daedalus-pi-session-{}-{}-{}",
                 std::process::id(),
                 NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
+                crate::test_support::unique_nanos()
             ));
             layouts::write_private(&root.join("marker"), b"").unwrap();
             let registration = Registration {
@@ -530,10 +527,7 @@ mod parent_metadata_tests {
         let root = std::env::temp_dir().join(format!(
             "daedalus-pi-parent-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::test_support::unique_nanos()
         ));
         let file = root.join("arbitrary-file-name.jsonl");
         let id = "12345678-abcd-4000-8000-123456789abc";
